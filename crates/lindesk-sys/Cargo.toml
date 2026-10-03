@@ -1,0 +1,15 @@
+[package]
+name = "lindesk-sys"
+description = "Linux system access for lindesk: capability probe, cgroupfs, PSI, syscalls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+lindesk-plugin-api.workspace = true
+lindesk-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true

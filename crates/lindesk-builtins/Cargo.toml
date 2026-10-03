@@ -1,0 +1,22 @@
+[package]
+name = "lindesk-builtins"
+description = "Built-in lindesk plugins: sensors, adapters, classifiers, policies, actuators and sinks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["x11", "cosmic"]
+x11 = []
+cosmic = []
+
+[dependencies]
+lindesk-plugin-api.workspace = true
+lindesk-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true

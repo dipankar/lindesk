@@ -1,0 +1,13 @@
+[package]
+name = "lindesk-query"
+description = "lindesk telemetry lake access via DuckDB: query, catalog, compaction, retention, deletion"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

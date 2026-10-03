@@ -1,0 +1,18 @@
+[package]
+name = "lindesk-core"
+description = "Pure core of lindesk: config, resolver, safety caps, reconciler and cgroup path helpers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+lindesk-plugin-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+humantime.workspace = true
+bytesize.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,5 @@
+/target
+/target-*
+*.parquet.tmp
+__pycache__/
+/docs/book

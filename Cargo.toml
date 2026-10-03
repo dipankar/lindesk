@@ -1,0 +1,63 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dipankar/lindesk"
+authors = ["Dipankar Sarkar <me@dipankar.name>"]
+description = "macOS-style QoS for the Linux desktop: a plugin-based userspace resource governor"
+
+[workspace.dependencies]
+# internal
+lindesk-plugin-api = { path = "crates/lindesk-plugin-api", version = "0.1.0" }
+lindesk-plugin = { path = "crates/lindesk-plugin", version = "0.1.0" }
+lindesk-core = { path = "crates/lindesk-core", version = "0.1.0" }
+lindesk-host = { path = "crates/lindesk-host", version = "0.1.0" }
+lindesk-builtins = { path = "crates/lindesk-builtins", version = "0.1.0" }
+lindesk-sys = { path = "crates/lindesk-sys", version = "0.1.0" }
+lindesk-store = { path = "crates/lindesk-store", version = "0.1.0" }
+lindesk-query = { path = "crates/lindesk-query", version = "0.1.0" }
+lindesk-ipc = { path = "crates/lindesk-ipc", version = "0.1.0" }
+
+# external
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+schemars = "1.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-journald = "0.3"
+clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4.6"
+clap_mangen = "0.2"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "process", "io-util", "fs"] }
+zbus = { version = "5.19", default-features = false, features = ["tokio"] }
+rustix = { version = "1.1", features = ["process", "fs", "event", "thread", "system"] }
+libc = "0.2"
+globset = "0.4"
+humantime = "2"
+bytesize = "2"
+ulid = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+arrow-array = "60"
+arrow-schema = "60"
+parquet = { version = "60", default-features = false, features = ["arrow", "zstd"] }
+duckdb = { version = "1.10506", features = ["bundled"] }
+x11rb = "0.14"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+cosmic-protocols = { version = "0.2", default-features = false, features = ["client"] }
+tempfile = "3"
+sd-notify = "0.4"
+crossbeam-channel = "0.5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = "symbols"

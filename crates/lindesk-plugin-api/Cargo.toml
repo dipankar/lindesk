@@ -1,0 +1,15 @@
+[package]
+name = "lindesk-plugin-api"
+description = "Stable plugin API for lindesk: traits, data model and the stdio JSON-RPC protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true

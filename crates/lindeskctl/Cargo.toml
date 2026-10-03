@@ -1,0 +1,13 @@
+[package]
+name = "lindeskctl"
+description = "lindesk command-line interface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+lindesk-plugin-api.workspace = true
+lindesk-core.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "lindesk-store"
+description = "lindesk telemetry writer: buffered, hive-partitioned Parquet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+lindesk-plugin-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
