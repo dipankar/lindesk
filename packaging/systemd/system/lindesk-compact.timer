@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly lindesk telemetry maintenance
+
+[Timer]
+OnCalendar=*-*-* *:07:00
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

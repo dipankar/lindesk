@@ -1,0 +1,14 @@
+[package]
+name = "{{name}}"
+version = "0.1.0"
+edition = "2024"
+description = "A lindesk {{kind}} plugin"
+publish = false
+
+[dependencies]
+lindesk-plugin = "0.1"
+# To build against a local lindesk checkout instead of crates.io:
+# lindesk-plugin = { path = "../lindesk/crates/lindesk-plugin" }
+
+# Keep this plugin out of any enclosing cargo workspace.
+[workspace]

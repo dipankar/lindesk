@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.lindesk.QoS1
+Exec=/usr/bin/lindesk-session
+SystemdService=lindesk-session.service

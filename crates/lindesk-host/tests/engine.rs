@@ -1,0 +1,641 @@
+//! Engine end-to-end tests: fake environment, fake sensor, in-process policies and
+//! classifiers, a recording actuator and recording sinks. No root, no real cgroups.
+
+mod common;
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use common::*;
+use lindesk_core::config::Config;
+use lindesk_host::{ActionOutcome, ClassSource, Engine, EngineOptions, MemoryEnvironment};
+use lindesk_plugin_api::*;
+
+const CARGO: &str = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-cargo-77.scope";
+const FIREFOX: &str = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome-org.mozilla.firefox-12.scope";
+const STEAM: &str = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-steam-5.scope";
+
+fn cargo() -> Target {
+    Target::user_unit(1000, "app-cargo-77.scope")
+}
+fn firefox() -> Target {
+    Target::user_unit(1000, "app-gnome-org.mozilla.firefox-12.scope")
+}
+
+struct World {
+    env: MemoryEnvironment,
+    sensor: FakeSensor,
+    act: RecordingActuator,
+}
+
+fn world() -> World {
+    let env = MemoryEnvironment::new();
+    env.spawn(77, "rustc", CARGO);
+    env.spawn(12, "firefox", FIREFOX);
+    env.watch_cgroup(CARGO);
+    env.watch_cgroup(FIREFOX);
+    env.set_mem_total(Some(16 << 30));
+    World { env, sensor: FakeSensor::default(), act: RecordingActuator::default() }
+}
+
+fn engine_with(w: &World, config: Config, opts: EngineOptions) -> Engine {
+    let mut e = Engine::new(config, Box::new(w.env.clone()), opts).unwrap();
+    let r = e.registry_mut();
+    r.register_sensor(Box::new(w.sensor.clone()), Duration::from_millis(1)).unwrap();
+    r.register_actuator(Box::new(w.act.clone()), 0).unwrap();
+    e
+}
+
+fn engine(w: &World) -> Engine {
+    engine_with(w, Config::default(), EngineOptions::new("test", Privilege::System))
+}
+
+/// Throttle batch units while io pressure is above 50; `weight` is shared so tests can
+/// change what the policy wants.
+fn throttle_policy(weight: Arc<Mutex<u64>>) -> FnPolicy {
+    FnPolicy::new("throttle", move |s| {
+        let io = s.system_pressure(Resource::Io).map_or(0.0, |p| p.some_avg10);
+        if io < 50.0 {
+            return Ok(PolicyOutput { level: Some(Level::Green), ..Default::default() });
+        }
+        let w = *lock(&weight);
+        Ok(PolicyOutput {
+            intents: s
+                .units
+                .iter()
+                .filter(|u| u.class == QosClass::Batch)
+                .map(|u| intent(&u.target, Setting::CpuWeight { value: w }, "io pressure"))
+                .collect(),
+            level: Some(Level::Yellow),
+            metrics: vec![Metric {
+                ts: s.now,
+                name: "io".into(),
+                value: io as f64,
+                labels: Default::default(),
+                plugin: String::new(),
+            }],
+        })
+    })
+    .0
+}
+
+fn rustc_is_batch() -> FnClassifier {
+    FnClassifier::new("rules", |p| Ok(if p.comm == "rustc" { class(QosClass::Batch, 1.0) } else { None })).0
+}
+
+#[test]
+fn apply_change_revert() {
+    let w = world();
+    let mut e = engine(&w);
+    let weight = Arc::new(Mutex::new(20));
+    e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).unwrap();
+    e.registry_mut().register_policy(Box::new(throttle_policy(weight.clone())), 0).unwrap();
+
+    let r = e.step(1000);
+    assert!(r.actions.is_empty());
+    assert_eq!(r.level, Level::Green);
+    assert_eq!(e.class_of(&cargo()), Some(QosClass::Batch));
+    assert!(r.events.iter().any(|ev| matches!(ev, Event::ClassSet { class: QosClass::Batch, .. })));
+
+    w.sensor.set_pressure(Resource::Io, 80.0);
+    let r = e.step(2000);
+    assert_eq!(r.level, Level::Yellow);
+    assert_eq!(r.actions.len(), 1, "{r}");
+    assert_eq!(r.actions[0].outcome, ActionOutcome::Applied);
+    assert_eq!(r.actions[0].setting, Some(Setting::CpuWeight { value: 20 }));
+    assert_eq!(r.actions[0].original, Some(Setting::CpuWeight { value: 100 }));
+    assert!(r.events.iter().any(|ev| matches!(ev, Event::LevelChanged { to: Level::Yellow, .. })));
+    assert!(r.events.iter().any(|ev| matches!(ev, Event::ActionApplied { .. })));
+
+    // Same desire: idempotent.
+    assert!(e.step(3000).actions.is_empty());
+
+    // Change.
+    *lock(&weight) = 10;
+    let r = e.step(4000);
+    assert_eq!(r.actions.len(), 1);
+    assert_eq!(r.actions[0].setting, Some(Setting::CpuWeight { value: 10 }));
+
+    // Pressure gone: revert to the original.
+    w.sensor.set_pressure(Resource::Io, 5.0);
+    let r = e.step(5000);
+    assert_eq!(r.actions.len(), 1);
+    assert_eq!(r.actions[0].outcome, ActionOutcome::Reverted);
+    assert!(e.applied().is_empty());
+    let calls = lock(&w.act.log).calls.clone();
+    assert_eq!(
+        calls,
+        vec![
+            format!("read cpu.weight {}", cargo()),
+            format!("apply cpu.weight=20 {}", cargo()),
+            format!("apply cpu.weight=10 {}", cargo()),
+            format!("reset cpu.weight {} to cpu.weight=100", cargo()),
+        ]
+    );
+}
+
+#[test]
+fn dry_run_records_but_never_applies() {
+    let w = world();
+    let mut config = Config::default();
+    config.general.dry_run = true;
+    let mut e = engine_with(&w, config, EngineOptions::new("test", Privilege::System));
+    e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).unwrap();
+    e.registry_mut().register_policy(Box::new(throttle_policy(Arc::new(Mutex::new(20)))), 0).unwrap();
+    w.sensor.set_pressure(Resource::Io, 80.0);
+    let r = e.step(1000);
+    assert_eq!(r.actions.len(), 1);
+    assert_eq!(r.actions[0].outcome, ActionOutcome::DryRun);
+    assert!(r.events.iter().any(|ev| matches!(ev, Event::ActionApplied { provenance, .. }
+        if provenance.reason.starts_with("dry run"))));
+    assert!(e.step(2000).actions.is_empty(), "dry-run state still de-duplicates");
+    assert!(lock(&w.act.log).calls.is_empty(), "actuator untouched");
+
+    let x = e.explain(&cargo());
+    assert!(x.dry_run);
+    assert_eq!(x.settings[0].value, Setting::CpuWeight { value: 20 });
+    assert_eq!(x.settings[0].provenance.reason, "io pressure");
+    assert!(x.to_string().contains("(dry run, not applied)"), "{x}");
+    assert!(e.status().dry_run);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("state.json");
+    e.save_state(&state).unwrap();
+    assert_eq!(std::fs::read_to_string(&state).unwrap(), "[]", "nothing real to restore");
+
+    w.sensor.set_pressure(Resource::Io, 1.0);
+    let r = e.step(3000);
+    assert_eq!(r.actions[0].outcome, ActionOutcome::DryRun);
+    assert!(lock(&w.act.log).calls.is_empty());
+}
+
+#[test]
+fn crash_state_is_recovered_and_restored() {
+    let w = world();
+    // Like the daemons, keep the state file on tmpfs when possible (on a busy ext4 disk
+    // every atomic replace forces a flush).
+    let tmp = std::env::var_os("XDG_RUNTIME_DIR")
+        .and_then(|d| tempfile::tempdir_in(d).ok())
+        .unwrap_or_else(|| tempfile::tempdir().unwrap());
+    let state = tmp.path().join("run/state.json");
+    let mut opts = EngineOptions::new("test", Privilege::System);
+    opts.state_path = Some(state.clone());
+    {
+        let mut e = engine_with(&w, Config::default(), opts.clone());
+        e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).unwrap();
+        e.registry_mut().register_policy(Box::new(throttle_policy(Arc::new(Mutex::new(20)))), 0).unwrap();
+        w.sensor.set_pressure(Resource::Io, 80.0);
+        assert_eq!(e.step(1000).actions.len(), 1);
+        // "Crash": the engine goes away without restoring.
+    }
+    let saved = std::fs::read_to_string(&state).unwrap();
+    assert!(saved.contains("app-cargo-77.scope"), "{saved}");
+
+    // A fresh daemon whose policy no longer wants the throttle.
+    let act2 = RecordingActuator::default();
+    let mut e = Engine::new(Config::default(), Box::new(w.env.clone()), opts.clone()).unwrap();
+    e.registry_mut().register_actuator(Box::new(act2.clone()), 0).unwrap();
+    assert_eq!(e.load_state(&state).unwrap(), 1);
+    let x = e.explain(&cargo());
+    assert_eq!(x.settings[0].original, Some(Setting::CpuWeight { value: 100 }), "original survives the crash");
+    let r = e.step(2000);
+    assert_eq!(r.actions.len(), 1);
+    assert_eq!(lock(&act2.log).calls, vec![format!("reset cpu.weight {} to cpu.weight=100", cargo())]);
+    assert_eq!(std::fs::read_to_string(&state).unwrap().trim(), "[]");
+
+    // `lindeskd --restore`: load + restore_all.
+    std::fs::write(&state, &saved).unwrap();
+    let act3 = RecordingActuator::default();
+    let mut e = Engine::new(Config::default(), Box::new(w.env.clone()), opts).unwrap();
+    e.registry_mut().register_actuator(Box::new(act3.clone()), 0).unwrap();
+    e.load_state(&state).unwrap();
+    let restored = e.restore_all();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].outcome, ActionOutcome::Reverted);
+    assert_eq!(lock(&act3.log).calls.len(), 1);
+    assert!(e.applied().is_empty());
+}
+
+#[test]
+fn classification_precedence() {
+    let w = world();
+    w.env.spawn(5, "steam", STEAM);
+    w.env.watch_cgroup(STEAM);
+    let config = Config::from_toml(
+        r#"
+        [[override]]
+        unit = "app-cargo-*.scope"
+        class = "background"
+        "#,
+    )
+    .unwrap();
+    let mut e = engine_with(&w, config.clone(), EngineOptions::new("test", Privilege::System));
+    // High priority but unsure about rustc; certain about firefox.
+    let (unsure, _) = FnClassifier::new("unsure", |p| {
+        Ok(match p.comm.as_str() {
+            "rustc" => class(QosClass::Interactive, 0.3),
+            "firefox" => class(QosClass::Interactive, 0.9),
+            _ => None,
+        })
+    });
+    let (fallback, _) = FnClassifier::new("fallback", |_| Ok(class(QosClass::Batch, 1.0)));
+    let (steam_only, steam_calls) = FnClassifier::new("steam-only", |_| Ok(class(QosClass::Critical, 1.0)));
+    e.registry_mut().register_classifier(Box::new(unsure), 90).unwrap();
+    e.registry_mut().register_classifier(Box::new(fallback), 10).unwrap();
+    let section = ClassifierSection {
+        priority: 50,
+        min_confidence: 0.5,
+        prefilter: Prefilter { comm: vec!["steam*".into()], ..Default::default() },
+    };
+    e.registry_mut().register_classifier_with(Box::new(steam_only), &section).unwrap();
+    e.step(1000);
+
+    // Override beats classifiers.
+    let x = e.explain(&cargo());
+    assert_eq!(x.class.as_ref().unwrap().class, QosClass::Background);
+    assert_eq!(x.class.as_ref().unwrap().source, ClassSource::Override { index: 0 });
+    // Highest-priority confident classifier wins.
+    let x = e.explain(&firefox());
+    assert_eq!(x.class.as_ref().unwrap().class, QosClass::Interactive);
+    assert!(matches!(&x.class.as_ref().unwrap().source, ClassSource::Classifier { plugin, .. } if plugin == "unsure"));
+    // Prefilter: only steam reached the steam-only classifier.
+    assert_eq!(*lock(&steam_calls), vec!["steam".to_string()]);
+    assert_eq!(e.class_of(&Target::user_unit(1000, "app-steam-5.scope")), Some(QosClass::Critical));
+
+    // Explicit beats override; clearing goes back.
+    e.set_class(cargo(), QosClass::Interactive, "dbus");
+    e.step(2000);
+    let x = e.explain(&cargo());
+    assert_eq!(x.class.as_ref().unwrap().source, ClassSource::Explicit { source: "dbus".into() });
+    e.clear_class(&cargo());
+    e.step(3000);
+    assert_eq!(e.class_of(&cargo()), Some(QosClass::Background));
+
+    // Without the override, the unsure (0.3 < 0.5) verdict is skipped for the fallback.
+    e.reload_config(Config::default()).unwrap();
+    e.step(4000);
+    let x = e.explain(&cargo());
+    assert_eq!(x.class.as_ref().unwrap().class, QosClass::Batch);
+    assert!(
+        matches!(&x.class.as_ref().unwrap().source, ClassSource::Classifier { plugin, .. } if plugin == "fallback")
+    );
+    assert!(x.to_string().contains("classifier 'fallback'"), "{x}");
+
+    // Nobody has an opinion → normal.
+    let env2 = MemoryEnvironment::new();
+    env2.spawn(1, "bash", "/system.slice/foo.service");
+    env2.watch_cgroup("/system.slice/foo.service");
+    let mut e2 = Engine::new(Config::default(), Box::new(env2), EngineOptions::new("t", Privilege::System)).unwrap();
+    e2.step(0);
+    let x = e2.explain(&Target::system_unit("foo.service"));
+    assert_eq!(
+        x.class.unwrap(),
+        lindesk_host::ClassDecision { class: QosClass::Normal, source: ClassSource::Default, reason: String::new() }
+    );
+}
+
+#[test]
+fn foreground_resolution() {
+    let w = world();
+    let mut e = engine(&w);
+    let (policy, seen) = FnPolicy::new("watcher", |_| Ok(PolicyOutput::default()));
+    e.registry_mut().register_policy(Box::new(policy), 0).unwrap();
+
+    e.push_event(Event::Focus { ts: 1, pid: Some(12), app_id: None, target: None, source: "test".into() });
+    let r = e.step(1000);
+    assert_eq!(r.foreground, Some(firefox()));
+    let snap = lock(&seen).last().unwrap().clone();
+    assert_eq!(snap.foreground, Some(firefox()));
+    let fg = snap.units.iter().find(|u| u.foreground).unwrap();
+    assert_eq!(fg.target, firefox());
+    assert_eq!(fg.class, QosClass::Normal, "class stays as classified");
+    assert_eq!(fg.top_comm.as_deref(), Some("firefox"));
+    match &snap.events[0] {
+        Event::Focus { target, .. } => assert_eq!(target.as_ref(), Some(&firefox()), "host filled the target"),
+        other => panic!("{other:?}"),
+    }
+
+    // By app id, from another thread through the host sender (like an adapter).
+    let tx = e.host_sender();
+    std::thread::spawn(move || {
+        tx.event(Event::Focus { ts: 2, pid: None, app_id: Some("cargo".into()), target: None, source: "x".into() })
+    })
+    .join()
+    .unwrap();
+    e.step(2000);
+    assert_eq!(e.foreground(), Some(&cargo()));
+    assert_eq!(e.status().foreground.unwrap().target, cargo());
+
+    // Interactions get targets too; a focus on an unknown pid clears the foreground.
+    e.push_event(Event::Interaction { ts: 3, pid: Some(12), target: None, end: false, source: "t".into() });
+    e.push_event(Event::Focus { ts: 3, pid: Some(9999), app_id: None, target: None, source: "t".into() });
+    e.step(3000);
+    let snap = lock(&seen).last().unwrap().clone();
+    assert!(
+        matches!(&snap.events[..], [Event::Interaction { target: Some(t), .. }, Event::Focus { target: None, .. }] if t == &firefox())
+    );
+    assert_eq!(e.foreground(), None);
+}
+
+#[test]
+fn sinks_get_their_tables() {
+    let w = world();
+    let mut config = Config::default();
+    config.telemetry.interval = Duration::from_millis(2000);
+    let mut e = engine_with(&w, config, EngineOptions::new("test", Privilege::System));
+    e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).unwrap();
+    e.registry_mut().register_policy(Box::new(throttle_policy(Arc::new(Mutex::new(20)))), 0).unwrap();
+    let events_only = RecordingSink::new("events-only", &["events"]);
+    let everything = RecordingSink::new("everything", &[]);
+    e.registry_mut().register_sink(Box::new(events_only.clone())).unwrap();
+    e.registry_mut().register_sink(Box::new(everything.clone())).unwrap();
+    w.sensor.set_pressure(Resource::Io, 80.0);
+    w.sensor.set_usage(&cargo(), Usage { cpu_usage_us: 1000, interval_ms: 1000, ..Default::default() });
+    e.push_event(Event::Focus { ts: 1, pid: Some(12), app_id: None, target: None, source: "t".into() });
+    e.step(1000);
+
+    assert_eq!(events_only.tables_seen(), ["events"].into());
+    assert_eq!(everything.tables_seen(), ["events", "metrics", "pressure", "units"].into());
+    let recs = lock(&everything.records).clone();
+    let kinds: Vec<&str> =
+        recs.iter().filter_map(|r| if let Record::Event(e) = r { Some(e.kind()) } else { None }).collect();
+    for k in ["focus", "class_set", "level", "action_applied"] {
+        assert!(kinds.contains(&k), "missing {k} in {kinds:?}");
+    }
+    let unit_row = recs
+        .iter()
+        .find_map(|r| match r {
+            Record::Unit { target, applied, usage, .. } if target == &cargo() => Some((applied.clone(), usage.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(unit_row.0, vec![Setting::CpuWeight { value: 20 }], "unit rows carry this step's applied settings");
+    assert_eq!(unit_row.1.cpu_usage_us, 1000);
+
+    // Units are recorded once per telemetry interval.
+    let units = |s: &RecordingSink| lock(&s.records).iter().filter(|r| r.table() == "units").count();
+    let n = units(&everything);
+    e.step(2000);
+    assert_eq!(units(&everything), n);
+    e.step(3000);
+    assert_eq!(units(&everything), 2 * n);
+
+    // Telemetry off: sinks get nothing.
+    let before = lock(&everything.records).len();
+    let mut c = e.config().clone();
+    c.telemetry.enabled = false;
+    e.reload_config(c).unwrap();
+    e.step(4000);
+    assert_eq!(lock(&everything.records).len(), before);
+
+    e.shutdown();
+    assert_eq!(*lock(&everything.flushed), 1);
+}
+
+#[test]
+fn safety_clamp_surfaces_in_explain() {
+    let w = world();
+    let mut e = engine(&w);
+    let (greedy, _) = FnPolicy::new("greedy", |s| {
+        Ok(PolicyOutput {
+            intents: s
+                .units
+                .iter()
+                .filter(|u| u.foreground)
+                .map(|u| intent(&u.target, Setting::UclampMin { percent: 100.0 }, "max boost"))
+                .collect(),
+            ..Default::default()
+        })
+    });
+    e.registry_mut().register_policy(Box::new(greedy), 0).unwrap();
+    e.push_event(Event::Focus { ts: 1, pid: Some(12), app_id: None, target: None, source: "t".into() });
+    let r = e.step(1000);
+    assert_eq!(r.actions[0].setting, Some(Setting::UclampMin { percent: 50.0 }));
+    assert!(r.events.iter().any(|ev| matches!(ev, Event::PluginError { plugin, message, .. }
+        if plugin == "greedy" && message.contains("clamped"))));
+    assert!(r.notes.iter().any(|n| n.contains("[clamped] greedy")));
+
+    let x = e.explain(&firefox());
+    let s = &x.settings[0];
+    assert_eq!(s.value, Setting::UclampMin { percent: 50.0 });
+    assert_eq!(s.provenance.plugin, "greedy");
+    assert_eq!(s.provenance.clamped_from.as_deref(), Some("cpu.uclamp.min=100.00"));
+    assert_eq!(s.original, Some(Setting::UclampMin { percent: 0.0 }));
+    assert!(x.notes.iter().any(|n| n.kind == "clamped" && n.plugin == "greedy"));
+    let text = x.to_string();
+    assert!(text.contains("clamped from cpu.uclamp.min=100.00"), "{text}");
+    assert!(text.contains("foreground: yes"), "{text}");
+
+    // The clamp keeps happening, but the PluginError event isn't repeated every step.
+    let r = e.step(2000);
+    assert!(!r.events.iter().any(|ev| matches!(ev, Event::PluginError { .. })));
+}
+
+#[test]
+fn critical_targets_cannot_be_throttled_and_admin_overrides_win() {
+    let w = world();
+    let config = Config::from_toml(
+        r#"
+        [[override]]
+        comm = "firefox"
+        class = "critical"
+        [[override]]
+        unit = "app-cargo-*"
+        settings = [{ knob = "cpu_weight", value = 5 }]
+        "#,
+    )
+    .unwrap();
+    let mut e = engine_with(&w, config, EngineOptions::new("test", Privilege::System));
+    let (evil, _) = FnPolicy::new("evil", |s| {
+        Ok(PolicyOutput {
+            intents: s
+                .units
+                .iter()
+                .map(|u| intent(&u.target, Setting::CpuWeight { value: 50 }, "throttle all"))
+                .collect(),
+            ..Default::default()
+        })
+    });
+    e.registry_mut().register_policy(Box::new(evil), 100).unwrap();
+    e.step(1000);
+    // Critical: rejected; nothing applied.
+    assert!(e.explain(&firefox()).settings.is_empty());
+    assert!(e.explain(&firefox()).notes.iter().any(|n| n.kind == "rejected"));
+    // Admin wins over the plugin.
+    let x = e.explain(&cargo());
+    assert_eq!(x.settings[0].value, Setting::CpuWeight { value: 5 });
+    assert_eq!(x.settings[0].provenance.plugin, "admin");
+    assert!(x.notes.iter().any(|n| n.kind == "overruled" && n.plugin == "evil"));
+}
+
+#[test]
+fn failing_policy_is_skipped_and_reported() {
+    let w = world();
+    let mut e = engine(&w);
+    let (broken, _) = FnPolicy::new("broken", |_| Err(PluginError::Failed("division by zero".into())));
+    let (good, _) = FnPolicy::new("good", |s| {
+        Ok(PolicyOutput {
+            intents: s.units.iter().map(|u| intent(&u.target, Setting::IoWeight { value: 200 }, "boost")).collect(),
+            ..Default::default()
+        })
+    });
+    e.registry_mut().register_policy(Box::new(broken), 50).unwrap();
+    e.registry_mut().register_policy(Box::new(good), 0).unwrap();
+    let r = e.step(1000);
+    assert_eq!(r.actions.len(), 2);
+    assert!(r.events.iter().any(|ev| matches!(ev, Event::PluginError { plugin, message, .. }
+        if plugin == "broken" && message.contains("division by zero"))));
+    let h = e.status().plugins.into_iter().find(|p| p.name == "broken").unwrap();
+    assert_eq!((h.state.as_str(), h.stats.calls, h.stats.errors), ("running", 1, 1));
+    assert_eq!(e.global_notes().len(), 1);
+}
+
+#[test]
+fn actuator_errors_do_not_poison_state() {
+    let w = world();
+    let mut e = engine(&w);
+    e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).unwrap();
+    e.registry_mut().register_policy(Box::new(throttle_policy(Arc::new(Mutex::new(20)))), 0).unwrap();
+    w.sensor.set_pressure(Resource::Io, 80.0);
+    lock(&w.act.log).fail_apply = Some("unit is gone".into());
+    let r = e.step(1000);
+    assert!(matches!(&r.actions[0].outcome, ActionOutcome::Failed { error } if error.contains("unit is gone")));
+    assert!(e.applied().is_empty());
+    assert!(e.explain(&cargo()).notes.iter().any(|n| n.kind == "actuator_error"));
+    // Healed: retried and applied.
+    lock(&w.act.log).fail_apply = None;
+    let r = e.step(2000);
+    assert_eq!(r.actions[0].outcome, ActionOutcome::Applied);
+    assert_eq!(e.applied().len(), 1);
+}
+
+#[test]
+fn no_actuator_is_reported() {
+    let w = world();
+    let mut e =
+        Engine::new(Config::default(), Box::new(w.env.clone()), EngineOptions::new("t", Privilege::System)).unwrap();
+    let (p, _) = FnPolicy::new("p", |s| {
+        Ok(PolicyOutput {
+            intents: s.units.iter().map(|u| intent(&u.target, Setting::Nice { value: 5 }, "nice")).collect(),
+            ..Default::default()
+        })
+    });
+    e.registry_mut().register_policy(Box::new(p), 0).unwrap();
+    let r = e.step(1000);
+    assert!(r.actions.iter().all(|a| a.outcome == ActionOutcome::NoActuator));
+    assert!(e.applied().is_empty());
+}
+
+#[test]
+fn user_hosts_only_touch_their_own_units() {
+    let w = world();
+    w.env.spawn(300, "packagekitd", "/system.slice/packagekit.service");
+    w.env.watch_cgroup("/system.slice/packagekit.service");
+    let mut opts = EngineOptions::new("lindesk-session", Privilege::User);
+    opts.uid = Some(1000);
+    let mut e = engine_with(&w, Config::default(), opts);
+    let (p, _) = FnPolicy::new("everything", |s| {
+        Ok(PolicyOutput {
+            intents: s.units.iter().map(|u| intent(&u.target, Setting::CpuWeight { value: 50 }, "x")).collect(),
+            ..Default::default()
+        })
+    });
+    e.registry_mut().register_policy(Box::new(p), 0).unwrap();
+    e.step(1000);
+    let pk = Target::system_unit("packagekit.service");
+    assert!(e.explain(&pk).settings.is_empty());
+    assert!(e.explain(&pk).notes.iter().any(|n| n.kind == "rejected" && n.message.contains("outside this user")));
+    assert_eq!(e.explain(&cargo()).settings.len(), 1);
+}
+
+#[test]
+fn status_reports_yield_against_the_pre_throttle_baseline() {
+    let w = world();
+    let mut e = engine(&w);
+    e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).unwrap();
+    e.registry_mut().register_policy(Box::new(throttle_policy(Arc::new(Mutex::new(20)))), 0).unwrap();
+    let io = |mbps: u64, cpu_ms: u64| Usage {
+        cpu_usage_us: cpu_ms * 1000,
+        io_wbytes: mbps << 20,
+        interval_ms: 1000,
+        mem_current: 1 << 30,
+        ..Default::default()
+    };
+    w.sensor.set_usage(&cargo(), io(100, 800));
+    let mut now = 0;
+    for _ in 0..10 {
+        now += 1000;
+        e.step(now);
+    }
+    w.sensor.set_pressure(Resource::Io, 80.0);
+    now += 1000;
+    e.step(now);
+    w.sensor.set_usage(&cargo(), io(69, 400));
+    for _ in 0..20 {
+        now += 1000;
+        e.step(now);
+    }
+    let st = e.status();
+    assert_eq!(st.level, Level::Yellow);
+    assert_eq!(st.yielding.len(), 1);
+    let y = &st.yielding[0];
+    assert_eq!(y.summary.comm.as_deref(), Some("rustc"));
+    assert!((y.io_delta_pct.unwrap() + 31.0).abs() < 0.5, "{y:?}");
+    assert!((y.cpu_delta_pct.unwrap() + 50.0).abs() < 0.5, "{y:?}");
+    assert_eq!(y.to_string(), "rustc -50% CPU -31% IO");
+    let text = st.to_string();
+    assert!(text.contains("yielding:   rustc -50% CPU -31% IO"), "{text}");
+    assert!(text.contains("level YELLOW"), "{text}");
+    let json = serde_json::to_value(&st).unwrap();
+    assert_eq!(json["yielding"][0]["comm"], "rustc");
+}
+
+#[test]
+fn forget_target_drops_state_without_restoring() {
+    let w = world();
+    let mut e = engine(&w);
+    e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).unwrap();
+    e.registry_mut().register_policy(Box::new(throttle_policy(Arc::new(Mutex::new(20)))), 0).unwrap();
+    w.sensor.set_pressure(Resource::Io, 80.0);
+    e.step(1000);
+    assert_eq!(e.applied().len(), 1);
+    w.env.unwatch(&cargo());
+    w.env.remove_proc(77);
+    e.forget_target(&cargo());
+    assert!(e.applied().is_empty());
+    let calls = lock(&w.act.log).calls.len();
+    e.step(2000);
+    assert_eq!(lock(&w.act.log).calls.len(), calls, "nothing to reset for a vanished unit");
+    assert!(!e.explain(&cargo()).known);
+}
+
+#[test]
+fn sensors_see_watched_targets_and_respect_intervals() {
+    let w = world();
+    let mut e =
+        Engine::new(Config::default(), Box::new(w.env.clone()), EngineOptions::new("t", Privilege::System)).unwrap();
+    e.registry_mut().register_sensor(Box::new(w.sensor.clone()), Duration::from_millis(1000)).unwrap();
+    e.step(0);
+    e.step(500);
+    e.step(1000);
+    let polls = lock(&w.sensor.polls).clone();
+    assert_eq!(polls.len(), 2, "polled at 0 and 1000, not 500");
+    let mut targets: Vec<_> = polls[0].targets.iter().map(|t| t.cgroup.clone().unwrap()).collect();
+    targets.sort();
+    assert_eq!(targets, vec![CARGO.to_string(), FIREFOX.to_string()]);
+}
+
+#[test]
+fn disabled_builtins_are_listed_but_not_run() {
+    let w = world();
+    let config = Config::from_toml("[plugins.throttle]\nenabled = false\n[plugins.rules]\npriority = 99\n").unwrap();
+    let mut e = engine_with(&w, config, EngineOptions::new("t", Privilege::System));
+    e.registry_mut().register_policy(Box::new(throttle_policy(Arc::new(Mutex::new(1)))), 0).unwrap();
+    e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).unwrap();
+    w.sensor.set_pressure(Resource::Io, 99.0);
+    assert!(e.step(1000).actions.is_empty());
+    let h = e.registry().plugin_health("throttle").unwrap();
+    assert_eq!(h.state, "disabled");
+    assert!(h.detail.unwrap().contains("[plugins.throttle]"));
+    assert!(e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).is_err(), "duplicate");
+}

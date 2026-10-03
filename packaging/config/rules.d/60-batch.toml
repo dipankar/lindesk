@@ -1,0 +1,60 @@
+# lindesk rules: batch work (package management, maintenance, backups). Batch gets
+# cpu.idle and a low io.weight always, and io.max AIMD / memory.high when the desktop
+# is in trouble.
+
+[[rule]]
+name = "package-managers"
+class = "batch"
+# unattended-upgrades → comm "unattended-upgr".
+comm = ["packagekitd", "apt", "apt-get", "dpkg", "unattended-upgr*", "dnf", "dnf5", "rpm", "zypper", "pacman"]
+
+[[rule]]
+name = "flatpak-install"
+class = "batch"
+# Installs and updates run in the system helper.
+unit = ["flatpak-system-helper.service"]
+
+[[rule]]
+name = "snapd-refresh"
+class = "batch"
+unit = ["snapd.snap-repair.service", "snapd.refresh*"]
+
+[[rule]]
+name = "snap-repair"
+class = "batch"
+comm = ["snap-repair"]
+
+[[rule]]
+name = "file-indexes"
+class = "batch"
+# updatedb.mlocate → comm "updatedb.mlocat".
+comm = ["updatedb*", "plocate-build", "mlocate", "mandb", "man-db"]
+
+[[rule]]
+name = "maintenance-units"
+class = "batch"
+unit = [
+  "plocate-updatedb.service",
+  "mlocate.service",
+  "man-db.service",
+  "fstrim.service",
+  "fwupd-refresh.service",
+  "btrfs-scrub*",
+  "btrfs-balance*",
+]
+
+[[rule]]
+name = "maintenance"
+class = "batch"
+comm = ["fwupd", "fstrim", "fwupdmgr"]
+
+[[rule]]
+name = "backups"
+class = "batch"
+comm = ["borg", "borgmatic", "restic"]
+
+[[rule]]
+name = "rsync-backups"
+class = "batch"
+comm = ["rsync"]
+unit = ["*backup*"]

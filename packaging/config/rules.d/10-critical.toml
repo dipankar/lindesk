@@ -1,0 +1,48 @@
+# lindesk rules: critical workloads. These are boosted and never throttled.
+#
+# The kernel truncates comm to 15 bytes, so long names are matched by their truncated form
+# too (e.g. gnome-session-binary → "gnome-session-b", xdg-desktop-portal-gnome →
+# "xdg-desktop-por").
+
+[[rule]]
+name = "compositors"
+class = "critical"
+comm = [
+  "gnome-shell",
+  "mutter",
+  "kwin_wayland",
+  "kwin_x11",
+  "plasmashell",
+  "cosmic-comp",
+  "cosmic-panel",
+  "cosmic-session",
+  "Xwayland",
+  "Xorg",
+  "sway",
+  "Hyprland",
+]
+
+[[rule]]
+name = "audio"
+class = "critical"
+comm = ["pipewire", "pipewire-pulse", "wireplumber", "pulseaudio"]
+
+[[rule]]
+name = "portals"
+class = "critical"
+comm = ["xdg-desktop-por*"]
+
+[[rule]]
+name = "input-methods"
+class = "critical"
+comm = ["ibus-daemon", "fcitx5"]
+
+[[rule]]
+name = "session"
+class = "critical"
+comm = ["gnome-session-binary", "gnome-session-b", "dbus-broker", "dbus-broker-lau*", "dbus-daemon"]
+
+[[rule]]
+name = "accessibility"
+class = "critical"
+comm = ["at-spi*"]

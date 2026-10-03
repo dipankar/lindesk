@@ -32,7 +32,7 @@ when you change one of these contracts.
 |---|---|---|
 | Config | `/etc/lindesk/lindesk.toml` | `$XDG_CONFIG_HOME/lindesk/lindesk.toml` |
 | Classifier rules | `/usr/share/lindesk/rules.d/*.toml`, then `/etc/lindesk/rules.d/*.toml` | then `$XDG_CONFIG_HOME/lindesk/rules.d/*.toml` |
-| Plugins | `/usr/lib/lindesk/plugins/<name>/plugin.toml`, `/etc/lindesk/plugins/<name>/` (must be root-owned, not group/world-writable) | `$XDG_DATA_HOME/lindesk/plugins/<name>/` |
+| Plugins | `/usr/lib/lindesk/plugins/<name>/plugin.toml`, `/etc/lindesk/plugins/<name>/` (must be root-owned, not group/world-writable) | `$XDG_DATA_HOME/lindesk/plugins/<name>/`, then the system dirs (only `privilege = "user"` plugins load) |
 | Applied state | `/run/lindesk/state.json` | `$XDG_RUNTIME_DIR/lindesk/state.json` |
 | Telemetry | `/var/lib/lindesk/telemetry/` (0750 root:lindesk) | `$XDG_STATE_HOME/lindesk/telemetry/` (0700) |
 | DuckDB catalog | `/var/lib/lindesk/catalog.duckdb` | `$XDG_STATE_HOME/lindesk/catalog.duckdb` |
@@ -70,7 +70,14 @@ Callers are identified by their bus credentials (uid, pid).
 | `GetStatus()` | → `s` | none |
 | `Explain(what)` | `s` → `s` | none |
 | `Reload()` | → | `org.lindesk.manage` |
-| signal `UserState(uid, json)` | `us` | JSON `{"level": ..., "desired": [{"target":..., "setting":..., "provenance":...}]}`: settings for that user's units, to be applied by their session agent. |
+| signal `UserState(uid, json)` | `us` | JSON `SessionState` (`lindesk-ipc`): `{"uid":..., "level": ..., "desired": [{"target":..., "setting":..., "provenance":...}]}`: settings for that user's units, to be applied by their session agent. |
+
+## Intent priority
+
+An intent with `priority = 0` inherits its plugin's priority (manifest `[policy] priority`, or the
+built-in registration). `[plugins.<name>] priority` in the config overrides every intent of that
+plugin. Admin `[[override]]`s always win. A user host (`lindesk-session`) rejects intents that
+target anything other than its own user's units.
 
 ## Plugin protocol
 

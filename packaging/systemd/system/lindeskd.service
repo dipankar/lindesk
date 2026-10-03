@@ -1,0 +1,42 @@
+[Unit]
+Description=lindesk QoS broker (desktop responsiveness governor)
+Documentation=man:lindeskd(8) https://github.com/dipankar/lindesk
+After=dbus.service systemd-sysusers.service
+Wants=dbus.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+BusName=org.lindesk.Broker1
+ExecStart=/usr/bin/lindeskd
+# Undo every runtime change even if the daemon crashed.
+ExecStopPost=/usr/bin/lindeskd --restore
+Restart=on-failure
+RestartSec=2s
+WatchdogSec=30s
+RuntimeDirectory=lindesk
+RuntimeDirectoryPreserve=yes
+StateDirectory=lindesk
+StateDirectoryMode=0750
+# The broker must stay responsive itself.
+CPUWeight=200
+IOWeight=200
+MemoryLow=32M
+# Hardening. /sys and /sys/fs/cgroup must stay writable (no ProtectKernelTunables /
+# ProtectControlGroups): writing cgroup attributes is the daemon's job.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lindesk /run/lindesk
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_SYS_NICE CAP_SYS_RESOURCE CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL CAP_CHOWN CAP_FOWNER
+
+[Install]
+WantedBy=multi-user.target

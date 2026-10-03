@@ -1,0 +1,8 @@
+{
+  "uuid": "lindesk@lindesk.org",
+  "name": "lindesk",
+  "description": "Tells lindesk (a userspace QoS governor) which application you are using and when you interact with it, so background work yields to it. Talks to org.lindesk.QoS1 on the session bus; does nothing when lindesk is not running.",
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "url": "https://github.com/dipankar/lindesk",
+  "version": 1
+}

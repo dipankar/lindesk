@@ -48,6 +48,7 @@ pub fn protocol_schema() -> serde_json::Value {
         ActuatorResetParams,
         SinkRecordParams,
         LogParams,
+        SamplesParams,
         SensorInput,
         SensorOutput,
         Classification,

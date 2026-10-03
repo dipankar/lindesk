@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=lindesk session agent
+Comment=Keeps the desktop responsive under background load
+Exec=/usr/bin/lindesk-session
+NoDisplay=true
+OnlyShowIn=GNOME;KDE;COSMIC;XFCE;MATE;Cinnamon;LXQt;Budgie;X-Cinnamon;
+# Skip when the systemd user unit handles it.
+X-GNOME-HiddenUnderSystemd=true
+X-systemd-skip=true
+X-GNOME-Autostart-Phase=Initialization

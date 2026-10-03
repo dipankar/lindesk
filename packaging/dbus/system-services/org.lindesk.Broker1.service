@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.lindesk.Broker1
+Exec=/bin/false
+User=root
+SystemdService=lindeskd.service

@@ -1,0 +1,20 @@
+{
+    "KPlugin": {
+        "Id": "lindesk",
+        "Name": "lindesk",
+        "Description": "Tells lindesk (a userspace QoS governor) which application has focus, so background work yields to it.",
+        "Authors": [
+            {
+                "Name": "lindesk contributors"
+            }
+        ],
+        "Category": "Window Management",
+        "License": "MIT OR Apache-2.0",
+        "Version": "0.1.0",
+        "Website": "https://github.com/dipankar/lindesk",
+        "EnabledByDefault": false
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js",
+    "KPackageStructure": "KWin/Script"
+}

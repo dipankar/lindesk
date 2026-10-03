@@ -224,6 +224,13 @@ pub struct SinkRecordParams {
     pub records: Vec<Record>,
 }
 
+/// Params of the `samples` notification (plugin → host). The `event` and `metric`
+/// notifications carry a bare [`Event`] and [`Metric`] respectively.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
+pub struct SamplesParams {
+    pub samples: Vec<Sample>,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LogLevel {

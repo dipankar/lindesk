@@ -1,0 +1,20 @@
+# {{name}}: a lindesk {{kind}} plugin.
+# Schema of every manifest field and protocol message: `lindeskctl plugin schema`.
+[plugin]
+name = "{{name}}"
+version = "0.1.0"
+api = 1
+kinds = ["{{kind}}"]
+exec = "{{exec}}"
+privilege = "{{privilege}}"   # user: runs in lindesk-session; system: runs in lindeskd (root-owned dirs only)
+description = "TODO: what {{name}} does"
+{{section}}
+# Optional per-call timeouts (defaults: classifier 50ms, policy 100ms, sensor 200ms,
+# actuator 1s, initialize 2s).
+# [timeouts]
+# call_ms = 100
+# init_ms = 2000
+
+[config]
+# Free-form settings handed to the plugin in `initialize`. Admins can override them in
+# lindesk.toml with [plugins.{{name}}] config = { ... }

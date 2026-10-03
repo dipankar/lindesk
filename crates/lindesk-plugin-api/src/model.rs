@@ -530,6 +530,7 @@ pub struct UnitState {
 
 /// What the host can do on this machine (a summary of the probe).
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
 pub struct HostCaps {
     pub cgroup_v2: bool,
     pub systemd: bool,
@@ -611,8 +612,11 @@ impl ActuatorCaps {
 #[serde(rename_all = "snake_case", tag = "table")]
 pub enum Record {
     Pressure(Sample),
+    #[serde(rename = "units")]
     Unit { ts: TimestampMs, target: Target, class: QosClass, foreground: bool, usage: Usage, applied: Vec<Setting> },
+    #[serde(rename = "events")]
     Event(Event),
+    #[serde(rename = "metrics")]
     Metric(Metric),
 }
 

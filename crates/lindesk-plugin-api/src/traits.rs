@@ -107,6 +107,9 @@ pub enum PluginError {
     Failed(String),
     #[error("timed out")]
     Timeout,
+    /// The plugin is backing off after failures or has been disabled.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
     #[error("protocol error: {0}")]
     Protocol(String),
     #[error("i/o error: {0}")]
@@ -206,6 +209,9 @@ pub trait Classifier: Plugin {
 /// Policies are declarative: each evaluation returns the *complete* set of intents that
 /// should be in force right now. Anything a policy stops returning is reverted by the host.
 /// Policies may keep internal state (hysteresis, epochs) between calls.
+/// The host resolves `Focus`/`Interaction` events before evaluation: their `target` is always
+/// filled when the pid/app_id maps to a managed unit. Policies should skip knobs the host
+/// lacks (see [`HostCaps`]); actuators ignore unsupported knobs either way.
 pub trait Policy: Plugin {
     fn evaluate(&mut self, snapshot: &Snapshot) -> PluginResult<PolicyOutput>;
 }

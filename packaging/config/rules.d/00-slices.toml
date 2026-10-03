@@ -1,0 +1,29 @@
+# lindesk rules: systemd slices.
+#
+# Slices are classified as pid = 0, comm = "", unit = "<name>.slice", so these rules match
+# on `unit`. They classify the slice units themselves, not every process inside them.
+#
+# Rule files: later files (and later directories: /usr/share → /etc → ~/.config) are
+# consulted first; within a file the first matching rule wins. A same-named file in a
+# later directory replaces this one. See `lindeskctl explain` to see which rule matched.
+
+[[rule]]
+name = "session-slice"
+class = "critical"
+unit = ["session.slice"]
+
+[[rule]]
+name = "background-slice"
+class = "background"
+unit = ["background.slice"]
+
+[[rule]]
+name = "lindesk-batch-slice"
+class = "batch"
+# `lindeskctl run --batch ...` starts transient units here.
+unit = ["lindesk-batch.slice"]
+
+[[rule]]
+name = "app-slice"
+class = "normal"
+unit = ["app.slice"]

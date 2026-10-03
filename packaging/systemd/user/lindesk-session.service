@@ -1,0 +1,17 @@
+[Unit]
+Description=lindesk session agent (foreground tracking and per-user QoS)
+Documentation=man:lindesk-session(1) https://github.com/dipankar/lindesk
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.lindesk.QoS1
+ExecStart=/usr/bin/lindesk-session
+ExecStopPost=/usr/bin/lindesk-session --restore
+Restart=on-failure
+RestartSec=2s
+Slice=session.slice
+
+[Install]
+WantedBy=graphical-session.target

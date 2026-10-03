@@ -1,0 +1,9 @@
+[Unit]
+Description=lindesk per-user telemetry maintenance
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/lindesk-data maintain
+Nice=19
+IOSchedulingClass=idle
+Slice=background.slice

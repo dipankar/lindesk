@@ -1,0 +1,18 @@
+[Unit]
+Description=lindesk telemetry maintenance (compaction, rollups, retention)
+Documentation=man:lindesk-data(1)
+ConditionPathIsDirectory=/var/lib/lindesk/telemetry
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/lindesk-data maintain
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=idle
+IOWeight=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lindesk
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes

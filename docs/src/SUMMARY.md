@@ -1,0 +1,26 @@
+# Summary
+
+[Introduction](introduction.md)
+
+# User guide
+- [Installation](guide/install.md)
+- [doctor: what your system supports](guide/doctor.md)
+- [Everyday use](guide/usage.md)
+- [Configuration](guide/configuration.md)
+- [Telemetry and DuckDB](guide/telemetry.md)
+- [Benchmarking](guide/bench.md)
+
+# Plugins
+- [Concepts](plugins/concepts.md)
+- [Your first plugin (Python)](plugins/python.md)
+- [Rust plugins](plugins/rust.md)
+- [Desktop adapters](plugins/adapters.md)
+- [Testing and simulation](plugins/testing.md)
+- [Cookbook](plugins/cookbook.md)
+
+# Reference
+- [Architecture and contracts](reference/architecture.md)
+- [Plugin protocol](reference/protocol.md)
+- [D-Bus API](reference/dbus.md)
+- [Telemetry schema](reference/schema.md)
+- [Safety invariants](reference/safety.md)

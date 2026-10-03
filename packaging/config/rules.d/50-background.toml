@@ -1,0 +1,48 @@
+# lindesk rules: background services. These yield under pressure.
+#
+# Even a background-classed app is never throttled while it has focus.
+
+[[rule]]
+name = "indexers"
+class = "background"
+# tracker-miner-fs-3 → comm "tracker-miner-f"; baloo_file_extractor → "baloo_file_extr".
+comm = ["tracker-miner-*", "tracker-extract*", "localsearch-*", "baloo_file", "baloo_file_extr*"]
+
+[[rule]]
+name = "evolution-data-server"
+class = "background"
+comm = ["evolution-*"]
+
+[[rule]]
+name = "desktop-services"
+class = "background"
+comm = ["gvfsd-metadata", "geoclue"]
+
+[[rule]]
+name = "software-updaters"
+class = "background"
+# gnome-software runs as a background service; with focus it is boosted like any app.
+# DiscoverNotifier → comm "DiscoverNotifie".
+comm = ["gnome-software", "DiscoverNotifie*", "update-notifier", "pk-update-icon"]
+
+[[rule]]
+name = "sync-clients"
+class = "background"
+comm = ["syncthing", "nextcloud", "dropbox", "onedrive", "insync"]
+
+[[rule]]
+name = "containers"
+class = "background"
+unit = [
+  "docker-*.scope",
+  "docker.service",
+  "containerd.service",
+  "libpod-*.scope",
+  "podman*.service",
+  "podman*.scope",
+]
+
+[[rule]]
+name = "container-daemons"
+class = "background"
+comm = ["containerd", "containerd-shim*", "dockerd", "podman", "conmon"]

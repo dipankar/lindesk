@@ -1,0 +1,203 @@
+# lindesk configuration
+#
+# System:  /etc/lindesk/lindesk.toml                 (lindeskd, the root broker)
+# User:    $XDG_CONFIG_HOME/lindesk/lindesk.toml     (lindesk-session, the per-user agent)
+#
+# Every key is optional and every value shown here is the built-in default, so an empty
+# file behaves exactly like this one. Unknown keys are rejected, which catches typos;
+# run `lindeskctl config check` after editing.
+#
+# Units: durations are humantime strings ("250ms", "5s", "7d", "1y"); sizes are strings
+# like "512MiB" / "2GiB" or plain byte counts; ratios are fractions (0.30 = 30%).
+#
+# Thesis: do nothing while the machine is healthy. When foreground latency deteriorates,
+# intervene progressively and with hysteresis. Don't make interactive work dangerous;
+# make non-interactive work yield.
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
+[general]
+# Pipeline tick. Sensors with wake fds (PSI triggers) can wake the loop earlier.
+tick = "250ms"
+# Extra plugin directories, searched after the defaults
+# (/usr/lib/lindesk/plugins, /etc/lindesk/plugins; user: $XDG_DATA_HOME/lindesk/plugins).
+plugin_dirs = []
+# Observe-only: compute, record and explain intents but never apply them.
+dry_run = false
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
+[io]
+# Enable the iocost controller on devices with no proportional I/O scheduler
+# (scheduler "none"), so io.weight actually does something. "auto" | "on" | "off".
+# The original setting is restored on exit.
+iocost = "auto"
+# Block devices ("MAJ:MIN") to manage. Empty = the devices backing / and /home.
+devices = []
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# Safety caps: the last word on every value lindesk writes, whichever plugin asked for it.
+# Critical workloads can be boosted but never throttled, whatever these say.
+[safety]
+# Range for cpu.weight / io.weight (kernel default 100).
+cpu_weight_min = 1
+cpu_weight_max = 1000
+io_weight_min = 1
+io_weight_max = 1000
+# Upper bound for cpu.uclamp.min, percent (50% ≈ 512/1024).
+uclamp_min_max = 50.0
+# Lower bound for cpu.uclamp.max, percent.
+uclamp_max_floor = 20.0
+# io.max floors per direction: bytes/s (8 MiB/s) and IOPS. Nothing is ever starved.
+io_bps_floor = 8388608
+io_iops_floor = 100
+# memory.high may never go below this absolute floor (bytes, 256 MiB) ...
+memory_high_floor = 268435456
+# ... nor below this fraction of the target's current usage.
+memory_high_ratio_floor = 0.5
+# memory.low may not exceed this fraction of total RAM.
+memory_low_max_ratio = 0.25
+# Most negative niceness lindesk will ever set (per-process fallback backend).
+nice_min = -5
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# Telemetry: a hive-partitioned Parquet lake you can query with DuckDB
+# (`lindeskctl query "select ..."`). Window titles and command lines are never stored.
+[telemetry]
+enabled = true
+# Sampling interval.
+interval = "1s"
+# How often the in-memory buffer is written to a new Parquet file.
+flush = "60s"
+# Store root. Unset = /var/lib/lindesk/telemetry (system) or
+# $XDG_STATE_HOME/lindesk/telemetry (user).
+# dir = "/var/lib/lindesk/telemetry"
+
+[telemetry.retention]
+# Raw samples, 1-minute rollups and 1-hour rollups are kept this long ...
+raw = "7days"
+rollup_1m = "90days"
+# Note: humantime's "1y" is 365.25 days; the default is exactly 365 days.
+rollup_1h = "365days"
+# ... and the oldest partitions are dropped first once the store exceeds this.
+max_size = "2GiB"
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# Plugins, keyed by name (built-in or external). Every plugin accepts:
+#   enabled  = true|false
+#   priority = <int>     overrides the manifest priority (higher wins when intents conflict)
+#   config   = { ... }   merged over the plugin's own [config]
+
+# The built-in `threshold` policy: GREEN ⇄ YELLOW ⇄ RED with hysteresis.
+#
+#   always   critical: weights 200, memory.low; background: weights 50;
+#            batch: cpu.idle, io.weight 10; foreground: weights 200, memory.low
+#   epoch    (focus or input in the last `epoch`) foreground: weights 500, uclamp.min 30%
+#   YELLOW   background: weights 20, uclamp.max 60%; batch: io.weight 1, uclamp.max 40%
+#   RED      io.max AIMD on background and batch; memory.high on batch under sustained
+#            memory "full" pressure
+[plugins.threshold]
+enabled = true
+# priority = 0
+
+[plugins.threshold.config]
+# Interaction epoch: a focus change or input on the foreground boosts it until
+# event time + epoch. Input extends it; EndInteraction ends it early.
+epoch = "500ms"
+
+# System-wide PSI ratios are smoothed with an EWMA of this half-life ...
+ewma_half_life = "2s"
+# ... or with a fixed per-sample weight (0 < alpha <= 1; 1.0 = no smoothing).
+# ewma_alpha = 0.3
+
+# Exit thresholds are enter thresholds × exit_ratio, so a level never flaps around one value.
+exit_ratio = 0.5
+# YELLOW when the foreground cgroup's worst "some" stall (cpu, io or memory) exceeds this.
+foreground_yellow = 0.05
+# RED when the foreground stall exceeds this for `red_after`. In RED, io.max AIMD keeps
+# halving while the foreground stays above it.
+foreground_red = 0.10
+red_after = "1s"
+# RED immediately when smoothed system memory "full" exceeds this ...
+memory_full_red = 0.20
+# ... and memory.high goes on batch units once it has done so for this long.
+mem_red_after = "3s"
+
+# Stepping down: one level at a time, only after the exit condition has held for
+# `recover_after`, and only after the minimum dwell time in the current level.
+recover_after = "5s"
+yellow_min_dwell = "3s"
+red_min_dwell = "2s"
+
+# memory.low for critical units, and the cap on the foreground's memory.low
+# (which tracks its current usage).
+critical_memory_low = "512MiB"
+fg_memory_low_max = "2GiB"
+
+# io.max AIMD admission control (RED only, background and batch, per device, needs io.max).
+# Initial limit = max(observed rate, aimd_floor) × aimd_decrease, per direction.
+# Every aimd_interval: × aimd_decrease while the foreground stalls, + aimd_step otherwise.
+# Limits never go below aimd_floor (bytes/s) and disappear when RED ends.
+aimd_floor = "16MiB"
+aimd_step = "32MiB"
+aimd_decrease = 0.5
+aimd_interval = "1s"
+
+# memory.high for batch units = this fraction of their usage when it is first set
+# (latched, so it cannot ratchet down).
+memory_high_ratio = 0.9
+
+# Priority of the policy's intents (built-ins use 0, external plugins default to 10).
+priority = 0
+
+# YELLOW enter thresholds for the smoothed system-wide PSI "some" ratios.
+[plugins.threshold.config.enter]
+cpu = 0.30
+io = 0.20
+memory = 0.10
+
+# The values written. Weights apply to cpu.weight and io.weight (default 100);
+# uclamp values are percentages.
+[plugins.threshold.config.values]
+critical_weight = 200
+fg_epoch_weight = 500
+fg_epoch_uclamp_min = 30.0
+fg_weight = 200
+background_weight = 50
+batch_io_weight = 10
+yellow_background_weight = 20
+yellow_background_uclamp_max = 60.0
+yellow_batch_io_weight = 1
+yellow_batch_uclamp_max = 40.0
+
+# The built-in `rules` classifier: TOML rule files, see packaging/config/rules.d/.
+# Directories are read in this order and files within a directory by name; later files
+# are consulted first, so /etc beats /usr/share and the user's rules beat both. A file
+# with the same name as one in an earlier directory replaces it (like systemd drop-ins);
+# an empty file disables a vendor file. The user directory is only read by
+# lindesk-session; lindeskd skips "$XDG_CONFIG_HOME" and "~" entries.
+[plugins.rules]
+enabled = true
+
+[plugins.rules.config]
+dirs = [
+  "/usr/share/lindesk/rules.d",
+  "/etc/lindesk/rules.d",
+  "$XDG_CONFIG_HOME/lindesk/rules.d",
+]
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# Admin overrides always win over every plugin. Each pins a class and/or explicit settings
+# onto units (unit name glob) or processes (comm glob). Uncomment to use.
+#
+# BEGIN override example
+# [[override]]
+# unit = "docker-*.scope"
+# class = "batch"
+#
+# [[override]]
+# comm = "obs"
+# class = "interactive"
+# settings = [
+#   { knob = "cpu_weight", value = 400 },
+#   { knob = "memory_low", bytes = 1073741824 },
+# ]
+# END override example

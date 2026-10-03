@@ -1,0 +1,611 @@
+//! The `threshold` policy: GREEN ⇄ YELLOW ⇄ RED with hysteresis, interaction epochs and
+//! `io.max` AIMD admission control.
+//!
+//! # Thesis
+//!
+//! Do nothing while the machine is healthy. When foreground latency deteriorates, intervene
+//! progressively and with hysteresis. Never make interactive work dangerous; make
+//! non-interactive work yield.
+//!
+//! # Signals
+//!
+//! * **System PSI**: the `some` ratio of each resource (and memory `full`) over the sample's
+//!   delta interval, smoothed with an EWMA (half-life or fixed alpha).
+//! * **Foreground stall**: the worst raw `some` ratio (cpu, io, memory) measured inside the
+//!   foreground target's own cgroup. This is the primary "the human is suffering" signal.
+//! * **Interaction epochs**: a `Focus` event, or an `Interaction { end: false }` event for the
+//!   foreground, starts or extends an epoch lasting until `event ts + epoch`.
+//!   `Interaction { end: true }` ends it early. Focusing a different target starts a new
+//!   epoch for that target.
+//!
+//! # Levels
+//!
+//! | Level  | Enter                                                              | Step down after             |
+//! |--------|--------------------------------------------------------------------|-----------------------------|
+//! | YELLOW | any smoothed system `some` > `enter.*`, or foreground > `foreground_yellow` | everything below `exit_ratio × enter` for `recover_after`, and `yellow_min_dwell` elapsed |
+//! | RED    | foreground > `foreground_red` for `red_after`, or memory `full` > `memory_full_red` | both below `exit_ratio ×` their thresholds for `recover_after`, and `red_min_dwell` elapsed |
+//!
+//! The level moves at most one step per evaluation in either direction.
+//!
+//! # Intents
+//!
+//! The complete set is returned on every evaluation (the host reverts anything omitted):
+//!
+//! * always (work-conserving): critical gets higher weights and `memory.low`; background gets
+//!   lower weights; batch gets `cpu.idle` and a low `io.weight`; normal gets nothing.
+//! * foreground: a strong boost (weights, `uclamp.min`, `memory.low`) during an epoch, a mild
+//!   one otherwise. The foreground is never throttled, whatever its class.
+//! * YELLOW: background and batch yield harder (weights, `uclamp.max`).
+//! * RED: `io.max` AIMD on background and batch per device, and `memory.high` on batch under
+//!   sustained memory `full` pressure.
+
+mod config;
+#[cfg(test)]
+mod tests;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
+
+use lindesk_plugin_api::{
+    Event, InitContext, Intent, IoLimit, Knob, Level, Metric, Plugin, PluginError, PluginInfo, PluginKind,
+    PluginResult, Policy, PolicyOutput, QosClass, Resource, Sample, Setting, Snapshot, Target, TimestampMs, UnitState,
+};
+
+pub use config::{ResourceThresholds, ThresholdConfig, ThresholdValues};
+
+/// Plugin name.
+pub const NAME: &str = "threshold";
+
+const MIB: f64 = 1024.0 * 1024.0;
+
+/// The built-in `threshold` policy. See the [module docs](self).
+///
+/// Deterministic: all time comes from [`Snapshot::now`] and event timestamps, so replaying
+/// the same snapshots yields the same output.
+#[derive(Debug, Clone, Default)]
+pub struct ThresholdPolicy {
+    cfg: ThresholdConfig,
+    st: State,
+}
+
+/// Exponentially weighted moving average fed by PSI samples.
+#[derive(Debug, Clone, Copy, Default)]
+struct Ewma {
+    value: f64,
+    /// Timestamp of the last sample consumed, so a repeated sample is not counted twice.
+    last_ts: Option<TimestampMs>,
+}
+
+impl Ewma {
+    fn update(&mut self, ts: TimestampMs, x: f64, alpha: f64) {
+        if self.last_ts == Some(ts) {
+            return;
+        }
+        self.last_ts = Some(ts);
+        self.value += alpha * (x - self.value);
+    }
+}
+
+/// An interaction epoch for one target.
+#[derive(Debug, Clone, PartialEq)]
+struct Epoch {
+    target: Target,
+    until: TimestampMs,
+}
+
+/// AIMD state for one (target, device).
+#[derive(Debug, Clone, PartialEq)]
+struct Aimd {
+    rbps: u64,
+    wbps: u64,
+    last_step: TimestampMs,
+    step: u32,
+    action: &'static str,
+}
+
+#[derive(Debug, Clone, Default)]
+struct State {
+    started: bool,
+    some: [Ewma; 3],
+    mem_full: Ewma,
+    level: Level,
+    entered_at: TimestampMs,
+    exit_since: Option<TimestampMs>,
+    fg_red_since: Option<TimestampMs>,
+    mem_full_since: Option<TimestampMs>,
+    epoch: Option<Epoch>,
+    aimd: BTreeMap<(Target, String), Aimd>,
+    /// Latched `memory.high` per batch target.
+    mem_high: BTreeMap<Target, u64>,
+}
+
+/// The inputs of one evaluation, after smoothing.
+#[derive(Debug, Clone, Copy, Default)]
+struct Signals {
+    /// Smoothed system `some` ratio per resource (indexed like [`Resource::ALL`]).
+    some: [f64; 3],
+    /// Smoothed system memory `full` ratio.
+    mem_full: f64,
+    /// Worst raw `some` ratio inside the foreground cgroup.
+    fg: Option<(Resource, f64)>,
+}
+
+impl Signals {
+    fn fg_ratio(&self) -> f64 {
+        self.fg.map_or(0.0, |(_, v)| v)
+    }
+}
+
+fn idx(r: Resource) -> usize {
+    match r {
+        Resource::Cpu => 0,
+        Resource::Io => 1,
+        Resource::Memory => 2,
+    }
+}
+
+fn ms(d: Duration) -> i64 {
+    i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+}
+
+fn pct(v: f64) -> String {
+    format!("{:.0}%", v * 100.0)
+}
+
+fn mib(v: u64) -> String {
+    format!("{:.0}MiB/s", v as f64 / MIB)
+}
+
+fn up(l: Level) -> Level {
+    match l {
+        Level::Green => Level::Yellow,
+        _ => Level::Red,
+    }
+}
+
+fn down(l: Level) -> Level {
+    match l {
+        Level::Red => Level::Yellow,
+        _ => Level::Green,
+    }
+}
+
+fn level_value(l: Level) -> f64 {
+    match l {
+        Level::Green => 0.0,
+        Level::Yellow => 1.0,
+        Level::Red => 2.0,
+    }
+}
+
+/// Latest sample per resource from a list (by timestamp).
+fn latest(samples: &[Sample], r: Resource) -> Option<&Sample> {
+    samples.iter().filter(|s| s.resource == r).max_by_key(|s| s.ts)
+}
+
+/// Bytes per second from a byte delta over `interval_ms`.
+fn rate(bytes: u64, interval_ms: u32) -> u64 {
+    if interval_ms == 0 { 0 } else { bytes.saturating_mul(1000) / u64::from(interval_ms) }
+}
+
+/// Collects intents keyed by (target, knob): a later `set` for the same knob replaces the
+/// earlier one, which is how level layers override the static layer.
+#[derive(Default)]
+struct Plan {
+    map: BTreeMap<(Target, Knob), (Setting, String)>,
+}
+
+impl Plan {
+    fn set(&mut self, target: &Target, setting: Setting, reason: impl Into<String>) {
+        self.map.insert((target.clone(), setting.knob()), (setting, reason.into()));
+    }
+
+    fn get(&self, target: &Target, knob: Knob) -> Option<&Setting> {
+        self.map.get(&(target.clone(), knob)).map(|(s, _)| s)
+    }
+
+    fn into_intents(self, priority: i32) -> Vec<Intent> {
+        self.map
+            .into_iter()
+            .map(|((target, _), (setting, reason))| Intent { target, setting, priority, reason })
+            .collect()
+    }
+}
+
+impl ThresholdPolicy {
+    /// A policy with the given configuration (call [`ThresholdConfig::validate`] first if it
+    /// comes from an untrusted source; [`Plugin::init`] does).
+    pub fn new(cfg: ThresholdConfig) -> Self {
+        ThresholdPolicy { cfg, st: State::default() }
+    }
+
+    /// The active configuration.
+    pub fn config(&self) -> &ThresholdConfig {
+        &self.cfg
+    }
+
+    /// The current health level.
+    pub fn level(&self) -> Level {
+        self.st.level
+    }
+
+    fn signals(&mut self, snap: &Snapshot, fg_unit: Option<&UnitState>) -> Signals {
+        let cfg = &self.cfg;
+        for r in Resource::ALL {
+            if let Some(s) = snap.system_pressure(r) {
+                let a = cfg.alpha(u64::from(s.interval_ms));
+                self.st.some[idx(r)].update(s.ts, f64::from(s.some_ratio()), a);
+                if r == Resource::Memory
+                    && let Some(full) = s.full_ratio()
+                {
+                    self.st.mem_full.update(s.ts, f64::from(full), a);
+                }
+            }
+        }
+        let fg = fg_unit.and_then(|u| {
+            Resource::ALL
+                .into_iter()
+                .filter_map(|r| latest(&u.pressure, r).map(|s| (r, f64::from(s.some_ratio()))))
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+        });
+        Signals { some: self.st.some.map(|e| e.value), mem_full: self.st.mem_full.value, fg }
+    }
+
+    /// Apply focus/interaction events to the epoch state.
+    fn process_events(&mut self, snap: &Snapshot, fg: Option<&Target>) {
+        let epoch_ms = ms(self.cfg.epoch);
+        let mut events: Vec<&Event> = snap.events.iter().collect();
+        events.sort_by_key(|e| e.ts());
+        for e in events {
+            match e {
+                Event::Focus { ts, target, .. } => {
+                    if let Some(t) = target.as_ref().or(fg) {
+                        let until = ts.saturating_add(epoch_ms);
+                        let until = match &self.st.epoch {
+                            Some(ep) if &ep.target == t => ep.until.max(until),
+                            _ => until,
+                        };
+                        self.st.epoch = Some(Epoch { target: t.clone(), until });
+                    }
+                }
+                Event::Interaction { ts, target, end, .. } => {
+                    // Interactions without a resolved target refer to whatever has focus.
+                    let Some(t) = target.as_ref().or(fg) else { continue };
+                    if Some(t) != fg {
+                        continue;
+                    }
+                    if *end {
+                        if self.st.epoch.as_ref().is_some_and(|ep| &ep.target == t) {
+                            self.st.epoch = None;
+                        }
+                    } else {
+                        let until = ts.saturating_add(epoch_ms);
+                        let until = match &self.st.epoch {
+                            Some(ep) if &ep.target == t => ep.until.max(until),
+                            _ => until,
+                        };
+                        self.st.epoch = Some(Epoch { target: t.clone(), until });
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self.st.epoch.as_ref().is_some_and(|ep| ep.until <= snap.now) {
+            self.st.epoch = None;
+        }
+    }
+
+    fn epoch_active(&self, now: TimestampMs, fg: Option<&Target>) -> bool {
+        self.st.epoch.as_ref().is_some_and(|ep| Some(&ep.target) == fg && now < ep.until)
+    }
+
+    /// Advance the GREEN/YELLOW/RED state machine by at most one step.
+    fn update_level(&mut self, now: TimestampMs, sig: &Signals) {
+        let cfg = &self.cfg;
+        let st = &mut self.st;
+        let fg = sig.fg_ratio();
+        let x = cfg.exit_ratio;
+
+        st.fg_red_since = if fg > cfg.foreground_red { Some(st.fg_red_since.unwrap_or(now)) } else { None };
+        st.mem_full_since =
+            if sig.mem_full > cfg.memory_full_red { Some(st.mem_full_since.unwrap_or(now)) } else { None };
+
+        let red_enter =
+            st.fg_red_since.is_some_and(|t| now - t >= ms(cfg.red_after)) || sig.mem_full > cfg.memory_full_red;
+        let yellow_enter =
+            Resource::ALL.into_iter().any(|r| sig.some[idx(r)] > cfg.enter.get(r)) || fg > cfg.foreground_yellow;
+        let wanted = if red_enter {
+            Level::Red
+        } else if yellow_enter {
+            Level::Yellow
+        } else {
+            Level::Green
+        };
+
+        if wanted > st.level {
+            st.level = up(st.level);
+            st.entered_at = now;
+            st.exit_since = None;
+            return;
+        }
+
+        let red_clear = fg <= cfg.foreground_red * x && sig.mem_full <= cfg.memory_full_red * x;
+        let yellow_clear = red_clear
+            && fg <= cfg.foreground_yellow * x
+            && Resource::ALL.into_iter().all(|r| sig.some[idx(r)] <= cfg.enter.get(r) * x);
+        let exit_ok = |l: Level| match l {
+            Level::Green => false,
+            Level::Red => red_clear,
+            Level::Yellow => yellow_clear,
+        };
+        st.exit_since = if exit_ok(st.level) { Some(st.exit_since.unwrap_or(now)) } else { None };
+
+        let dwell = match st.level {
+            Level::Red => cfg.red_min_dwell,
+            Level::Yellow => cfg.yellow_min_dwell,
+            Level::Green => Duration::ZERO,
+        };
+        if let Some(since) = st.exit_since
+            && now - since >= ms(cfg.recover_after)
+            && now - st.entered_at >= ms(dwell)
+        {
+            st.level = down(st.level);
+            st.entered_at = now;
+            // The next step down needs its own full `recover_after`, counted from now.
+            st.exit_since = exit_ok(st.level).then_some(now);
+        }
+    }
+
+    /// Human-readable reason for the current level, e.g. `foreground io stall 14% > 10%`.
+    fn cause(&self, sig: &Signals) -> String {
+        let cfg = &self.cfg;
+        let fg = sig.fg.map(|(r, v)| format!("foreground {r} stall {}", pct(v)));
+        match self.st.level {
+            Level::Red => {
+                if let Some((r, v)) = sig.fg.filter(|(_, v)| *v > cfg.foreground_red) {
+                    format!("foreground {r} stall {} > {}", pct(v), pct(cfg.foreground_red))
+                } else if sig.mem_full > cfg.memory_full_red {
+                    format!("memory full {} > {}", pct(sig.mem_full), pct(cfg.memory_full_red))
+                } else {
+                    format!("recovering ({})", fg.unwrap_or_else(|| "no foreground stall".into()))
+                }
+            }
+            Level::Yellow => {
+                if let Some(r) = Resource::ALL.into_iter().find(|r| sig.some[idx(*r)] > cfg.enter.get(*r)) {
+                    format!("system {r} pressure {} > {}", pct(sig.some[idx(r)]), pct(cfg.enter.get(r)))
+                } else if let Some((r, v)) = sig.fg.filter(|(_, v)| *v > cfg.foreground_yellow) {
+                    format!("foreground {r} stall {} > {}", pct(v), pct(cfg.foreground_yellow))
+                } else {
+                    format!("recovering ({})", fg.unwrap_or_else(|| "no foreground stall".into()))
+                }
+            }
+            Level::Green => "healthy".into(),
+        }
+    }
+
+    /// Advance (or create) the AIMD state for one (target, device) and return it.
+    fn aimd_step(
+        &mut self,
+        now: TimestampMs,
+        target: &Target,
+        device: &str,
+        unit: &UnitState,
+        stalling: bool,
+    ) -> &Aimd {
+        let cfg = &self.cfg;
+        let floor = cfg.aimd_floor;
+        let key = (target.clone(), device.to_string());
+        let st = self.st.aimd.entry(key).or_insert_with(|| {
+            let (r, w) = unit
+                .usage
+                .as_ref()
+                .map_or((0, 0), |u| (rate(u.io_rbytes, u.interval_ms), rate(u.io_wbytes, u.interval_ms)));
+            let init = |obs: u64| ((obs.max(floor) as f64 * cfg.aimd_decrease) as u64).max(floor);
+            Aimd { rbps: init(r), wbps: init(w), last_step: now, step: 1, action: "initial" }
+        });
+        if now - st.last_step >= ms(cfg.aimd_interval) {
+            let next = |v: u64| {
+                if stalling {
+                    ((v as f64 * cfg.aimd_decrease) as u64).max(floor)
+                } else {
+                    v.saturating_add(cfg.aimd_step).max(floor)
+                }
+            };
+            st.rbps = next(st.rbps);
+            st.wbps = next(st.wbps);
+            st.last_step = now;
+            st.step += 1;
+            st.action = if stalling { "decrease" } else { "increase" };
+        }
+        st
+    }
+
+    fn metrics(&self, now: TimestampMs, sig: &Signals, epoch: bool) -> Vec<Metric> {
+        let m = |name: &str, value: f64| Metric {
+            ts: now,
+            name: format!("{NAME}.{name}"),
+            value,
+            labels: BTreeMap::new(),
+            plugin: String::new(),
+        };
+        let mut out: Vec<Metric> =
+            Resource::ALL.into_iter().map(|r| m(&format!("score.{r}"), sig.some[idx(r)])).collect();
+        out.push(m("score.memory_full", sig.mem_full));
+        out.push(m("score.foreground", sig.fg_ratio()));
+        out.push(m("level", level_value(self.st.level)));
+        out.push(m("epoch", f64::from(u8::from(epoch))));
+        out.push(m("aimd_limits", self.st.aimd.len() as f64));
+        out
+    }
+}
+
+impl Plugin for ThresholdPolicy {
+    fn info(&self) -> PluginInfo {
+        PluginInfo {
+            name: NAME.into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            kinds: vec![PluginKind::Policy],
+            description: "GREEN/YELLOW/RED levels with hysteresis, interaction epochs and io.max AIMD".into(),
+        }
+    }
+
+    fn init(&mut self, ctx: &InitContext) -> PluginResult<()> {
+        self.cfg = ThresholdConfig::from_json(&ctx.config).map_err(|e| PluginError::Failed(format!("{NAME}: {e}")))?;
+        self.st = State::default();
+        Ok(())
+    }
+}
+
+impl Policy for ThresholdPolicy {
+    fn evaluate(&mut self, snap: &Snapshot) -> PluginResult<PolicyOutput> {
+        let now = snap.now;
+        if !self.st.started {
+            self.st.started = true;
+            self.st.entered_at = now;
+        }
+
+        let fg_target: Option<Target> =
+            snap.foreground.clone().or_else(|| snap.foreground_unit().map(|u| u.target.clone()));
+        let fg_unit = snap.units.iter().find(|u| Some(&u.target) == fg_target.as_ref());
+        let is_fg = |u: &UnitState| u.foreground || Some(&u.target) == fg_target.as_ref();
+
+        let sig = self.signals(snap, fg_unit);
+        self.process_events(snap, fg_target.as_ref());
+        self.update_level(now, &sig);
+        let epoch = self.epoch_active(now, fg_target.as_ref());
+        let level = self.st.level;
+        let cause = self.cause(&sig);
+        let cfg = self.cfg.clone();
+        let v = &cfg.values;
+        let stalling = sig.fg_ratio() > cfg.foreground_red;
+
+        // RED-only state is dropped as soon as we leave RED.
+        if level != Level::Red {
+            self.st.aimd.clear();
+        }
+        let mem_sustained =
+            level == Level::Red && self.st.mem_full_since.is_some_and(|t| now - t >= ms(cfg.mem_red_after));
+        if level != Level::Red || sig.mem_full <= cfg.memory_full_red * cfg.exit_ratio {
+            self.st.mem_high.clear();
+        }
+
+        let mut plan = Plan::default();
+        let mut live_aimd: BTreeSet<(Target, String)> = BTreeSet::new();
+        let mut live_batch: BTreeSet<Target> = BTreeSet::new();
+
+        for u in &snap.units {
+            let t = &u.target;
+            if is_fg(u) {
+                // The foreground is boosted below and never throttled, whatever its class.
+                if u.class == QosClass::Critical {
+                    let w = v.critical_weight;
+                    plan.set(t, Setting::CpuWeight { value: w }, "critical: protected (static)");
+                    plan.set(t, Setting::IoWeight { value: w }, "critical: protected (static)");
+                    plan.set(t, Setting::MemoryLow { bytes: cfg.critical_memory_low }, "critical: protected (static)");
+                }
+                continue;
+            }
+            match u.class {
+                QosClass::Critical => {
+                    let r = "critical: protected (static, work-conserving)";
+                    plan.set(t, Setting::CpuWeight { value: v.critical_weight }, r);
+                    plan.set(t, Setting::IoWeight { value: v.critical_weight }, r);
+                    plan.set(t, Setting::MemoryLow { bytes: cfg.critical_memory_low }, r);
+                }
+                QosClass::Background => {
+                    let r = "background: lower share (static, work-conserving)";
+                    plan.set(t, Setting::CpuWeight { value: v.background_weight }, r);
+                    plan.set(t, Setting::IoWeight { value: v.background_weight }, r);
+                    if level >= Level::Yellow {
+                        let r = format!("{}: {cause}; background yields", level.as_str().to_uppercase());
+                        plan.set(t, Setting::CpuWeight { value: v.yellow_background_weight }, &r);
+                        plan.set(t, Setting::IoWeight { value: v.yellow_background_weight }, &r);
+                        plan.set(t, Setting::UclampMax { percent: v.yellow_background_uclamp_max }, &r);
+                    }
+                }
+                QosClass::Batch => {
+                    live_batch.insert(t.clone());
+                    let r = "batch: idle CPU, low I/O share (static, work-conserving)";
+                    plan.set(t, Setting::CpuIdle { value: true }, r);
+                    plan.set(t, Setting::IoWeight { value: v.batch_io_weight }, r);
+                    if level >= Level::Yellow {
+                        let r = format!("{}: {cause}; batch yields", level.as_str().to_uppercase());
+                        plan.set(t, Setting::IoWeight { value: v.yellow_batch_io_weight }, &r);
+                        plan.set(t, Setting::UclampMax { percent: v.yellow_batch_uclamp_max }, &r);
+                    }
+                    if mem_sustained && let Some(cur) = u.usage.as_ref().map(|u| u.mem_current).filter(|c| *c > 0) {
+                        self.st.mem_high.entry(t.clone()).or_insert((cur as f64 * cfg.memory_high_ratio) as u64);
+                    }
+                    if let Some(&b) = self.st.mem_high.get(t) {
+                        let r = format!(
+                            "RED: memory full {} > {} for {}; memory.high at {}% of usage",
+                            pct(sig.mem_full),
+                            pct(cfg.memory_full_red),
+                            humantime_short(cfg.mem_red_after),
+                            (cfg.memory_high_ratio * 100.0).round()
+                        );
+                        plan.set(t, Setting::MemoryHigh { bytes: Some(b) }, r);
+                    }
+                }
+                QosClass::Normal | QosClass::Interactive => continue,
+            }
+            if level == Level::Red && u.class.yields() && snap.caps.io_max {
+                for dev in &snap.caps.devices {
+                    live_aimd.insert((t.clone(), dev.clone()));
+                    let a = self.aimd_step(now, t, dev, u, stalling).clone();
+                    let r = format!(
+                        "RED: {cause}; io.max AIMD step {} ({}, r={} w={})",
+                        a.step,
+                        a.action,
+                        mib(a.rbps),
+                        mib(a.wbps)
+                    );
+                    let limit = IoLimit { rbps: Some(a.rbps), wbps: Some(a.wbps), riops: None, wiops: None };
+                    plan.set(t, Setting::IoMax { device: dev.clone(), limit }, r);
+                }
+            }
+        }
+
+        // Garbage-collect state for targets that vanished, changed class or gained focus.
+        self.st.aimd.retain(|k, _| live_aimd.contains(k));
+        self.st.mem_high.retain(|t, _| live_batch.contains(t));
+
+        if let Some(t) = &fg_target {
+            let mem_low = fg_unit
+                .and_then(|u| u.usage.as_ref())
+                .map(|u| u.mem_current.min(cfg.fg_memory_low_max))
+                .filter(|b| *b > 0);
+            let (w, r) = if epoch {
+                (v.fg_epoch_weight, "foreground: interaction epoch boost")
+            } else {
+                (v.fg_weight, "foreground: focused, no recent input (mild boost)")
+            };
+            let keep_max = |plan: &Plan, knob: Knob, w: u64| match plan.get(t, knob) {
+                Some(Setting::CpuWeight { value } | Setting::IoWeight { value }) => w.max(*value),
+                _ => w,
+            };
+            let cw = keep_max(&plan, Knob::CpuWeight, w);
+            let iw = keep_max(&plan, Knob::IoWeight, w);
+            plan.set(t, Setting::CpuWeight { value: cw }, r);
+            plan.set(t, Setting::IoWeight { value: iw }, r);
+            if epoch {
+                plan.set(t, Setting::UclampMin { percent: v.fg_epoch_uclamp_min }, r);
+            }
+            if let Some(b) = mem_low {
+                let b = match plan.get(t, Knob::MemoryLow) {
+                    Some(Setting::MemoryLow { bytes }) => b.max(*bytes),
+                    _ => b,
+                };
+                plan.set(t, Setting::MemoryLow { bytes: b }, r);
+            }
+        }
+
+        let metrics = self.metrics(now, &sig, epoch);
+        Ok(PolicyOutput { intents: plan.into_intents(cfg.priority), level: Some(level), metrics })
+    }
+}
+
+/// `3s`, `500ms`: compact duration for reason strings.
+fn humantime_short(d: Duration) -> String {
+    if d.subsec_millis() == 0 { format!("{}s", d.as_secs()) } else { format!("{}ms", d.as_millis()) }
+}
