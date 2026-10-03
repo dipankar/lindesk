@@ -32,7 +32,9 @@ pub fn parse(path: &str) -> CgroupInfo {
     let mut user: Option<u32> = None;
     let mut slice: Option<String> = None;
     for comp in path.split('/').filter(|c| !c.is_empty()) {
-        if let Some(uid) = comp.strip_prefix("user@").and_then(|r| r.strip_suffix(".service")).and_then(|u| u.parse().ok()) {
+        if let Some(uid) =
+            comp.strip_prefix("user@").and_then(|r| r.strip_suffix(".service")).and_then(|u| u.parse().ok())
+        {
             // Entering a user manager: its own units are user units; the manager service itself
             // is a system unit that only matters if nothing deeper exists.
             info = CgroupInfo { unit: Some(comp.to_string()), slice: slice.clone(), user: None };
@@ -91,7 +93,9 @@ mod tests {
 
     #[test]
     fn nested_subgroups_and_sessions() {
-        let i = parse("/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.gnome.Terminal.slice/vte-spawn-abc.scope");
+        let i = parse(
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.gnome.Terminal.slice/vte-spawn-abc.scope",
+        );
         assert_eq!(i.unit.as_deref(), Some("vte-spawn-abc.scope"));
         assert_eq!(i.slice.as_deref(), Some("app-org.gnome.Terminal.slice"));
         let s = parse("/user.slice/user-1000.slice/session-2.scope");
@@ -111,7 +115,10 @@ mod tests {
 
     #[test]
     fn app_ids() {
-        assert_eq!(app_id_from_unit("app-gnome-org.mozilla.firefox-1234.scope").as_deref(), Some("org.mozilla.firefox"));
+        assert_eq!(
+            app_id_from_unit("app-gnome-org.mozilla.firefox-1234.scope").as_deref(),
+            Some("org.mozilla.firefox")
+        );
         assert_eq!(app_id_from_unit("app-flatpak-org.gimp.GIMP-5678.scope").as_deref(), Some("org.gimp.GIMP"));
         assert_eq!(app_id_from_unit("app-org.kde.konsole@0a1b2c.service").as_deref(), Some("org.kde.konsole"));
         assert_eq!(app_id_from_unit("app-gnome-code-99.scope").as_deref(), Some("code"));

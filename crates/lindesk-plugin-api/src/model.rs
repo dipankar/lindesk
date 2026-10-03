@@ -29,13 +29,8 @@ pub enum QosClass {
 }
 
 impl QosClass {
-    pub const ALL: [QosClass; 5] = [
-        QosClass::Critical,
-        QosClass::Interactive,
-        QosClass::Normal,
-        QosClass::Background,
-        QosClass::Batch,
-    ];
+    pub const ALL: [QosClass; 5] =
+        [QosClass::Critical, QosClass::Interactive, QosClass::Normal, QosClass::Background, QosClass::Batch];
 
     pub fn as_str(self) -> &'static str {
         match self {

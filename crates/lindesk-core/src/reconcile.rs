@@ -70,7 +70,11 @@ impl AppliedState {
         let mut applies = Vec::new();
         for (key, e) in &self.entries {
             if !desired.contains_key(key) {
-                resets.push(Action::Reset { target: e.target.clone(), knob: e.knob.clone(), original: e.original.clone() });
+                resets.push(Action::Reset {
+                    target: e.target.clone(),
+                    knob: e.knob.clone(),
+                    original: e.original.clone(),
+                });
             }
         }
         for ((target, knob), d) in desired {
@@ -106,7 +110,14 @@ impl AppliedState {
     }
 
     /// Record a successful apply. `original` is only used for the first apply of a knob.
-    pub fn record_apply(&mut self, target: &Target, setting: &Setting, original: Option<Setting>, provenance: &Provenance, now: TimestampMs) {
+    pub fn record_apply(
+        &mut self,
+        target: &Target,
+        setting: &Setting,
+        original: Option<Setting>,
+        provenance: &Provenance,
+        now: TimestampMs,
+    ) {
         let key = (target.clone(), setting.knob());
         match self.entries.get_mut(&key) {
             Some(e) => {
@@ -170,17 +181,34 @@ mod tests {
 
         let a = st.plan(&want);
         assert!(matches!(&a[..], [Action::Apply { first: true, .. }]));
-        st.record_apply(&t, &Setting::CpuWeight { value: 20 }, Some(Setting::CpuWeight { value: 100 }), &Provenance::default(), 1);
+        st.record_apply(
+            &t,
+            &Setting::CpuWeight { value: 20 },
+            Some(Setting::CpuWeight { value: 100 }),
+            &Provenance::default(),
+            1,
+        );
         assert!(st.plan(&want).is_empty(), "idempotent");
 
         want.insert((t.clone(), Knob::CpuWeight), decided(Setting::CpuWeight { value: 10 }));
         let a = st.plan(&want);
         assert!(matches!(&a[..], [Action::Apply { first: false, .. }]));
         st.record_apply(&t, &Setting::CpuWeight { value: 10 }, None, &Provenance::default(), 2);
-        assert_eq!(st.get(&t, &Knob::CpuWeight).unwrap().original, Some(Setting::CpuWeight { value: 100 }), "original kept");
+        assert_eq!(
+            st.get(&t, &Knob::CpuWeight).unwrap().original,
+            Some(Setting::CpuWeight { value: 100 }),
+            "original kept"
+        );
 
         let a = st.plan(&BTreeMap::new());
-        assert_eq!(a, vec![Action::Reset { target: t.clone(), knob: Knob::CpuWeight, original: Some(Setting::CpuWeight { value: 100 }) }]);
+        assert_eq!(
+            a,
+            vec![Action::Reset {
+                target: t.clone(),
+                knob: Knob::CpuWeight,
+                original: Some(Setting::CpuWeight { value: 100 })
+            }]
+        );
     }
 
     #[test]

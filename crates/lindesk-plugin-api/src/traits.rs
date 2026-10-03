@@ -59,10 +59,7 @@ impl std::fmt::Display for PluginKind {
 impl std::str::FromStr for PluginKind {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        PluginKind::ALL
-            .into_iter()
-            .find(|k| k.as_str() == s)
-            .ok_or_else(|| format!("unknown plugin kind '{s}'"))
+        PluginKind::ALL.into_iter().find(|k| k.as_str() == s).ok_or_else(|| format!("unknown plugin kind '{s}'"))
     }
 }
 
@@ -199,10 +196,16 @@ pub trait Adapter: Plugin {
     }
 }
 
+/// Classifiers see one process at a time. For a unit target the host passes the unit's main
+/// (or oldest) process with `unit`/`slice` filled in; for a slice with no processes it passes
+/// `pid = 0`, an empty `comm` and `unit = Some("<name>.slice")`.
 pub trait Classifier: Plugin {
     fn classify(&mut self, proc_info: &ProcInfo) -> PluginResult<Option<Classification>>;
 }
 
+/// Policies are declarative: each evaluation returns the *complete* set of intents that
+/// should be in force right now. Anything a policy stops returning is reverted by the host.
+/// Policies may keep internal state (hysteresis, epochs) between calls.
 pub trait Policy: Plugin {
     fn evaluate(&mut self, snapshot: &Snapshot) -> PluginResult<PolicyOutput>;
 }

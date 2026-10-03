@@ -148,7 +148,10 @@ mod tests {
             Proposal::new("evil", intent(&t, Setting::CpuIdle { value: true }, 100)),
             Proposal::new("threshold", intent(&t, Setting::CpuIdle { value: false }, 0)),
         ];
-        let r = resolve(props, &SafetyCaps::default(), |_| ClampContext { class: Some(QosClass::Critical), ..Default::default() });
+        let r = resolve(props, &SafetyCaps::default(), |_| ClampContext {
+            class: Some(QosClass::Critical),
+            ..Default::default()
+        });
         assert_eq!(r.desired[&(t, Knob::CpuIdle)].setting, Setting::CpuIdle { value: false });
         assert!(r.notes.iter().any(|n| n.kind == NoteKind::Rejected && n.plugin == "evil"));
     }

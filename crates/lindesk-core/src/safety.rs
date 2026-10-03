@@ -78,10 +78,18 @@ impl SafetyCaps {
             return Verdict::Rejected(format!("{s} would throttle a critical workload"));
         }
         let clamped = match s.clone() {
-            Setting::CpuWeight { value } => Setting::CpuWeight { value: value.clamp(self.cpu_weight_min, self.cpu_weight_max) },
-            Setting::IoWeight { value } => Setting::IoWeight { value: value.clamp(self.io_weight_min, self.io_weight_max) },
-            Setting::UclampMin { percent } => Setting::UclampMin { percent: clamp_pct(percent, 0.0, self.uclamp_min_max) },
-            Setting::UclampMax { percent } => Setting::UclampMax { percent: clamp_pct(percent, self.uclamp_max_floor, 100.0) },
+            Setting::CpuWeight { value } => {
+                Setting::CpuWeight { value: value.clamp(self.cpu_weight_min, self.cpu_weight_max) }
+            }
+            Setting::IoWeight { value } => {
+                Setting::IoWeight { value: value.clamp(self.io_weight_min, self.io_weight_max) }
+            }
+            Setting::UclampMin { percent } => {
+                Setting::UclampMin { percent: clamp_pct(percent, 0.0, self.uclamp_min_max) }
+            }
+            Setting::UclampMax { percent } => {
+                Setting::UclampMax { percent: clamp_pct(percent, self.uclamp_max_floor, 100.0) }
+            }
             Setting::IoMax { device, limit } => {
                 let f = |v: Option<u64>, floor: u64| v.map(|v| v.max(floor));
                 Setting::IoMax {
@@ -139,14 +147,23 @@ mod tests {
     #[test]
     fn boosts_are_bounded() {
         let v = caps().check(&Setting::UclampMin { percent: 100.0 }, &ClampContext::default());
-        assert_eq!(v, Verdict::Clamped { setting: Setting::UclampMin { percent: 50.0 }, from: Setting::UclampMin { percent: 100.0 } });
+        assert_eq!(
+            v,
+            Verdict::Clamped {
+                setting: Setting::UclampMin { percent: 50.0 },
+                from: Setting::UclampMin { percent: 100.0 }
+            }
+        );
         let v = caps().check(&Setting::CpuWeight { value: 10000 }, &ClampContext::default());
         assert!(matches!(v, Verdict::Clamped { setting: Setting::CpuWeight { value: 1000 }, .. }));
     }
 
     #[test]
     fn throttles_have_floors() {
-        let s = Setting::IoMax { device: "8:0".into(), limit: IoLimit { wbps: Some(1), riops: Some(1), ..Default::default() } };
+        let s = Setting::IoMax {
+            device: "8:0".into(),
+            limit: IoLimit { wbps: Some(1), riops: Some(1), ..Default::default() },
+        };
         match caps().check(&s, &ClampContext::default()) {
             Verdict::Clamped { setting: Setting::IoMax { limit, .. }, .. } => {
                 assert_eq!(limit.wbps, Some(8 * 1024 * 1024));
