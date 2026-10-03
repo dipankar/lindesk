@@ -1,0 +1,11 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: lindesk
+Upstream-Contact: Dipankar Sarkar <me@dipankar.name>
+Source: https://github.com/dipankar/lindesk
+
+Files: *
+Copyright: Dipankar Sarkar and the lindesk contributors
+License: MIT or Apache-2.0
+ The full license texts are in /usr/share/licenses/lindesk/LICENSE-MIT and
+ /usr/share/licenses/lindesk/LICENSE-APACHE. The Apache License 2.0 is also
+ available in /usr/share/common-licenses/Apache-2.0.

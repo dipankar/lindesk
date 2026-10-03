@@ -1,0 +1,20 @@
+#!/bin/sh
+# lindesk prerm: stop the services and undo every runtime change before the binaries go.
+set -e
+
+if [ "$1" = remove ] || [ "$1" = deconfigure ]; then
+	if [ -d /run/systemd/system ]; then
+		if command -v deb-systemd-invoke >/dev/null 2>&1; then
+			deb-systemd-invoke stop lindesk-compact.timer lindeskd.service >/dev/null || true
+		else
+			systemctl stop lindesk-compact.timer lindeskd.service >/dev/null 2>&1 || true
+		fi
+	fi
+	# lindeskd.service's ExecStopPost already restores; this also covers non-systemd hosts
+	# and a crashed daemon. --restore is idempotent.
+	if [ -x /usr/bin/lindeskd ]; then
+		/usr/bin/lindeskd --restore >/dev/null 2>&1 || echo "lindesk: warning: lindeskd --restore failed" >&2
+	fi
+fi
+
+exit 0

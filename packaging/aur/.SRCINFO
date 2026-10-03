@@ -1,0 +1,25 @@
+pkgbase = lindesk
+	pkgdesc = macOS-style QoS for the Linux desktop: a plugin-based userspace resource governor
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/dipankar/lindesk
+	install = lindesk.install
+	arch = x86_64
+	arch = aarch64
+	license = MIT OR Apache-2.0
+	makedepends = cargo
+	depends = dbus
+	depends = polkit
+	depends = systemd
+	depends = gcc-libs
+	depends = glibc
+	optdepends = duckdb: query the telemetry lake from the DuckDB CLI
+	optdepends = gnome-shell: GNOME foreground adapter (extension lindesk@lindesk.org)
+	optdepends = kwin: KDE Plasma foreground adapter (KWin script)
+	options = !lto
+	options = !debug
+	backup = etc/lindesk/lindesk.toml
+	source = lindesk-0.1.0.tar.gz::https://github.com/dipankar/lindesk/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = lindesk

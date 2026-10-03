@@ -1,0 +1,7 @@
+#!/bin/sh
+# runit service for the lindesk QoS broker (non-systemd hosts).
+# Installed by `install.sh --init=runit` as /etc/sv/lindeskd/run.
+install -d -m 0755 /run/lindesk
+install -d -m 0750 -g lindesk /var/lib/lindesk /var/lib/lindesk/telemetry 2>/dev/null ||
+	install -d -m 0750 /var/lib/lindesk /var/lib/lindesk/telemetry
+exec /usr/bin/lindeskd 2>&1

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Undo every runtime change, even if the daemon died.
+exec /usr/bin/lindeskd --restore

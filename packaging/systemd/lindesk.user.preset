@@ -1,0 +1,3 @@
+# Enable the per-user lindesk session agent and its maintenance timer by default.
+enable lindesk-session.service
+enable lindesk-compact.timer

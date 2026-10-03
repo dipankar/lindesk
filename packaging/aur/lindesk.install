@@ -1,0 +1,35 @@
+# pacman install hooks for lindesk.
+# The alpm hooks shipped with systemd already create the group and state directories
+# (sysusers.d / tmpfiles.d) and reload the units; these functions only enable, restore
+# and inform. Following Arch convention, the broker is not started automatically.
+
+post_install() {
+  systemctl --global enable lindesk-session.service lindesk-compact.timer >/dev/null 2>&1 || true
+  cat <<'MSG'
+==> lindesk: enable the broker and its maintenance timer:
+      sudo systemctl enable --now lindeskd.service lindesk-compact.timer
+    lindesk-session (per user) is enabled globally and starts at your next login.
+    GNOME: gnome-extensions enable lindesk@lindesk.org
+    KDE:   enable "lindesk" in System Settings > Window Management > KWin Scripts
+    Then: lindeskctl doctor
+MSG
+}
+
+post_upgrade() {
+  if [ -d /run/systemd/system ] && systemctl is-active --quiet lindeskd.service; then
+    systemctl try-restart lindeskd.service || true
+  fi
+}
+
+pre_remove() {
+  if [ -d /run/systemd/system ]; then
+    systemctl disable --now lindesk-compact.timer lindeskd.service >/dev/null 2>&1 || true
+  fi
+  systemctl --global disable lindesk-session.service lindesk-compact.timer >/dev/null 2>&1 || true
+  # Undo every runtime change (lindeskd.service's ExecStopPost does this too).
+  /usr/bin/lindeskd --restore >/dev/null 2>&1 || echo "==> lindesk: warning: lindeskd --restore failed"
+}
+
+post_remove() {
+  echo "==> lindesk: telemetry in /var/lib/lindesk and the 'lindesk' group were kept."
+}

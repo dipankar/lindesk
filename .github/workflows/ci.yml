@@ -41,13 +41,45 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-deb --locked
-      - run: ./packaging/build-packages.sh deb
+      - name: Lint packaging scripts
+        run: |
+          shellcheck packaging/install.sh packaging/build-packages.sh packaging/check-layout.sh \
+            packaging/runit/lindeskd/run packaging/runit/lindeskd/finish packaging/openrc/lindeskd
+          shellcheck -s sh packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm
+          shellcheck -s bash packaging/aur/lindesk.install
+      - name: install.sh layout, idempotency and uninstall
+        run: ./packaging/check-layout.sh
+      # Build once on the runner; every package format stages these binaries through
+      # install.sh. (Drop LINDESK_BIN_DIR to compile inside the Fedora/Arch containers.)
+      - name: Release binaries
+        run: cargo build --release --locked -p lindeskd -p lindesk-session -p lindeskctl -p lindesk-data -p lindesk-bench
+      - name: Build .deb
+        run: LINDESK_BIN_DIR=target/release ./packaging/build-packages.sh deb
       - name: Build RPM in Fedora
-        run: docker run --rm -v "$PWD":/src -w /src fedora:latest ./packaging/build-packages.sh rpm
+        run: docker run --rm -v "$PWD":/src -w /src -e LINDESK_BIN_DIR=/src/target/release fedora:latest ./packaging/build-packages.sh rpm
       - name: Build Arch package
-        run: docker run --rm -v "$PWD":/src -w /src archlinux:latest ./packaging/build-packages.sh arch
+        run: docker run --rm -v "$PWD":/src -w /src -e LINDESK_BIN_DIR=/src/target/release archlinux:latest ./packaging/build-packages.sh arch
+      - name: Install and remove the .deb in Ubuntu
+        run: |
+          docker run --rm -v "$PWD/dist":/dist:ro ubuntu:24.04 sh -euxc '
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /dist/lindesk_*.deb
+            lindeskctl --help >/dev/null
+            getent group lindesk
+            test -d /var/lib/lindesk/telemetry
+            apt-get purge -y -qq lindesk
+            test ! -e /usr/bin/lindeskd'
+      - name: Install and remove the RPM in Fedora
+        run: |
+          docker run --rm -v "$PWD/dist":/dist:ro fedora:latest sh -euxc '
+            dnf install -y -q $(ls /dist/lindesk-*.rpm | grep -v src.rpm)
+            lindeskctl --help >/dev/null
+            getent group lindesk
+            dnf remove -y -q lindesk
+            test ! -e /usr/bin/lindeskd'
       - uses: actions/upload-artifact@v4
         with:
           name: packages
-          path: dist/*
+          path: |
+            dist/*
+            dist/.SRCINFO

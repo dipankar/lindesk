@@ -1,0 +1,60 @@
+# Maintainer: Dipankar Sarkar <me@dipankar.name>
+#
+# AUR package for lindesk. The installed layout comes from packaging/install.sh.
+#
+# Release checklist:
+#   1. bump pkgver (it must match [workspace.package] version in Cargo.toml), reset pkgrel
+#   2. updpkgsums                              # replaces the SKIP checksum
+#   3. makepkg --printsrcinfo > .SRCINFO       # the AUR requires .SRCINFO to match
+#   4. namcap PKGBUILD && makepkg -sf && namcap lindesk-*.pkg.tar.zst
+#   5. git add PKGBUILD .SRCINFO lindesk.install && git commit && git push (AUR repo)
+# Without an Arch host: packaging/build-packages.sh arch (also refreshes dist/.SRCINFO).
+
+pkgname=lindesk
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='macOS-style QoS for the Linux desktop: a plugin-based userspace resource governor'
+arch=(x86_64 aarch64)
+url='https://github.com/dipankar/lindesk'
+license=('MIT OR Apache-2.0')
+depends=(dbus polkit systemd gcc-libs glibc)
+makedepends=(cargo)
+optdepends=(
+  'duckdb: query the telemetry lake from the DuckDB CLI'
+  'gnome-shell: GNOME foreground adapter (extension lindesk@lindesk.org)'
+  'kwin: KDE Plasma foreground adapter (KWin script)'
+)
+backup=(etc/lindesk/lindesk.toml)
+install=lindesk.install
+options=(!lto !debug)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+_bins=(lindeskd lindesk-session lindeskctl lindesk-data lindesk-bench)
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  local _p=()
+  for b in "${_bins[@]}"; do _p+=(-p "$b"); done
+  cargo build --frozen --release "${_p[@]}"
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release --workspace --lib
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  CARGO_TARGET_DIR=target ./packaging/install.sh --destdir="$pkgdir" --prefix=/usr --sysconfdir=/etc \
+    --no-build --no-enable --no-manifest
+}

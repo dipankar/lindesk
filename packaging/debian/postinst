@@ -1,0 +1,61 @@
+#!/bin/sh
+# lindesk postinst: group, state dirs, enable and (re)start services.
+# Works without systemd as PID 1 (containers, chroots, sysvinit): every systemctl call
+# is either offline-safe (enable) or guarded by /run/systemd/system.
+set -e
+
+SYSTEM_UNITS="lindeskd.service lindesk-compact.timer"
+USER_UNITS="lindesk-session.service lindesk-compact.timer"
+
+case "$1" in
+configure | abort-upgrade | abort-deconfigure | abort-remove)
+	if command -v systemd-sysusers >/dev/null 2>&1; then
+		systemd-sysusers ${DPKG_ROOT:+--root="$DPKG_ROOT"} lindesk.conf || true
+	elif ! getent group lindesk >/dev/null 2>&1; then
+		addgroup --system lindesk >/dev/null || true
+	fi
+	if command -v systemd-tmpfiles >/dev/null 2>&1; then
+		systemd-tmpfiles ${DPKG_ROOT:+--root="$DPKG_ROOT"} --create lindesk.conf || true
+	fi
+
+	for unit in $SYSTEM_UNITS; do
+		if command -v deb-systemd-helper >/dev/null 2>&1; then
+			# Remove masks created on removal; respect an admin's earlier "disable".
+			deb-systemd-helper unmask "$unit" >/dev/null || true
+			if deb-systemd-helper --quiet was-enabled "$unit"; then
+				deb-systemd-helper enable "$unit" >/dev/null || true
+			else
+				deb-systemd-helper update-state "$unit" >/dev/null || true
+			fi
+		elif command -v systemctl >/dev/null 2>&1; then
+			systemctl enable "$unit" >/dev/null 2>&1 || true
+		fi
+	done
+	if [ -z "$2" ] && command -v systemctl >/dev/null 2>&1; then
+		# Fresh install: enable the session agent for every user.
+		# shellcheck disable=SC2086
+		systemctl --global enable $USER_UNITS >/dev/null 2>&1 || true
+	fi
+
+	if [ -d /run/systemd/system ]; then
+		systemctl --system daemon-reload >/dev/null || true
+		if [ -n "$2" ]; then action=try-restart; else action=start; fi
+		# shellcheck disable=SC2086
+		if command -v deb-systemd-invoke >/dev/null 2>&1; then
+			deb-systemd-invoke $action $SYSTEM_UNITS >/dev/null || true
+		else
+			systemctl $action $SYSTEM_UNITS >/dev/null || true
+		fi
+		echo "lindesk: lindeskd is running; lindesk-session starts at your next graphical login."
+	else
+		echo "lindesk: systemd is not running; services enabled but not started."
+		echo "lindesk: without systemd, lindesk-session starts from /etc/xdg/autostart."
+	fi
+	if [ -z "$2" ]; then
+		echo "lindesk: GNOME users: gnome-extensions enable lindesk@lindesk.org"
+		echo "lindesk: KDE users:   enable 'lindesk' in System Settings > Window Management > KWin Scripts"
+	fi
+	;;
+esac
+
+exit 0

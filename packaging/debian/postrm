@@ -1,0 +1,39 @@
+#!/bin/sh
+# lindesk postrm: drop enablement links; purge also removes telemetry.
+set -e
+
+SYSTEM_UNITS="lindeskd.service lindesk-compact.timer"
+USER_UNITS="lindesk-session.service lindesk-compact.timer"
+
+case "$1" in
+remove)
+	if command -v systemctl >/dev/null 2>&1; then
+		# shellcheck disable=SC2086
+		systemctl --global disable $USER_UNITS >/dev/null 2>&1 || true
+	fi
+	if command -v deb-systemd-helper >/dev/null 2>&1; then
+		# shellcheck disable=SC2086
+		deb-systemd-helper mask $SYSTEM_UNITS >/dev/null || true
+	fi
+	if [ -d /run/systemd/system ]; then
+		systemctl --system daemon-reload >/dev/null || true
+	fi
+	;;
+purge)
+	if command -v systemctl >/dev/null 2>&1; then
+		# shellcheck disable=SC2086
+		systemctl --global disable $USER_UNITS >/dev/null 2>&1 || true
+	fi
+	if command -v deb-systemd-helper >/dev/null 2>&1; then
+		# shellcheck disable=SC2086
+		deb-systemd-helper purge $SYSTEM_UNITS >/dev/null || true
+		# shellcheck disable=SC2086
+		deb-systemd-helper unmask $SYSTEM_UNITS >/dev/null || true
+	fi
+	rm -rf /var/lib/lindesk /run/lindesk
+	rmdir /etc/lindesk/rules.d /etc/lindesk/plugins /etc/lindesk 2>/dev/null || true
+	# The 'lindesk' system group is kept, as Debian policy recommends.
+	;;
+esac
+
+exit 0

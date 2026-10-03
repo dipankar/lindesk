@@ -1,0 +1,21 @@
+Package: lindesk
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Dipankar Sarkar <me@dipankar.name>
+Installed-Size: @INSTALLED_SIZE@
+Depends: dbus, systemd | systemd-standalone-sysusers, polkitd | policykit-1@SHLIBS_DEPENDS@
+Recommends: gnome-shell-extension-prefs
+Suggests: duckdb
+Section: admin
+Priority: optional
+Homepage: https://github.com/dipankar/lindesk
+Description: macOS-style QoS for the Linux desktop
+ lindesk is a userspace resource governor that keeps the application you are
+ using responsive while compiles, copies, indexers and package upgrades run in
+ the background. It connects desktop focus and input activity to PSI, cgroup v2
+ weights, uclamp and io.max, intervening only when the foreground suffers, and
+ reverting every change on exit.
+ .
+ This package contains the root broker (lindeskd), the per-user session agent
+ (lindesk-session), the lindeskctl CLI, telemetry maintenance (lindesk-data),
+ the benchmark tool, the GNOME Shell extension and the KWin script.

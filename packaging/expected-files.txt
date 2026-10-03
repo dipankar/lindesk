@@ -1,0 +1,46 @@
+# Files and empty directories staged by: install.sh --destdir=DIR --no-build
+# with the stub binaries from check-layout.sh (mode, path; dirs end in /).
+# The manifest (/usr/share/lindesk/install-manifest.txt) is omitted; it is
+# skipped by --no-manifest, which packages use. Regenerate: check-layout.sh --update
+644 /etc/lindesk/lindesk.toml
+755 /etc/lindesk/plugins/
+755 /etc/lindesk/rules.d/
+644 /etc/xdg/autostart/lindesk-session.desktop
+755 /usr/bin/lindesk-bench
+755 /usr/bin/lindesk-data
+755 /usr/bin/lindesk-session
+755 /usr/bin/lindeskctl
+755 /usr/bin/lindeskd
+755 /usr/lib/lindesk/plugins/
+644 /usr/lib/systemd/system-preset/80-lindesk.preset
+644 /usr/lib/systemd/system/lindesk-compact.service
+644 /usr/lib/systemd/system/lindesk-compact.timer
+644 /usr/lib/systemd/system/lindeskd.service
+644 /usr/lib/systemd/user-preset/80-lindesk.preset
+644 /usr/lib/systemd/user/lindesk-compact.service
+644 /usr/lib/systemd/user/lindesk-compact.timer
+644 /usr/lib/systemd/user/lindesk-session.service
+644 /usr/lib/sysusers.d/lindesk.conf
+644 /usr/lib/tmpfiles.d/lindesk.conf
+644 /usr/share/bash-completion/completions/lindeskctl
+644 /usr/share/dbus-1/services/org.lindesk.QoS1.service
+644 /usr/share/dbus-1/system-services/org.lindesk.Broker1.service
+644 /usr/share/dbus-1/system.d/org.lindesk.Broker1.conf
+644 /usr/share/doc/lindesk/ARCHITECTURE.md
+644 /usr/share/doc/lindesk/README.md
+644 /usr/share/doc/lindesk/adapters.md
+644 /usr/share/fish/vendor_completions.d/lindeskctl.fish
+644 /usr/share/gnome-shell/extensions/lindesk@lindesk.org/extension.js
+644 /usr/share/gnome-shell/extensions/lindesk@lindesk.org/metadata.json
+644 /usr/share/kwin/scripts/lindesk/contents/code/main.js
+644 /usr/share/kwin/scripts/lindesk/metadata.json
+644 /usr/share/licenses/lindesk/LICENSE-APACHE
+644 /usr/share/licenses/lindesk/LICENSE-MIT
+644 /usr/share/lindesk/rules.d/00-slices.toml
+644 /usr/share/lindesk/rules.d/10-critical.toml
+644 /usr/share/lindesk/rules.d/50-background.toml
+644 /usr/share/lindesk/rules.d/60-batch.toml
+644 /usr/share/man/man1/lindeskctl.1.gz
+644 /usr/share/man/man8/lindeskd.8.gz
+644 /usr/share/polkit-1/actions/org.lindesk.policy
+644 /usr/share/zsh/site-functions/_lindeskctl

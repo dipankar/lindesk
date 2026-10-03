@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# OpenRC service for the lindesk QoS broker (non-systemd hosts).
+# shellcheck shell=sh disable=SC2034  # variables are read by openrc-run
+# Installed by `install.sh --init=openrc` as /etc/init.d/lindeskd.
+
+name="lindeskd"
+description="lindesk QoS broker (desktop responsiveness governor)"
+command="/usr/bin/lindeskd"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/lindeskd.log"
+error_log="/var/log/lindeskd.log"
+
+depend() {
+	need dbus localmount
+	after cgroups
+}
+
+start_pre() {
+	checkpath -d -m 0755 -o root:root /run/lindesk
+	checkpath -d -m 0750 -o root:lindesk /var/lib/lindesk /var/lib/lindesk/telemetry
+}
+
+stop_post() {
+	# Undo every runtime change, even if the daemon died.
+	/usr/bin/lindeskd --restore || true
+}
