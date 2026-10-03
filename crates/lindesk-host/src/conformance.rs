@@ -158,6 +158,8 @@ pub fn run_conformance_with(path: &Path, opts: &ConformanceOptions) -> Conforman
     r.report.kinds = d.manifest.plugin.kinds.clone();
 
     let config = opts.config.clone().unwrap_or_else(|| d.config.clone());
+    let mut d = d;
+    d.config = config.clone();
     let ext_opts = ExternalOptions {
         host: HostSender::detached(),
         // Never back off: each check should talk to the plugin.
@@ -297,6 +299,7 @@ fn snapshot(busy: bool) -> Snapshot {
     if !busy {
         return Snapshot {
             now: 1_700_000_000_000,
+            level: Default::default(),
             pressure: vec![],
             units: vec![],
             events: vec![],
@@ -307,6 +310,7 @@ fn snapshot(busy: bool) -> Snapshot {
     let fg = unit("app-gnome-org.mozilla.firefox-1234.scope", QosClass::Normal, "firefox", true);
     Snapshot {
         now: 1_700_000_001_000,
+        level: Default::default(),
         pressure: vec![sample(Resource::Cpu, 35.0), sample(Resource::Io, 60.0), sample(Resource::Memory, 2.0)],
         units: vec![
             fg.clone(),

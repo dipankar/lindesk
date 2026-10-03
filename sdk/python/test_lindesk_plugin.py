@@ -184,10 +184,11 @@ class SdkTest(unittest.TestCase):
         r = self.p.request("classifier.classify", {"proc": proc("boom")})
         self.assertEqual(r["error"]["code"], -32000)
         self.assertIn("cannot classify boom", r["error"]["message"])
+        # Handler bugs fail the call (-32000) without counting as protocol failures.
         r = self.p.request("classifier.classify", {"proc": proc("crash")})
-        self.assertEqual(r["error"]["code"], -32603)
+        self.assertEqual(r["error"]["code"], -32000)
         r = self.p.request("classifier.classify", {"nope": 1})
-        self.assertEqual(r["error"]["code"], -32602)
+        self.assertEqual(r["error"]["code"], -32000)
         r = self.p.request("no.such.method")
         self.assertEqual(r["error"]["code"], -32601)
         r = self.p.request("sensor.poll", {"now": 0})  # kind not registered

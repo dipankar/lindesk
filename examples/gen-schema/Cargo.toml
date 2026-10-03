@@ -1,0 +1,13 @@
+[package]
+name = "gen-schema"
+version = "0.1.0"
+edition = "2024"
+description = "Prints the lindesk plugin protocol JSON Schema (docs/src/reference/protocol.schema.json)"
+publish = false
+
+[dependencies]
+lindesk-plugin-api = { path = "../../crates/lindesk-plugin-api" }
+serde_json = "1"
+
+# Standalone: not a plugin, so not part of the examples/plugins/rust/* workspace members.
+[workspace]

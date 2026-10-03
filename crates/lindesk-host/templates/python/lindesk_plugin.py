@@ -466,16 +466,12 @@ def _handle(msg):
         else:
             log("%s failed: %s" % (method, e), "error")
         return True
-    except (KeyError, TypeError, ValueError) as e:
-        if rid is not None:
-            _respond(rid, error=(INVALID_PARAMS, "%s: %s: %s" % (method, type(e).__name__, e)))
-        else:
-            log("%s failed: %s" % (method, e), "error")
-        return True
     except Exception as e:  # noqa: BLE001 - never let a handler bug kill the protocol loop
+        # A bug in a handler fails this call only (-32000); it does not count as a
+        # protocol failure, so the host won't back off or disable the plugin for it.
         log("%s raised:\n%s" % (method, traceback.format_exc()), "error")
         if rid is not None:
-            _respond(rid, error=(INTERNAL, "%s: %s" % (type(e).__name__, e)))
+            _respond(rid, error=(FAILED, "%s: %s: %s" % (method, type(e).__name__, e)))
         return True
     if rid is not None:
         _respond(rid, result)

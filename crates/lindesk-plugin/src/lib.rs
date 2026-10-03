@@ -51,9 +51,21 @@ pub use server::Server;
 
 /// Everything a plugin usually needs: the API types and traits plus [`Server`]/[`Notifier`].
 pub mod prelude {
+    pub use crate::config_as;
     pub use crate::{Notifier, Server, notifier};
     pub use lindesk_plugin_api::protocol::LogLevel;
     pub use lindesk_plugin_api::*;
+    pub use serde::{Deserialize, Serialize};
+    pub use serde_json::{self, Value, json};
+}
+
+/// Deserialize the plugin's `[config]` (from [`InitContext::config`]) into `T`, treating a
+/// missing/null config as `{}` so `#[serde(default)]` structs just work.
+pub fn config_as<T: serde::de::DeserializeOwned>(
+    ctx: &lindesk_plugin_api::InitContext,
+) -> lindesk_plugin_api::PluginResult<T> {
+    let v = if ctx.config.is_null() { serde_json::json!({}) } else { ctx.config.clone() };
+    serde_json::from_value(v).map_err(|e| lindesk_plugin_api::PluginError::Failed(format!("invalid config: {e}")))
 }
 
 /// A [`Notifier`] writing to this process's stdout. Usable from any thread, at any time.

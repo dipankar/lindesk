@@ -1,0 +1,24 @@
+# steam-games: a lindesk classifier plugin.
+[plugin]
+name = "steam-games"
+version = "0.1.0"
+api = 1
+kinds = ["classifier"]
+exec = "steam_games.py"
+privilege = "user"
+description = "Proton/Wine games and gamescope are interactive; Steam's web helper is background"
+
+[classifier]
+priority = 50          # ahead of the built-in rules classifier
+min_confidence = 0.5
+# Host-side filter: lindesk only sends processes that match, so there is no RPC at all for
+# everything else. Lists are ANDed (a process must match one glob in *every* non-empty
+# list), so all patterns live in one list. `exe` is better than `comm` here: comm is
+# truncated to 15 characters, while every Wine/Proton process runs Wine's preloader.
+prefilter = { exe = ["*wine*", "*/gamescope*", "*/steamwebhelper", "*/reaper"] }
+
+[config]
+# Extra unit-name globs that hold a game (matched in addition to steam_app_*).
+game_units = []
+# Class for Steam's web helper; "normal" if you keep the store open next to a game.
+webhelper_class = "background"

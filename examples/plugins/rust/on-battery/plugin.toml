@@ -1,0 +1,39 @@
+# on-battery: a lindesk policy *modifier*.
+#
+# It runs next to the built-in `threshold` policy. On AC power it returns no intents at
+# all. On battery it returns intents for a handful of knobs only, at a higher priority
+# than threshold (0), so it wins exactly those knobs and threshold keeps everything else.
+[plugin]
+name = "on-battery"
+version = "0.1.0"
+api = 1
+kinds = ["policy"]
+# The binary sits next to this file once installed (see README.md).
+exec = "on-battery"
+privilege = "user"   # user: tunes your own apps; install as a system plugin to cover system services too
+description = "On battery, background work yields harder and foreground boosts are shorter"
+
+[policy]
+priority = 20        # beats threshold (0) and default plugins (10) on the knobs it emits
+
+[config]
+# Where to find class/power_supply. Point it at a fixture to try the battery path on a
+# desktop: sysfs_root = "fixtures/laptop-on-battery" (relative to this directory).
+sysfs_root = "/sys"
+# Re-read the power supplies at most this often.
+poll_ms = 5000
+
+# cpu.weight for background units (threshold: 50 green, 20 yellow/red).
+background_cpu_weight = 25
+background_cpu_weight_pressure = 10
+# cpu.uclamp.max for batch units, percent (threshold: none green, 40 yellow/red).
+batch_uclamp_max = 50.0
+batch_uclamp_max_pressure = 30.0
+
+# Interaction boost length on battery. threshold boosts for `threshold_epoch_ms`; from
+# `epoch_ms` until then, on-battery puts the foreground back on threshold's mild,
+# no-input values (`fg_weight`, no uclamp.min). Keep these two in sync with
+# [plugins.threshold.config] epoch and values.fg_weight.
+epoch_ms = 200
+threshold_epoch_ms = 500
+fg_weight = 200

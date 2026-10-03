@@ -28,8 +28,8 @@ use lindesk_plugin_api::protocol::{
 };
 use lindesk_plugin_api::{
     API_VERSION, Actuator, ActuatorCaps, Adapter, Classification, Classifier, Event, EventSink, InitContext, Knob,
-    Manifest, Metric, Plugin, PluginError, PluginInfo, PluginKind, PluginResult, Policy, PolicyOutput, ProcInfo,
-    Record, Sample, Sensor, SensorInput, SensorOutput, Setting, Sink, Snapshot, Target, TimestampMs,
+    Manifest, Metric, Plugin, PluginError, PluginInfo, PluginKind, PluginResult, Policy, PolicyOutput, Privilege,
+    ProcInfo, Record, Sample, Sensor, SensorInput, SensorOutput, Setting, Sink, Snapshot, Target, TimestampMs,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,9 @@ const LOG_RING: usize = 200;
 
 /// Environment variables passed through to plugins; everything else is cleared.
 const ENV_KEEP: [&str; 4] = ["PATH", "HOME", "LANG", "LINDESK_SDK_PATH"];
+/// Additionally passed to user-privilege plugins so they can reach the desktop session.
+const ENV_KEEP_USER: [&str; 5] =
+    ["DBUS_SESSION_BUS_ADDRESS", "WAYLAND_DISPLAY", "DISPLAY", "SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE"];
 
 /// Sending half of the queues external plugins (and adapters) feed. Cheap to clone.
 #[derive(Clone, Debug)]
@@ -433,7 +436,7 @@ impl ExternalPlugin {
     pub fn disable(&self, reason: &str) {
         supervisor::lock(&self.inner.sup).disable(reason);
         if let Some(c) = lk(&self.inner.conn).take() {
-            graceful_stop(&c);
+            graceful_stop(&c, self.inner.timeout_scale);
         }
     }
 
@@ -502,10 +505,11 @@ impl ExternalPlugin {
     }
 
     fn env(&self) -> Vec<(OsString, OsString)> {
+        let user = self.inner.manifest.plugin.privilege == Privilege::User;
         let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
             .filter(|(k, _)| {
                 let k = k.to_string_lossy();
-                ENV_KEEP.contains(&k.as_ref()) || k.starts_with("XDG_")
+                ENV_KEEP.contains(&k.as_ref()) || k.starts_with("XDG_") || (user && ENV_KEEP_USER.contains(&k.as_ref()))
             })
             .collect();
         if !env.iter().any(|(k, _)| k == "PATH") {
@@ -689,7 +693,7 @@ impl ExternalPlugin {
         self.inner.stopped.store(true, Ordering::SeqCst);
         self.inner.adapter_started.store(false, Ordering::SeqCst);
         match lk(&self.inner.conn).take() {
-            Some(c) => graceful_stop(&c),
+            Some(c) => graceful_stop(&c, self.inner.timeout_scale),
             None => ShutdownOutcome::NotRunning,
         }
     }
@@ -699,18 +703,18 @@ impl ExternalPlugin {
     }
 }
 
-fn graceful_stop(c: &Conn) -> ShutdownOutcome {
+fn graceful_stop(c: &Conn, scale: f64) -> ShutdownOutcome {
     c.closing.store(true, Ordering::SeqCst);
     let start = Instant::now();
     if c.alive.load(Ordering::SeqCst) {
         let _ = c.send(&Notification::new(methods::SHUTDOWN, Value::Null));
     }
     lk(&c.stdin).take();
-    if let Some(st) = c.wait_exit(start + Duration::from_millis(500)) {
+    if let Some(st) = c.wait_exit(start + Duration::from_millis(500).mul_f64(scale.max(1.0))) {
         return ShutdownOutcome::Exited { code: st.code(), after: start.elapsed() };
     }
     c.signal(libc::SIGTERM);
-    if c.wait_exit(start + Duration::from_secs(2)).is_some() {
+    if c.wait_exit(start + Duration::from_secs(2).mul_f64(scale.max(1.0))).is_some() {
         return ShutdownOutcome::Terminated;
     }
     c.kill_now();
@@ -786,7 +790,7 @@ impl Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         if let Some(c) = lk(&self.conn).take() {
-            graceful_stop(&c);
+            graceful_stop(&c, self.timeout_scale);
         }
     }
 }

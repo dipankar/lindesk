@@ -36,6 +36,7 @@ impl Snap {
         Snap {
             s: Snapshot {
                 now,
+                level: Default::default(),
                 pressure: Vec::new(),
                 units: Vec::new(),
                 events: Vec::new(),

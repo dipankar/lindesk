@@ -8,8 +8,18 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Exposes `lindesk_sys::fixture`, a builder for fake /sys, /proc and cgroup trees, so other
+# crates can test against the same host shapes as this crate's own tests.
+fixtures = []
+
 [dependencies]
 lindesk-plugin-api.workspace = true
 lindesk-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+libc.workspace = true
+flate2 = "1.1"
+
+[dev-dependencies]
+tempfile.workspace = true

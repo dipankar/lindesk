@@ -688,6 +688,7 @@ impl Engine {
             .collect();
         Snapshot {
             now,
+            level: self.level(),
             pressure: self.system_pressure.values().cloned().collect(),
             units,
             events,

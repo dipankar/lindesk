@@ -1,0 +1,21 @@
+[package]
+name = "on-battery"
+description = "lindesk policy modifier: background work yields harder and foreground boosts are shorter on battery"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+lindesk-plugin.workspace = true
+# Only for `#[derive(Deserialize)]` on the [config] struct.
+serde.workspace = true
+
+[dev-dependencies]
+# Runs `lindeskctl plugin test`'s conformance checks on every example plugin.
+lindesk-host.workspace = true
+tempfile.workspace = true
+toml.workspace = true

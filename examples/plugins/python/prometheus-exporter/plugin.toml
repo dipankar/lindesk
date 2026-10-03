@@ -1,0 +1,22 @@
+# prometheus-exporter: a lindesk sink plugin.
+[plugin]
+name = "prometheus-exporter"
+version = "0.1.0"
+api = 1
+kinds = ["sink"]
+exec = "prometheus_exporter.py"
+privilege = "user"
+description = "Serves lindesk's pressure, level, applied settings and events on /metrics"
+
+[sink]
+# Everything except the free-form metrics table. (A plugin can also announce its tables
+# in the initialize reply; that wins over this list.)
+tables = ["pressure", "units", "events"]
+
+[config]
+# host:port for the HTTP server. Keep it on loopback unless you mean to publish it.
+listen = "127.0.0.1:9469"
+# Also export per-cgroup pressure (one series per tracked unit; can be many).
+cgroup_pressure = false
+# Units not reported for this long are dropped from the per-class gauges.
+stale_after_s = 60

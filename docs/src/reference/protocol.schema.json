@@ -1,0 +1,2041 @@
+{
+  "$defs": {
+    "ActuatorApplyParams": {
+      "properties": {
+        "setting": {
+          "$ref": "#/$defs/Setting"
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        }
+      },
+      "required": [
+        "target",
+        "setting"
+      ],
+      "type": "object"
+    },
+    "ActuatorCaps": {
+      "description": "What an actuator can do.",
+      "properties": {
+        "knobs": {
+          "description": "Knob kinds supported (IoMax is listed with an empty device string).",
+          "items": {
+            "$ref": "#/$defs/Knob"
+          },
+          "type": "array"
+        },
+        "targets": {
+          "description": "Target kinds supported: \"unit\", \"cgroup\", \"process\".",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "knobs",
+        "targets"
+      ],
+      "type": "object"
+    },
+    "ActuatorReadParams": {
+      "properties": {
+        "knob": {
+          "$ref": "#/$defs/Knob"
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        }
+      },
+      "required": [
+        "target",
+        "knob"
+      ],
+      "type": "object"
+    },
+    "ActuatorResetParams": {
+      "properties": {
+        "knob": {
+          "$ref": "#/$defs/Knob"
+        },
+        "original": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Setting"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        }
+      },
+      "required": [
+        "target",
+        "knob"
+      ],
+      "type": "object"
+    },
+    "Classification": {
+      "description": "A classifier's verdict.",
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/QosClass"
+        },
+        "confidence": {
+          "default": 1.0,
+          "description": "0..1; the host takes the highest-priority classifier with confidence >= its threshold.",
+          "format": "float",
+          "type": "number"
+        },
+        "reason": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "class"
+      ],
+      "type": "object"
+    },
+    "ClassifierSection": {
+      "additionalProperties": false,
+      "properties": {
+        "min_confidence": {
+          "default": 0.5,
+          "format": "float",
+          "type": "number"
+        },
+        "prefilter": {
+          "$ref": "#/$defs/Prefilter",
+          "default": {
+            "app_id": [],
+            "comm": [],
+            "exe": [],
+            "unit": []
+          }
+        },
+        "priority": {
+          "default": 10,
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "ClassifyParams": {
+      "properties": {
+        "proc": {
+          "$ref": "#/$defs/ProcInfo"
+        }
+      },
+      "required": [
+        "proc"
+      ],
+      "type": "object"
+    },
+    "EvaluateParams": {
+      "properties": {
+        "snapshot": {
+          "$ref": "#/$defs/Snapshot"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "Event": {
+      "description": "Things that happen. Adapters produce Focus/Interaction; the host produces the rest.",
+      "oneOf": [
+        {
+          "description": "The user focused a window. Adapters supply pid and/or app_id; the host fills `target`.",
+          "properties": {
+            "app_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "focus",
+              "type": "string"
+            },
+            "pid": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source": {
+              "default": "",
+              "type": "string"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Target"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "ts": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "ts"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The user is actively interacting (input, explicit BeginInteraction).",
+          "properties": {
+            "end": {
+              "default": false,
+              "description": "Explicit end of an interaction (EndInteraction).",
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "interaction",
+              "type": "string"
+            },
+            "pid": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source": {
+              "default": "",
+              "type": "string"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Target"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "ts": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "ts"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A target's class was set or changed.",
+          "properties": {
+            "class": {
+              "$ref": "#/$defs/QosClass"
+            },
+            "kind": {
+              "const": "class_set",
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/Target"
+            },
+            "ts": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "ts",
+            "target",
+            "class",
+            "source"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A policy changed health level.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/Level"
+            },
+            "kind": {
+              "const": "level_changed",
+              "type": "string"
+            },
+            "policy": {
+              "type": "string"
+            },
+            "to": {
+              "$ref": "#/$defs/Level"
+            },
+            "ts": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "ts",
+            "from",
+            "to",
+            "policy"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A setting was applied to the system.",
+          "properties": {
+            "kind": {
+              "const": "action_applied",
+              "type": "string"
+            },
+            "provenance": {
+              "$ref": "#/$defs/Provenance"
+            },
+            "setting": {
+              "$ref": "#/$defs/Setting"
+            },
+            "target": {
+              "$ref": "#/$defs/Target"
+            },
+            "ts": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "ts",
+            "target",
+            "setting",
+            "provenance"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A setting was reverted to its original value.",
+          "properties": {
+            "kind": {
+              "const": "action_reverted",
+              "type": "string"
+            },
+            "knob": {
+              "$ref": "#/$defs/Knob"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/Target"
+            },
+            "ts": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "ts",
+            "target",
+            "knob",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A plugin misbehaved (crash, timeout, protocol error, clamped intent).",
+          "properties": {
+            "kind": {
+              "const": "plugin_error",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "plugin": {
+              "type": "string"
+            },
+            "ts": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "ts",
+            "plugin",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HostCaps": {
+      "description": "What the host can do on this machine (a summary of the probe).",
+      "properties": {
+        "bpf": {
+          "default": false,
+          "type": "boolean"
+        },
+        "cgroup_v2": {
+          "default": false,
+          "type": "boolean"
+        },
+        "devices": {
+          "default": [],
+          "description": "Block devices (`MAJ:MIN`) that back the filesystems lindesk cares about.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "io_cost": {
+          "default": false,
+          "type": "boolean"
+        },
+        "io_latency": {
+          "default": false,
+          "type": "boolean"
+        },
+        "io_max": {
+          "default": false,
+          "type": "boolean"
+        },
+        "io_weight_effective": {
+          "default": false,
+          "type": "boolean"
+        },
+        "psi": {
+          "default": false,
+          "type": "boolean"
+        },
+        "sched_ext": {
+          "default": false,
+          "type": "boolean"
+        },
+        "systemd": {
+          "default": false,
+          "type": "boolean"
+        },
+        "uclamp": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "InitContext": {
+      "description": "Handed to every plugin once, before any other call.",
+      "properties": {
+        "api_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "caps": {
+          "$ref": "#/$defs/HostCaps"
+        },
+        "config": {
+          "default": null,
+          "description": "The plugin's `[config]` table from its manifest merged with admin overrides."
+        },
+        "host": {
+          "description": "\"lindeskd\", \"lindesk-session\" or \"simulate\".",
+          "type": "string"
+        },
+        "privilege": {
+          "$ref": "#/$defs/Privilege"
+        },
+        "uid": {
+          "description": "The session user for `lindesk-session`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "api_version",
+        "host",
+        "privilege",
+        "caps"
+      ],
+      "type": "object"
+    },
+    "InitializeResult": {
+      "properties": {
+        "actuator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActuatorCaps"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "For actuators: their capabilities."
+        },
+        "api_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kinds": {
+          "items": {
+            "$ref": "#/$defs/PluginKind"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "tables": {
+          "default": [],
+          "description": "For sinks: the tables to receive. Empty = all.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "api_version",
+        "kinds"
+      ],
+      "type": "object"
+    },
+    "Intent": {
+      "description": "A policy's wish for one knob on one target. The host resolves competing intents,\nclamps them with safety caps and turns the winners into actuator calls.",
+      "properties": {
+        "priority": {
+          "default": 0,
+          "description": "Higher wins. Built-ins use 0; plugins default to 10.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "reason": {
+          "default": "",
+          "description": "Human-readable explanation, shown by `lindeskctl explain`.",
+          "type": "string"
+        },
+        "setting": {
+          "$ref": "#/$defs/Setting"
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        }
+      },
+      "required": [
+        "target",
+        "setting"
+      ],
+      "type": "object"
+    },
+    "IoLimit": {
+      "description": "`io.max` limits for one block device. `None` means unlimited.",
+      "properties": {
+        "rbps": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "riops": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wbps": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wiops": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "IoPrioClass": {
+      "description": "I/O priority class. Realtime is deliberately not representable.",
+      "enum": [
+        "best_effort",
+        "idle"
+      ],
+      "type": "string"
+    },
+    "Knob": {
+      "description": "Identifies a tunable on a target, independent of its value.",
+      "oneOf": [
+        {
+          "properties": {
+            "knob": {
+              "const": "cpu_weight",
+              "type": "string"
+            }
+          },
+          "required": [
+            "knob"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "knob": {
+              "const": "cpu_idle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "knob"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "knob": {
+              "const": "uclamp_min",
+              "type": "string"
+            }
+          },
+          "required": [
+            "knob"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "knob": {
+              "const": "uclamp_max",
+              "type": "string"
+            }
+          },
+          "required": [
+            "knob"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "knob": {
+              "const": "io_weight",
+              "type": "string"
+            }
+          },
+          "required": [
+            "knob"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Block device as `MAJ:MIN`.",
+          "properties": {
+            "device": {
+              "type": "string"
+            },
+            "knob": {
+              "const": "io_max",
+              "type": "string"
+            }
+          },
+          "required": [
+            "knob",
+            "device"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "knob": {
+              "const": "memory_low",
+              "type": "string"
+            }
+          },
+          "required": [
+            "knob"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "knob": {
+              "const": "memory_high",
+              "type": "string"
+            }
+          },
+          "required": [
+            "knob"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "knob": {
+              "const": "nice",
+              "type": "string"
+            }
+          },
+          "required": [
+            "knob"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "knob": {
+              "const": "io_prio",
+              "type": "string"
+            }
+          },
+          "required": [
+            "knob"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Level": {
+      "description": "Health level computed by a policy. GREEN means \"do nothing\".",
+      "enum": [
+        "green",
+        "yellow",
+        "red"
+      ],
+      "type": "string"
+    },
+    "LogLevel": {
+      "enum": [
+        "trace",
+        "debug",
+        "info",
+        "warn",
+        "error"
+      ],
+      "type": "string"
+    },
+    "LogParams": {
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/LogLevel"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "level",
+        "message"
+      ],
+      "type": "object"
+    },
+    "Manager": {
+      "description": "Which systemd manager owns a unit.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "system",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "user",
+              "type": "string"
+            },
+            "uid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "uid"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Manifest": {
+      "additionalProperties": false,
+      "properties": {
+        "classifier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClassifierSection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "config": {
+          "default": null
+        },
+        "plugin": {
+          "$ref": "#/$defs/ManifestPlugin"
+        },
+        "policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicySection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sensor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SensorSection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sink": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SinkSection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeouts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timeouts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "plugin"
+      ],
+      "type": "object"
+    },
+    "ManifestPlugin": {
+      "additionalProperties": false,
+      "properties": {
+        "api": {
+          "description": "Plugin API version this plugin targets.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Disabled plugins are discovered but not started.",
+          "type": "boolean"
+        },
+        "exec": {
+          "description": "Executable, relative to the manifest directory unless absolute.",
+          "type": "string"
+        },
+        "kinds": {
+          "items": {
+            "$ref": "#/$defs/PluginKind"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "privilege": {
+          "$ref": "#/$defs/Privilege",
+          "default": "user"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "api",
+        "kinds",
+        "exec"
+      ],
+      "type": "object"
+    },
+    "Metric": {
+      "description": "A free-form numeric metric emitted by any plugin; lands in the `metrics` table.",
+      "properties": {
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "plugin": {
+          "default": "",
+          "description": "Filled in by the host.",
+          "type": "string"
+        },
+        "ts": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "value": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "ts",
+        "name",
+        "value"
+      ],
+      "type": "object"
+    },
+    "Notification": {
+      "properties": {
+        "jsonrpc": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {
+          "default": null
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "method"
+      ],
+      "type": "object"
+    },
+    "PluginKind": {
+      "description": "The six extension points.",
+      "oneOf": [
+        {
+          "const": "sensor",
+          "description": "Produces pressure samples and per-target usage.",
+          "type": "string"
+        },
+        {
+          "const": "adapter",
+          "description": "Reports foreground/interaction events from a desktop.",
+          "type": "string"
+        },
+        {
+          "const": "classifier",
+          "description": "Assigns a QoS class to processes.",
+          "type": "string"
+        },
+        {
+          "const": "policy",
+          "description": "Turns snapshots into intents.",
+          "type": "string"
+        },
+        {
+          "const": "actuator",
+          "description": "Applies settings to the system. System privilege only.",
+          "type": "string"
+        },
+        {
+          "const": "sink",
+          "description": "Receives records (telemetry, events).",
+          "type": "string"
+        }
+      ]
+    },
+    "PolicyOutput": {
+      "description": "A policy's answer.",
+      "properties": {
+        "intents": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Intent"
+          },
+          "type": "array"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The policy's view of system health, if it has one."
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/$defs/Metric"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "PolicySection": {
+      "additionalProperties": false,
+      "properties": {
+        "priority": {
+          "default": 10,
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "Prefilter": {
+      "additionalProperties": false,
+      "description": "Glob lists; a process must match at least one glob in every non-empty list.",
+      "properties": {
+        "app_id": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "comm": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "exe": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "unit": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Privilege": {
+      "description": "Where a plugin runs and what it may touch.",
+      "oneOf": [
+        {
+          "const": "user",
+          "description": "Runs in `lindesk-session`; may only target the user's own units.",
+          "type": "string"
+        },
+        {
+          "const": "system",
+          "description": "Runs in `lindeskd` as root; only loaded from root-owned directories.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProcInfo": {
+      "description": "Information about a process, passed to classifiers.",
+      "properties": {
+        "app_id": {
+          "description": "Desktop application id when known (Wayland app_id / .desktop id).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cgroup": {
+          "description": "cgroup path relative to the cgroup mount.",
+          "type": "string"
+        },
+        "comm": {
+          "type": "string"
+        },
+        "exe": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pid": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "slice": {
+          "description": "Slice the unit lives in, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unit": {
+          "description": "Owning systemd unit, if any (scope/service).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pid",
+        "uid",
+        "comm",
+        "cgroup"
+      ],
+      "type": "object"
+    },
+    "Provenance": {
+      "description": "Who set a value and why.",
+      "properties": {
+        "clamped_from": {
+          "description": "Set when safety caps altered the requested value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plugin": {
+          "type": "string"
+        },
+        "priority": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "plugin",
+        "reason",
+        "priority"
+      ],
+      "type": "object"
+    },
+    "QosClass": {
+      "description": "The semantic QoS class of a workload. Ordered from most to least protected.",
+      "oneOf": [
+        {
+          "const": "critical",
+          "description": "Compositor, input stack, audio server, desktop shell.",
+          "type": "string"
+        },
+        {
+          "const": "interactive",
+          "description": "The application the human is using right now.",
+          "type": "string"
+        },
+        {
+          "const": "normal",
+          "description": "Visible/open applications.",
+          "type": "string"
+        },
+        {
+          "const": "background",
+          "description": "Sync, indexers, inactive applications.",
+          "type": "string"
+        },
+        {
+          "const": "batch",
+          "description": "Builds, downloads, backups, package upgrades.",
+          "type": "string"
+        }
+      ]
+    },
+    "Record": {
+      "description": "A row for sinks. One enum so plugins subscribe once and match on `table`.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Sample",
+          "properties": {
+            "table": {
+              "const": "pressure",
+              "type": "string"
+            }
+          },
+          "required": [
+            "table"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "applied": {
+              "items": {
+                "$ref": "#/$defs/Setting"
+              },
+              "type": "array"
+            },
+            "class": {
+              "$ref": "#/$defs/QosClass"
+            },
+            "foreground": {
+              "type": "boolean"
+            },
+            "table": {
+              "const": "units",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/Target"
+            },
+            "ts": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "usage": {
+              "$ref": "#/$defs/Usage"
+            }
+          },
+          "required": [
+            "table",
+            "ts",
+            "target",
+            "class",
+            "foreground",
+            "usage",
+            "applied"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/Event",
+          "properties": {
+            "table": {
+              "const": "events",
+              "type": "string"
+            }
+          },
+          "required": [
+            "table"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/Metric",
+          "properties": {
+            "table": {
+              "const": "metrics",
+              "type": "string"
+            }
+          },
+          "required": [
+            "table"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Request": {
+      "properties": {
+        "id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "jsonrpc": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {
+          "default": null
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method"
+      ],
+      "type": "object"
+    },
+    "Resource": {
+      "description": "A pressure-stall resource as reported by PSI.",
+      "enum": [
+        "cpu",
+        "io",
+        "memory"
+      ],
+      "type": "string"
+    },
+    "Response": {
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RpcError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "jsonrpc": {
+          "type": "string"
+        },
+        "result": true
+      },
+      "required": [
+        "jsonrpc",
+        "id"
+      ],
+      "type": "object"
+    },
+    "RpcError": {
+      "properties": {
+        "code": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "data": true,
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "Sample": {
+      "description": "One PSI reading. `*_delta_us` are stall time accrued since the previous sample of\nthe same (scope, resource), which is what controllers should usually look at.",
+      "properties": {
+        "full_avg10": {
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "full_delta_us": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "interval_ms": {
+          "description": "Wall time covered by the deltas.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resource": {
+          "$ref": "#/$defs/Resource"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "some_avg10": {
+          "format": "float",
+          "type": "number"
+        },
+        "some_delta_us": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ts",
+        "scope",
+        "resource",
+        "some_avg10",
+        "some_delta_us",
+        "interval_ms"
+      ],
+      "type": "object"
+    },
+    "SamplesParams": {
+      "description": "Params of the `samples` notification (plugin → host). The `event` and `metric`\nnotifications carry a bare [`Event`] and [`Metric`] respectively.",
+      "properties": {
+        "samples": {
+          "items": {
+            "$ref": "#/$defs/Sample"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "samples"
+      ],
+      "type": "object"
+    },
+    "Scope": {
+      "description": "Where a pressure sample was measured.",
+      "oneOf": [
+        {
+          "description": "`/proc/pressure/*`.",
+          "properties": {
+            "type": {
+              "const": "system",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A cgroup's `*.pressure` file; path relative to the cgroup mount.",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "const": "cgroup",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SensorInput": {
+      "properties": {
+        "now": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "targets": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WatchedTarget"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "now"
+      ],
+      "type": "object"
+    },
+    "SensorOutput": {
+      "properties": {
+        "metrics": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Metric"
+          },
+          "type": "array"
+        },
+        "samples": {
+          "default": [],
+          "description": "System scope and/or per-cgroup scope samples.",
+          "items": {
+            "$ref": "#/$defs/Sample"
+          },
+          "type": "array"
+        },
+        "usage": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TargetUsage"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "SensorSection": {
+      "additionalProperties": false,
+      "properties": {
+        "interval_ms": {
+          "default": 1000,
+          "description": "Minimum interval between polls.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "Setting": {
+      "description": "A concrete value for one knob.",
+      "oneOf": [
+        {
+          "description": "cgroup `cpu.weight`, 1..=10000 (default 100).",
+          "properties": {
+            "knob": {
+              "const": "cpu_weight",
+              "type": "string"
+            },
+            "value": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "knob",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "cgroup `cpu.idle` (SCHED_IDLE for the whole group).",
+          "properties": {
+            "knob": {
+              "const": "cpu_idle",
+              "type": "string"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "knob",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "cgroup `cpu.uclamp.min` in percent (0..=100).",
+          "properties": {
+            "knob": {
+              "const": "uclamp_min",
+              "type": "string"
+            },
+            "percent": {
+              "format": "float",
+              "type": "number"
+            }
+          },
+          "required": [
+            "knob",
+            "percent"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "cgroup `cpu.uclamp.max` in percent (0..=100).",
+          "properties": {
+            "knob": {
+              "const": "uclamp_max",
+              "type": "string"
+            },
+            "percent": {
+              "format": "float",
+              "type": "number"
+            }
+          },
+          "required": [
+            "knob",
+            "percent"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "cgroup `io.weight`, 1..=10000 (default 100).",
+          "properties": {
+            "knob": {
+              "const": "io_weight",
+              "type": "string"
+            },
+            "value": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "knob",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "cgroup `io.max` for one device.",
+          "properties": {
+            "device": {
+              "type": "string"
+            },
+            "knob": {
+              "const": "io_max",
+              "type": "string"
+            },
+            "limit": {
+              "$ref": "#/$defs/IoLimit"
+            }
+          },
+          "required": [
+            "knob",
+            "device",
+            "limit"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "cgroup `memory.low` in bytes.",
+          "properties": {
+            "bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "knob": {
+              "const": "memory_low",
+              "type": "string"
+            }
+          },
+          "required": [
+            "knob",
+            "bytes"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "cgroup `memory.high` in bytes; `None` = `max`.",
+          "properties": {
+            "bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "knob": {
+              "const": "memory_high",
+              "type": "string"
+            }
+          },
+          "required": [
+            "knob"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Process niceness (per-process backend).",
+          "properties": {
+            "knob": {
+              "const": "nice",
+              "type": "string"
+            },
+            "value": {
+              "format": "int8",
+              "maximum": 127,
+              "minimum": -128,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "knob",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Process I/O priority (per-process backend). Never realtime.",
+          "properties": {
+            "class": {
+              "$ref": "#/$defs/IoPrioClass"
+            },
+            "knob": {
+              "const": "io_prio",
+              "type": "string"
+            },
+            "level": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "knob",
+            "class",
+            "level"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SinkRecordParams": {
+      "properties": {
+        "records": {
+          "items": {
+            "$ref": "#/$defs/Record"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "records"
+      ],
+      "type": "object"
+    },
+    "SinkSection": {
+      "additionalProperties": false,
+      "properties": {
+        "tables": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Snapshot": {
+      "description": "Everything a policy sees on each evaluation.",
+      "properties": {
+        "caps": {
+          "$ref": "#/$defs/HostCaps"
+        },
+        "events": {
+          "description": "Events since the previous evaluation.",
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "type": "array"
+        },
+        "foreground": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Target"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "now": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "pressure": {
+          "description": "System-wide pressure (latest sample per resource).",
+          "items": {
+            "$ref": "#/$defs/Sample"
+          },
+          "type": "array"
+        },
+        "units": {
+          "items": {
+            "$ref": "#/$defs/UnitState"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "now",
+        "pressure",
+        "units",
+        "events",
+        "caps"
+      ],
+      "type": "object"
+    },
+    "Target": {
+      "description": "Something that can be tuned.",
+      "oneOf": [
+        {
+          "description": "A systemd unit (slice, scope or service).",
+          "properties": {
+            "manager": {
+              "$ref": "#/$defs/Manager"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "const": "unit",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "manager",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A cgroup v2/v1 path relative to the cgroup mount, e.g. `/user.slice/...`.",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "const": "cgroup",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A single process (per-process fallback backend).",
+          "properties": {
+            "pid": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "type": {
+              "const": "process",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "pid"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TargetUsage": {
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/Target"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        }
+      },
+      "required": [
+        "target",
+        "usage"
+      ],
+      "type": "object"
+    },
+    "Timeouts": {
+      "additionalProperties": false,
+      "properties": {
+        "call_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "init_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "UnitState": {
+      "description": "Per-target state handed to policies.",
+      "properties": {
+        "applied": {
+          "description": "Values lindesk currently has applied (not the originals).",
+          "items": {
+            "$ref": "#/$defs/Setting"
+          },
+          "type": "array"
+        },
+        "class": {
+          "$ref": "#/$defs/QosClass"
+        },
+        "foreground": {
+          "default": false,
+          "description": "The target currently holds input focus.",
+          "type": "boolean"
+        },
+        "pressure": {
+          "description": "Pressure measured inside this target's cgroup, if a sensor provides it.",
+          "items": {
+            "$ref": "#/$defs/Sample"
+          },
+          "type": "array"
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        },
+        "top_comm": {
+          "description": "Representative process name for display (e.g. \"rustc\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Usage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "target",
+        "class"
+      ],
+      "type": "object"
+    },
+    "Usage": {
+      "description": "Resource consumption of one target over an interval (from cpu.stat/io.stat/memory.current).",
+      "properties": {
+        "cpu_usage_us": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "interval_ms": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "io_rbytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "io_rios": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "io_wbytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "io_wios": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mem_current": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpu_usage_us",
+        "io_rbytes",
+        "io_wbytes",
+        "io_rios",
+        "io_wios",
+        "mem_current",
+        "interval_ms"
+      ],
+      "type": "object"
+    },
+    "WatchedTarget": {
+      "description": "A target the host wants usage/pressure for.",
+      "properties": {
+        "cgroup": {
+          "description": "cgroup path relative to the cgroup mount, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "api_version": 1,
+  "title": "lindesk plugin protocol"
+}

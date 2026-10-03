@@ -72,6 +72,7 @@ fn python_plugin_serves_several_kinds() {
 
     let snap = Snapshot {
         now: 0,
+        level: Default::default(),
         pressure: vec![],
         units: vec![UnitState {
             target: Target::user_unit(1000, "a.scope"),
@@ -114,7 +115,9 @@ def classify(proc):
     for v in vars.split(',') {
         assert!(
             matches!(v, "PATH" | "HOME" | "LANG" | "LINDESK_API_VERSION" | "LINDESK_SDK_PATH" | "LC_CTYPE")
-                || v.starts_with("XDG_"),
+                || v.starts_with("XDG_")
+                // user plugins may reach the desktop session
+                || matches!(v, "DBUS_SESSION_BUS_ADDRESS" | "WAYLAND_DISPLAY" | "DISPLAY" | "SWAYSOCK" | "HYPRLAND_INSTANCE_SIGNATURE"),
             "unexpected env var {v} leaked into the plugin ({vars})"
         );
     }

@@ -1,0 +1,20 @@
+# notify-on-red: a lindesk sink plugin in plain POSIX sh.
+[plugin]
+name = "notify-on-red"
+version = "0.1.0"
+api = 1
+kinds = ["sink"]
+exec = "plugin.sh"
+privilege = "user"   # runs in your session, so it can reach your notification daemon
+description = "Desktop notification when background work is throttled to keep your app responsive"
+
+[sink]
+tables = ["events"]  # focus events (to name the app) and level changes
+
+[config]
+# At most one notification per this many seconds.
+min_interval_s = 300
+# Log what would be shown instead of calling notify-send.
+dry_run = false
+# Rate-limit state. Default: $XDG_RUNTIME_DIR/lindesk-notify-on-red.<uid>.last
+# state_file = "/run/user/1000/lindesk-notify-on-red.last"

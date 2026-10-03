@@ -1,0 +1,11 @@
+#!/bin/sh
+# Development launcher, so `lindeskctl plugin test examples/plugins/rust/on-battery` works
+# in a checkout: it runs the newest workspace build of on-battery. Installing copies the
+# real binary over this file (see README.md).
+target="$(cd "$(dirname "$0")" && pwd)/../../../../target"
+bin="$target/debug/on-battery"
+# shellcheck disable=SC3013 # -nt: not POSIX, but in dash, bash and busybox
+[ "$target/release/on-battery" -nt "$bin" ] && bin="$target/release/on-battery"
+[ -x "$bin" ] && exec "$bin" "$@"
+echo "on-battery is not built yet: cargo build -p on-battery" >&2
+exit 1

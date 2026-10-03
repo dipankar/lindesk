@@ -1,0 +1,23 @@
+# focus-logger: a debugging aid for adapter authors (adapter + sink).
+[plugin]
+name = "focus-logger"
+version = "0.1.0"
+api = 1
+kinds = ["adapter", "sink"]
+exec = "focus_logger.py"
+privilege = "user"
+description = "Logs focus/interaction events and the unit each maps to; injects events from a FIFO"
+# A debugging aid: enable it while you work on an adapter, then disable it again.
+# enabled = false
+
+[sink]
+tables = ["events"]
+
+[config]
+# Log interaction events too (up to ~4 per second while you type).
+interactions = true
+# Other event kinds to log, e.g. ["class_set", "level_changed", "action_applied"].
+also = []
+# FIFO for injected events. Default: $XDG_RUNTIME_DIR/lindesk/focus-logger.fifo;
+# "" turns the adapter side off.
+# fifo = "/run/user/1000/lindesk/focus-logger.fifo"

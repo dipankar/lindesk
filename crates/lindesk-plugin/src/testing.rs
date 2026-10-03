@@ -186,7 +186,17 @@ pub fn test_context(config: serde_json::Value) -> InitContext {
         host: "test".into(),
         privilege: Privilege::User,
         uid: Some(1000),
-        caps: HostCaps { cgroup_v2: true, systemd: true, psi: true, io_max: true, ..Default::default() },
+        caps: HostCaps {
+            cgroup_v2: true,
+            systemd: true,
+            psi: true,
+            uclamp: true,
+            io_cost: true,
+            io_weight_effective: true,
+            io_max: true,
+            devices: vec!["259:0".into()],
+            ..Default::default()
+        },
         config,
     }
 }
@@ -209,6 +219,7 @@ pub fn proc_info(comm: &str) -> ProcInfo {
 pub fn snapshot(now: TimestampMs) -> Snapshot {
     Snapshot {
         now,
+        level: Default::default(),
         pressure: Vec::new(),
         units: Vec::new(),
         events: Vec::new(),

@@ -459,6 +459,7 @@ pub enum Event {
     /// A target's class was set or changed.
     ClassSet { ts: TimestampMs, target: Target, class: QosClass, source: String },
     /// A policy changed health level.
+    #[serde(rename = "level")]
     LevelChanged { ts: TimestampMs, from: Level, to: Level, policy: String },
     /// A setting was applied to the system.
     ActionApplied { ts: TimestampMs, target: Target, setting: Setting, provenance: Provenance },
@@ -551,6 +552,9 @@ pub struct HostCaps {
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
 pub struct Snapshot {
     pub now: TimestampMs,
+    /// Current health level as last reported by the highest-priority policy that reports one.
+    #[serde(default)]
+    pub level: Level,
     /// System-wide pressure (latest sample per resource).
     pub pressure: Vec<Sample>,
     pub units: Vec<UnitState>,
@@ -613,7 +617,14 @@ impl ActuatorCaps {
 pub enum Record {
     Pressure(Sample),
     #[serde(rename = "units")]
-    Unit { ts: TimestampMs, target: Target, class: QosClass, foreground: bool, usage: Usage, applied: Vec<Setting> },
+    Unit {
+        ts: TimestampMs,
+        target: Target,
+        class: QosClass,
+        foreground: bool,
+        usage: Usage,
+        applied: Vec<Setting>,
+    },
     #[serde(rename = "events")]
     Event(Event),
     #[serde(rename = "metrics")]
