@@ -65,10 +65,59 @@ export LINDESK_BIN_DIR=%{lindesk_bin_dir}
 %tmpfiles_create %{_tmpfilesdir}/lindesk.conf
 %systemd_post lindeskd.service lindesk-compact.timer
 %systemd_user_post lindesk-session.service lindesk-compact.timer
-if [ $1 -eq 1 ] && [ -d /run/systemd/system ]; then
-    # The preset enables lindeskd; start it on first install.
-    systemctl start lindeskd.service lindesk-compact.timer >/dev/null 2>&1 || :
+# Requirement check: never fails the transaction. On a hard failure (exit 1) lindeskd is
+# installed and enabled by the preset, but not started.
+lindesk_rc=0
+lindesk_out=
+if [ -x %{_bindir}/lindeskctl ]; then
+    if command -v timeout >/dev/null 2>&1; then
+        lindesk_out=$(timeout 30 %{_bindir}/lindeskctl doctor --preflight --quiet 2>&1 </dev/null) || lindesk_rc=$?
+    else
+        lindesk_out=$(%{_bindir}/lindeskctl doctor --preflight --quiet 2>&1 </dev/null) || lindesk_rc=$?
+    fi
 fi
+if [ "$lindesk_rc" -eq 1 ]; then
+    {
+        echo "lindesk: WARNING: this system does not meet lindesk's requirements:"
+        [ -z "$lindesk_out" ] || printf '%%s\n' "$lindesk_out" | sed 's/^/lindesk:   /'
+        echo "lindesk: lindeskd was installed but NOT started. Fix the failures, check with"
+        echo "lindesk:   lindeskctl doctor --preflight"
+        echo "lindesk: then start it:  systemctl start lindeskd.service"
+    } >&2
+elif [ "$1" -eq 1 ] && [ -d /run/systemd/system ]; then
+    # The preset enables lindeskd; start it on first install, and the session agent in
+    # every graphical session that is already open.
+    systemctl start lindeskd.service lindesk-compact.timer >/dev/null 2>&1 || :
+    # tmo CMD...: run with a 15 s timeout when timeout(1) exists.
+    tmo() { if command -v timeout >/dev/null 2>&1; then timeout 15 "$@"; else "$@"; fi; }
+    # lindesk_start_sessions: start lindesk-session for every user logged in to a
+    # graphical session, through their user manager, so nobody has to log out.
+    # Best effort, never fatal.
+    lindesk_start_sessions() {
+        command -v loginctl >/dev/null 2>&1 || return 0
+        [ -d /run/systemd/system ] || return 0
+        for _sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{ print $1 }'); do
+            _type=$(loginctl show-session "$_sid" -p Type --value 2>/dev/null) || continue
+            case $_type in wayland | x11) ;; *) continue ;; esac
+            loginctl show-session "$_sid" -p Name --value 2>/dev/null
+        done | sort -u | while read -r _u; do
+            [ -n "$_u" ] || continue
+            tmo systemctl --user -M "$_u@" daemon-reload >/dev/null 2>&1 || true
+            if tmo systemctl --user -M "$_u@" start lindesk-session.service >/dev/null 2>&1; then
+                echo "lindesk: started lindesk-session for $_u"
+            fi
+        done
+        return 0
+    }
+
+    lindesk_start_sessions || :
+    echo "lindesk: what now: 'lindeskctl' shows what lindesk is doing, 'lindeskctl watch' follows it live,"
+    echo "lindesk:   'lindeskctl doctor' shows what this machine supports."
+    echo "lindesk: GNOME: lindesk-session enables its Shell extension on first start; if it stays off:"
+    echo "lindesk:   gnome-extensions enable lindesk@lindesk.org   (on Wayland, log out and back in first)"
+    echo "lindesk: KDE: enable 'lindesk' in System Settings > Window Management > KWin Scripts"
+fi
+:
 
 %preun
 %systemd_preun lindeskd.service lindesk-compact.timer

@@ -289,6 +289,9 @@ pub struct Probe {
     /// (see [`crate::hardware`]). Storage is in the same order as [`Probe::devices`].
     #[serde(default)]
     pub hardware: Hardware,
+    /// Swap devices, reclaim tunables and advice (see [`crate::swap`]).
+    #[serde(default)]
+    pub swap: crate::swap::SwapReport,
 }
 
 /// Kernel config options recorded in [`Probe::kconfig`].
@@ -499,6 +502,7 @@ pub fn probe(roots: &Roots, env: &Env) -> Probe {
         && devices.iter().all(|d| d.is_bfq() || io_cost.devices.iter().any(|c| c.dev == d.dev && c.enabled));
 
     let hardware = crate::hardware::detect_for(roots, &devices);
+    let swap = crate::swap::analyze(roots, &hardware);
 
     let sched_dir = roots.sys.join("kernel/sched_ext");
     let sched_ext = SchedExt {
@@ -527,6 +531,7 @@ pub fn probe(roots: &Roots, env: &Env) -> Probe {
         conflicts: conflicts(roots),
         kconfig,
         hardware,
+        swap,
     }
 }
 

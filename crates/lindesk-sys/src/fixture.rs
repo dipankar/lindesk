@@ -3,7 +3,10 @@
 //! Available in this crate's tests and, with the `fixtures` feature, to other crates.
 //! [`Fixture`] writes individual files, block devices and mounts under a root directory;
 //! the preset functions ([`pop_os`], [`cgroup_v1`], [`no_psi`], [`zfs_root`],
-//! [`full_bfq`]) build complete host shapes for probe and doctor tests.
+//! [`full_bfq`]) build complete host shapes for probe and doctor tests, and
+//! [`intel_hybrid_laptop`], [`arm_big_little`], [`hdd_desktop`], [`kvm_guest`],
+//! [`amd_desktop`] and [`asahi_m1`] add hardware, cpufreq and swap profiles for
+//! [`crate::hardware`], [`crate::swap`] and the requirement checks.
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -142,6 +145,106 @@ impl Fixture {
         self
     }
 
+    /// `/sys/devices/system/cpu/online` and, when given, `smt/active`.
+    pub fn cpus_online(&self, list: &str, smt_active: Option<bool>) -> &Self {
+        self.file("sys/devices/system/cpu/online", format!("{list}\n"));
+        if let Some(on) = smt_active {
+            self.file("sys/devices/system/cpu/smt/active", if on { "1\n" } else { "0\n" });
+        }
+        self
+    }
+
+    /// One logical CPU: its core's sibling list (`core_cpus_list`), and optionally its
+    /// `cpu_capacity` and `cpufreq/cpuinfo_max_freq` (kHz).
+    pub fn cpu(&self, n: u32, siblings: &str, capacity: Option<u32>, max_khz: Option<u64>) -> &Self {
+        let base = format!("sys/devices/system/cpu/cpu{n}");
+        self.file(&format!("{base}/topology/core_cpus_list"), format!("{siblings}\n"));
+        if let Some(c) = capacity {
+            self.file(&format!("{base}/cpu_capacity"), format!("{c}\n"));
+        }
+        if let Some(k) = max_khz {
+            self.file(&format!("{base}/cpufreq/cpuinfo_max_freq"), format!("{k}\n"));
+        }
+        self
+    }
+
+    /// `/proc/meminfo` with `MemTotal` and `SwapTotal` (kB).
+    pub fn meminfo(&self, mem_kb: u64, swap_kb: u64) -> &Self {
+        self.file(
+            "proc/meminfo",
+            format!("MemTotal:       {mem_kb} kB\nMemFree:        {} kB\nSwapTotal:      {swap_kb} kB\n", mem_kb / 2),
+        )
+    }
+
+    /// `/proc/swaps` from `(file name, type, size kB)`.
+    pub fn swaps(&self, entries: &[(&str, &str, u64)]) -> &Self {
+        let mut s = String::from("Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
+        for (i, (name, ty, kb)) in entries.iter().enumerate() {
+            s.push_str(&format!("{name:<40}{ty}\t{kb}\t\t0\t\t{}\n", -(i as i32) - 1));
+        }
+        self.file("proc/swaps", s)
+    }
+
+    /// A `/sys/class/power_supply/<name>` entry with attribute files (`type`, `online`,
+    /// `status`, `scope`, ...).
+    pub fn power_supply(&self, name: &str, attrs: &[(&str, &str)]) -> &Self {
+        for (k, v) in attrs {
+            self.file(&format!("sys/class/power_supply/{name}/{k}"), format!("{v}\n"));
+        }
+        self
+    }
+
+    /// `/sys/class/dmi/id/<attr>` files (`chassis_type`, `sys_vendor`, `product_name`, ...).
+    pub fn dmi(&self, attrs: &[(&str, &str)]) -> &Self {
+        for (k, v) in attrs {
+            self.file(&format!("sys/class/dmi/id/{k}"), format!("{v}\n"));
+        }
+        self
+    }
+
+    /// A cpufreq policy directory (`/sys/devices/system/cpu/cpufreq/policy<n>`) with
+    /// attribute files (`scaling_driver`, `scaling_governor`, ...).
+    pub fn cpufreq_policy(&self, n: u32, attrs: &[(&str, &str)]) -> &Self {
+        for (k, v) in attrs {
+            self.file(&format!("sys/devices/system/cpu/cpufreq/policy{n}/{k}"), format!("{v}\n"));
+        }
+        self
+    }
+
+    /// `/proc/sys/<key>` files, keys with dots or slashes (`vm.swappiness`, `kernel/arch`).
+    pub fn sysctl(&self, entries: &[(&str, &str)]) -> &Self {
+        for (k, v) in entries {
+            self.file(&format!("proc/sys/{}", k.replace('.', "/")), format!("{v}\n"));
+        }
+        self
+    }
+
+    /// `/proc/vmstat` with the swap counters.
+    pub fn vmstat(&self, pswpin: u64, pswpout: u64) -> &Self {
+        self.file("proc/vmstat", format!("nr_free_pages 100000\npswpin {pswpin}\npswpout {pswpout}\npgfault 1\n"))
+    }
+
+    /// zswap module parameters.
+    pub fn zswap(&self, enabled: bool, compressor: &str, max_pool_percent: u32) -> &Self {
+        let d = "sys/module/zswap/parameters";
+        self.file(&format!("{d}/enabled"), if enabled { "Y\n" } else { "N\n" })
+            .file(&format!("{d}/compressor"), format!("{compressor}\n"))
+            .file(&format!("{d}/max_pool_percent"), format!("{max_pool_percent}\n"))
+            .file(&format!("{d}/zpool"), "zsmalloc\n")
+            .file(&format!("{d}/shrinker_enabled"), "Y\n")
+    }
+
+    /// A zram device (`/sys/block/<name>`) with its compression algorithm.
+    pub fn zram(&self, name: &str, dev: &str, algorithm: &str) -> &Self {
+        self.disk(name, dev, "none", false).file(
+            &format!("sys/block/{name}/comp_algorithm"),
+            format!(
+                "lzo-rle lzo lz4 {}\n",
+                if algorithm.is_empty() { String::new() } else { format!("[{algorithm}]") }
+            ),
+        )
+    }
+
     /// A cgroup v2 directory (relative to the cgroup mount) with attribute files.
     pub fn cgroup(&self, cg: &str, files: &[(&str, &str)]) -> &Self {
         let base = format!("sys/fs/cgroup/{}", cg.trim_matches('/'));
@@ -272,7 +375,77 @@ pub fn pop_os(root: &Path) -> (Roots, Env) {
         .file("usr/lib/systemd/system/com.system76.Scheduler.service", "[Unit]\n")
         .file("usr/lib/systemd/system/auto-cpufreq.service", "[Unit]\n")
         .process(2000, "gnome-shell");
+    dev_host_hardware(&f);
     (f.roots(), gnome_wayland())
+}
+
+/// `/proc/cpuinfo` for `n` identical x86 CPUs.
+pub fn x86_cpuinfo(n: u32, model: &str, flags: &str) -> String {
+    (0..n)
+        .map(|i| {
+            format!(
+                "processor\t: {i}\nvendor_id\t: GenuineIntel\nmodel name\t: {model}\nflags\t\t: fpu vme sse sse2 {flags}\n\n"
+            )
+        })
+        .collect()
+}
+
+/// The development host's hardware: an i9-12950HX (8 P-cores with SMT + 8 E-cores, 24
+/// threads) mini PC on mains, 62.5 GiB RAM, zram + a swap partition, PCIe NVMe.
+pub fn dev_host_hardware(f: &Fixture) {
+    f.cpus_online("0-23", Some(true));
+    for c in 0..24 {
+        let (sib, khz) = if c < 16 {
+            (format!("{}-{}", c & !1, c | 1), if c < 4 { 5_000_000 } else { 4_900_000 })
+        } else {
+            (c.to_string(), 3_600_000)
+        };
+        f.cpu(c, &sib, Some(1024), Some(khz));
+    }
+    for p in 0..24 {
+        f.cpufreq_policy(
+            p,
+            &[
+                ("scaling_driver", "intel_pstate"),
+                ("scaling_governor", "powersave"),
+                ("energy_performance_preference", "balance_performance"),
+                (
+                    "energy_performance_available_preferences",
+                    "default performance balance_performance balance_power power",
+                ),
+                ("scaling_available_governors", "performance powersave"),
+            ],
+        );
+    }
+    f.file("sys/devices/cpu_core/cpus", "0-15\n")
+        .file("sys/devices/cpu_atom/cpus", "16-23\n")
+        .file("proc/cpuinfo", x86_cpuinfo(24, "12th Gen Intel(R) Core(TM) i9-12950HX", ""))
+        .meminfo(65_574_028, 20_970_996)
+        .swaps(&[("/dev/dm-0", "partition", 4_193_784), ("/dev/zram0", "partition", 16_777_212)])
+        .file("sys/module/zswap/parameters/enabled", "N\n")
+        .file("sys/block/nvme0n1/device/transport", "pcie\n")
+        .sysctl(&[
+            ("kernel.arch", "x86_64"),
+            ("vm.swappiness", "180"),
+            ("vm.page-cluster", "0"),
+            ("vm.watermark_scale_factor", "125"),
+            ("vm.vfs_cache_pressure", "100"),
+            ("vm.min_free_kbytes", "655740"),
+        ])
+        .file("sys/kernel/mm/lru_gen/enabled", "0x0007\n")
+        .vmstat(1_971_010, 9_491_966)
+        .zram("zram0", "251:0", "zstd")
+        .file("sys/devices/system/node/online", "0\n")
+        .cgroup(
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/app-firefox.scope",
+            &[("memory.swap.current", "1073741824")],
+        )
+        .cgroup("/system.slice/docker.service", &[("memory.swap.current", "52428800")])
+        .dmi(&[
+            ("chassis_type", "3"),
+            ("sys_vendor", "Micro Computer (HK) Tech Limited"),
+            ("product_name", "EliteMini Series"),
+        ]);
 }
 
 /// GNOME on Wayland as on the development host.
@@ -368,4 +541,213 @@ pub fn full_bfq(root: &Path) -> (Roots, Env) {
         .with("DISPLAY", ":0")
         .with("DESKTOP_SESSION", "plasmax11");
     (f.roots(), env)
+}
+
+/// An Intel Core Ultra 7 155H laptop on battery: 6 P-cores with SMT + 10 E-cores (22
+/// threads, Intel hybrid PMUs), 31.3 GiB RAM with zram, PCIe NVMe on `none`, GNOME on
+/// Wayland. Mains adapter offline, BAT0 discharging, chassis "Notebook".
+pub fn intel_hybrid_laptop(root: &Path) -> (Roots, Env) {
+    let f = Fixture::new(root);
+    v2_host(&f, &V2Host { release: "6.8.0-45-generic", ..V2Host::default() });
+    f.disk("nvme0n1", "259:0", "[none] mq-deadline kyber bfq", false)
+        .file("sys/block/nvme0n1/device/transport", "pcie\n")
+        .partition("nvme0n1", "nvme0n1p2", "259:2", 2)
+        .mounts(&[("/", "259:2", "ext4", "/dev/nvme0n1p2")])
+        .cpus_online("0-21", Some(true));
+    for c in 0..22 {
+        let sib = if c < 12 { format!("{}-{}", c & !1, c | 1) } else { c.to_string() };
+        f.cpu(c, &sib, Some(1024), Some(if c < 12 { 4_800_000 } else { 3_800_000 }));
+    }
+    f.file("sys/devices/cpu_core/cpus", "0-11\n")
+        .file("sys/devices/cpu_atom/cpus", "12-21\n")
+        .file("proc/cpuinfo", x86_cpuinfo(22, "Intel(R) Core(TM) Ultra 7 155H", ""))
+        .meminfo(32_800_000, 8_388_604)
+        .swaps(&[("/dev/zram0", "partition", 8_388_604)])
+        .power_supply("AC", &[("type", "Mains"), ("online", "0")])
+        .power_supply("BAT0", &[("type", "Battery"), ("status", "Discharging"), ("capacity", "64")])
+        .power_supply("hidpp_battery_0", &[("type", "Battery"), ("scope", "Device"), ("status", "Discharging")])
+        .dmi(&[("chassis_type", "10"), ("sys_vendor", "LENOVO"), ("product_name", "21KC")])
+        .sysctl(&[("kernel.sched_itmt_enabled", "1"), ("vm.swappiness", "60"), ("vm.page-cluster", "3")])
+        .zram("zram0", "251:0", "lz4")
+        .vmstat(1200, 5400)
+        .cpufreq_policy(
+            0,
+            &[
+                ("scaling_driver", "intel_pstate"),
+                ("scaling_governor", "powersave"),
+                ("energy_performance_preference", "balance_power"),
+                (
+                    "energy_performance_available_preferences",
+                    "default performance balance_performance balance_power power",
+                ),
+                ("scaling_available_governors", "performance powersave"),
+            ],
+        )
+        .file("sys/devices/system/node/online", "0\n");
+    (f.roots(), gnome_wayland())
+}
+
+/// An RK3588-style ARM board: 4× Cortex-A55 (capacity 414) + 4× Cortex-A76 (capacity 1024),
+/// 3.8 GiB RAM, no swap, root on eMMC (`mmcblk0`, mq-deadline), no power supplies, sway.
+pub fn arm_big_little(root: &Path) -> (Roots, Env) {
+    let f = Fixture::new(root);
+    let h = V2Host {
+        release: "6.1.75-rockchip",
+        kconfig: Some(kconfig(&[("PSI", "y"), ("UCLAMP_TASK_GROUP", "y"), ("BLK_CGROUP_IOCOST", "y")])),
+        ..V2Host::default()
+    };
+    v2_host(&f, &h);
+    f.disk("mmcblk0", "179:0", "[mq-deadline] kyber bfq none", false)
+        .file("sys/block/mmcblk0/device/type", "MMC\n")
+        .partition("mmcblk0", "mmcblk0p2", "179:2", 2)
+        .mounts(&[("/", "179:2", "ext4", "/dev/mmcblk0p2")])
+        .cpus_online("0-7", None);
+    let mut cpuinfo = String::new();
+    for c in 0..8u32 {
+        let big = c >= 4;
+        f.cpu(c, &c.to_string(), Some(if big { 1024 } else { 414 }), Some(if big { 2_400_000 } else { 1_800_000 }));
+        let part = if big { "0xd0b" } else { "0xd05" };
+        cpuinfo
+            .push_str(&format!("processor\t: {c}\nBogoMIPS\t: 48.00\nCPU implementer\t: 0x41\nCPU part\t: {part}\n\n"));
+    }
+    f.file("proc/cpuinfo", cpuinfo)
+        .meminfo(4_000_000, 0)
+        .swaps(&[])
+        .sysctl(&[("kernel.arch", "aarch64"), ("kernel.sched_energy_aware", "1"), ("vm.swappiness", "60")])
+        .cpufreq_policy(0, &[("scaling_driver", "cpufreq-dt"), ("scaling_governor", "schedutil")])
+        .cpufreq_policy(4, &[("scaling_driver", "cpufreq-dt"), ("scaling_governor", "schedutil")]);
+    let env = Env::new().with("XDG_CURRENT_DESKTOP", "sway").with("WAYLAND_DISPLAY", "wayland-1");
+    (f.roots(), env)
+}
+
+/// A desktop with a single SATA hard disk on the `none` scheduler (a bad fit for HDDs), a
+/// 4-core i5-4590 without SMT, 15.6 GiB RAM with a 2 GiB swap partition, chassis "Desktop".
+/// The only battery is a wireless mouse's (scope Device). Xfce on X11.
+pub fn hdd_desktop(root: &Path) -> (Roots, Env) {
+    let f = Fixture::new(root);
+    v2_host(&f, &V2Host { release: "6.8.0-45-generic", ..V2Host::default() });
+    f.disk("sda", "8:0", "[none] mq-deadline kyber bfq", true)
+        .partition("sda", "sda2", "8:2", 2)
+        .mounts(&[("/", "8:2", "ext4", "/dev/sda2")])
+        .cpus_online("0-3", Some(false));
+    for c in 0..4 {
+        f.cpu(c, &c.to_string(), None, Some(3_700_000));
+    }
+    f.file("proc/cpuinfo", x86_cpuinfo(4, "Intel(R) Core(TM) i5-4590 CPU @ 3.30GHz", ""))
+        .partition("sda", "sda3", "8:3", 3)
+        .meminfo(16_340_000, 2_097_148)
+        .swaps(&[("/dev/sda3", "partition", 2_097_148)])
+        .sysctl(&[("vm.swappiness", "60"), ("vm.page-cluster", "3")])
+        .vmstat(250_000, 400_000)
+        .cpufreq_policy(
+            0,
+            &[
+                ("scaling_driver", "intel_cpufreq"),
+                ("scaling_governor", "powersave"),
+                ("scaling_available_governors", "conservative ondemand userspace powersave performance schedutil"),
+            ],
+        )
+        .power_supply("hidpp_battery_0", &[("type", "Battery"), ("scope", "Device"), ("status", "Discharging")])
+        .dmi(&[("chassis_type", "3"), ("sys_vendor", "Dell Inc."), ("product_name", "OptiPlex 9020")]);
+    let env = Env::new().with("XDG_CURRENT_DESKTOP", "XFCE").with("XDG_SESSION_TYPE", "x11").with("DISPLAY", ":0");
+    (f.roots(), env)
+}
+
+/// A KVM guest: 8 vCPUs (`hypervisor` flag), 8 GiB RAM, a virtio disk `vda` that reports
+/// `rotational=1`, QEMU DMI strings, systemd, no desktop session.
+pub fn kvm_guest(root: &Path) -> (Roots, Env) {
+    let f = Fixture::new(root);
+    v2_host(&f, &V2Host { release: "6.8.0-45-generic", ..V2Host::default() });
+    f.disk("vda", "252:0", "[none] mq-deadline", true)
+        .partition("vda", "vda1", "252:1", 1)
+        .mounts(&[("/", "252:1", "ext4", "/dev/vda1")])
+        .cpus_online("0-7", None);
+    for c in 0..8 {
+        f.cpu(c, &c.to_string(), None, None);
+    }
+    f.file("proc/cpuinfo", x86_cpuinfo(8, "AMD EPYC 7763 64-Core Processor", "hypervisor")).meminfo(8_388_608, 0).dmi(
+        &[
+            ("chassis_type", "1"),
+            ("sys_vendor", "QEMU"),
+            ("product_name", "Standard PC (Q35 + ICH9, 2009)"),
+            ("bios_vendor", "SeaBIOS"),
+        ],
+    );
+    (f.roots(), Env::new())
+}
+
+/// An AMD Ryzen 9 7950X desktop on mains: 16 cores / 32 threads, amd-pstate-epp with
+/// EPP `power` (a poor fit on AC), 2 NUMA-less nodes, 64 GiB RAM, a swap partition on the
+/// NVMe with zswap enabled, swappiness 60 and page-cluster 3. KDE on Wayland.
+pub fn amd_desktop(root: &Path) -> (Roots, Env) {
+    let f = Fixture::new(root);
+    v2_host(&f, &V2Host { release: "6.10.3-arch1-1", ..V2Host::default() });
+    f.disk("nvme0n1", "259:0", "[none] mq-deadline kyber bfq", false)
+        .file("sys/block/nvme0n1/device/transport", "pcie\n")
+        .partition("nvme0n1", "nvme0n1p2", "259:2", 2)
+        .partition("nvme0n1", "nvme0n1p3", "259:3", 3)
+        .mounts(&[("/", "259:2", "btrfs", "/dev/nvme0n1p2")])
+        .cpus_online("0-31", Some(true));
+    for c in 0..32 {
+        f.cpu(c, &format!("{},{}", c % 16, c % 16 + 16), None, Some(if c % 16 < 8 { 5_880_000 } else { 5_700_000 }));
+    }
+    let mut cpuinfo = x86_cpuinfo(32, "AMD Ryzen 9 7950X 16-Core Processor", "");
+    cpuinfo = cpuinfo.replace("GenuineIntel", "AuthenticAMD");
+    f.file("proc/cpuinfo", cpuinfo)
+        .meminfo(65_000_000, 16_777_212)
+        .swaps(&[("/dev/nvme0n1p3", "partition", 16_777_212)])
+        .zswap(true, "zstd", 20)
+        .sysctl(&[("kernel.arch", "x86_64"), ("vm.swappiness", "60"), ("vm.page-cluster", "3")])
+        .file("sys/kernel/mm/lru_gen/enabled", "0x0000\n")
+        .vmstat(10, 20)
+        .file("sys/devices/system/node/online", "0\n")
+        .cpufreq_policy(
+            0,
+            &[
+                ("scaling_driver", "amd-pstate-epp"),
+                ("scaling_governor", "powersave"),
+                ("energy_performance_preference", "power"),
+                (
+                    "energy_performance_available_preferences",
+                    "default performance balance_performance balance_power power",
+                ),
+                ("scaling_available_governors", "performance powersave"),
+            ],
+        )
+        .dmi(&[("chassis_type", "3"), ("sys_vendor", "ASUS"), ("product_name", "ROG STRIX X670E-E")]);
+    let env = Env::new()
+        .with("XDG_CURRENT_DESKTOP", "KDE")
+        .with("XDG_SESSION_TYPE", "wayland")
+        .with("WAYLAND_DISPLAY", "wayland-0");
+    (f.roots(), env)
+}
+
+/// An Apple M1 MacBook Air on Asahi Linux: 4 Icestorm (capacity 485) + 4 Firestorm (1024)
+/// cores (implementer 0x61), EAS off (no energy model), apple-cpufreq/schedutil, 8 GiB RAM
+/// with zram, NVMe (Apple ANS), on battery.
+pub fn asahi_m1(root: &Path) -> (Roots, Env) {
+    let f = Fixture::new(root);
+    v2_host(&f, &V2Host { release: "6.9.12-404.asahi.fc40.aarch64+16k", ..V2Host::default() });
+    f.disk("nvme0n1", "259:0", "[none] mq-deadline kyber bfq", false)
+        .partition("nvme0n1", "nvme0n1p6", "259:6", 6)
+        .mounts(&[("/", "259:6", "btrfs", "/dev/nvme0n1p6")])
+        .cpus_online("0-7", None);
+    let mut cpuinfo = String::new();
+    for c in 0..8u32 {
+        let big = c >= 4;
+        f.cpu(c, &c.to_string(), Some(if big { 1024 } else { 485 }), Some(if big { 3_204_000 } else { 2_064_000 }));
+        let part = if big { "0x023" } else { "0x022" };
+        cpuinfo.push_str(&format!("processor\t: {c}\nCPU implementer\t: 0x61\nCPU part\t: {part}\n\n"));
+    }
+    f.file("proc/cpuinfo", cpuinfo)
+        .meminfo(7_900_000, 7_900_000)
+        .swaps(&[("/dev/zram0", "partition", 7_900_000)])
+        .zram("zram0", "251:0", "lzo-rle")
+        .sysctl(&[("kernel.arch", "aarch64"), ("kernel.sched_energy_aware", "0"), ("vm.swappiness", "180")])
+        .cpufreq_policy(0, &[("scaling_driver", "apple-cpufreq"), ("scaling_governor", "schedutil")])
+        .cpufreq_policy(4, &[("scaling_driver", "apple-cpufreq"), ("scaling_governor", "schedutil")])
+        .power_supply("macsmc-ac", &[("type", "Mains"), ("online", "0")])
+        .power_supply("macsmc-battery", &[("type", "Battery"), ("status", "Discharging")])
+        .dmi(&[]);
+    (f.roots(), gnome_wayland())
 }

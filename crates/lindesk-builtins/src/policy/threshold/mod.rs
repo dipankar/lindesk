@@ -38,6 +38,13 @@
 //! * YELLOW: background and batch yield harder (weights, `uclamp.max`).
 //! * RED: `io.max` AIMD on background and batch per device, and `memory.high` on batch under
 //!   sustained memory `full` pressure.
+//!
+//! # Hardware awareness
+//!
+//! Tunables default to `"auto"` and are resolved against [`HostCaps::hardware`] (CPU count,
+//! RAM, compressed swap, disk kinds, power source): see [`config`](ThresholdConfig) for the
+//! rules and [`ThresholdPolicy::effective_config`] for the resolved values with reasons.
+//! Unknown hardware resolves to the historical constants.
 
 mod config;
 #[cfg(test)]
@@ -47,11 +54,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use lindesk_plugin_api::{
-    Event, InitContext, Intent, IoLimit, Knob, Level, Metric, Plugin, PluginError, PluginInfo, PluginKind,
-    PluginResult, Policy, PolicyOutput, QosClass, Resource, Sample, Setting, Snapshot, Target, TimestampMs, UnitState,
+    Event, Hardware, HostCaps, InitContext, Intent, IoLimit, Knob, Level, Metric, Plugin, PluginError, PluginInfo,
+    PluginKind, PluginResult, Policy, PolicyOutput, QosClass, Resource, Sample, Setting, Snapshot, Target, TimestampMs,
+    UnitState,
 };
 
-pub use config::{ResourceThresholds, ThresholdConfig, ThresholdValues};
+pub use config::{
+    Auto, DeviceAimd, EnterThresholds, Resolution, ResolvedThreshold, ResourceThresholds, Source, ThresholdConfig,
+    ThresholdValues,
+};
 
 /// Plugin name.
 pub const NAME: &str = "threshold";
@@ -66,6 +77,10 @@ const MIB: f64 = 1024.0 * 1024.0;
 pub struct ThresholdPolicy {
     cfg: ThresholdConfig,
     st: State,
+    /// `cfg` resolved against the hardware of the last snapshot.
+    res: ResolvedThreshold,
+    /// The (devices, hardware) `res` was resolved for; `None` = not yet resolved.
+    res_key: Option<(Vec<String>, Hardware)>,
 }
 
 /// Exponentially weighted moving average fed by PSI samples.
@@ -216,12 +231,27 @@ impl ThresholdPolicy {
     /// A policy with the given configuration (call [`ThresholdConfig::validate`] first if it
     /// comes from an untrusted source; [`Plugin::init`] does).
     pub fn new(cfg: ThresholdConfig) -> Self {
-        ThresholdPolicy { cfg, st: State::default() }
+        ThresholdPolicy { cfg, ..Default::default() }
     }
 
     /// The active configuration.
     pub fn config(&self) -> &ThresholdConfig {
         &self.cfg
+    }
+
+    /// The configuration with every `"auto"` resolved against `caps.hardware`, with the
+    /// reason for each value (for `lindeskctl explain` and `doctor`).
+    pub fn effective_config(&self, caps: &HostCaps) -> ResolvedThreshold {
+        self.cfg.resolve(caps)
+    }
+
+    /// Re-resolve the configuration when the devices or hardware (e.g. power source) changed.
+    fn refresh(&mut self, caps: &HostCaps) {
+        let fresh = self.res_key.as_ref().is_some_and(|(d, h)| d == &caps.devices && h == &caps.hardware);
+        if !fresh {
+            self.res = self.cfg.resolve(caps);
+            self.res_key = Some((caps.devices.clone(), caps.hardware.clone()));
+        }
     }
 
     /// The current health level.
@@ -253,7 +283,7 @@ impl ThresholdPolicy {
 
     /// Apply focus/interaction events to the epoch state.
     fn process_events(&mut self, snap: &Snapshot, fg: Option<&Target>) {
-        let epoch_ms = ms(self.cfg.epoch);
+        let epoch_ms = i64::try_from(self.res.epoch_ms).unwrap_or(i64::MAX);
         let mut events: Vec<&Event> = snap.events.iter().collect();
         events.sort_by_key(|e| e.ts());
         for e in events {
@@ -302,6 +332,7 @@ impl ThresholdPolicy {
     /// Advance the GREEN/YELLOW/RED state machine by at most one step.
     fn update_level(&mut self, now: TimestampMs, sig: &Signals) {
         let cfg = &self.cfg;
+        let enter = &self.res.enter;
         let st = &mut self.st;
         let fg = sig.fg_ratio();
         let x = cfg.exit_ratio;
@@ -313,7 +344,7 @@ impl ThresholdPolicy {
         let red_enter =
             st.fg_red_since.is_some_and(|t| now - t >= ms(cfg.red_after)) || sig.mem_full > cfg.memory_full_red;
         let yellow_enter =
-            Resource::ALL.into_iter().any(|r| sig.some[idx(r)] > cfg.enter.get(r)) || fg > cfg.foreground_yellow;
+            Resource::ALL.into_iter().any(|r| sig.some[idx(r)] > enter.get(r)) || fg > cfg.foreground_yellow;
         let wanted = if red_enter {
             Level::Red
         } else if yellow_enter {
@@ -332,7 +363,7 @@ impl ThresholdPolicy {
         let red_clear = fg <= cfg.foreground_red * x && sig.mem_full <= cfg.memory_full_red * x;
         let yellow_clear = red_clear
             && fg <= cfg.foreground_yellow * x
-            && Resource::ALL.into_iter().all(|r| sig.some[idx(r)] <= cfg.enter.get(r) * x);
+            && Resource::ALL.into_iter().all(|r| sig.some[idx(r)] <= enter.get(r) * x);
         let exit_ok = |l: Level| match l {
             Level::Green => false,
             Level::Red => red_clear,
@@ -359,6 +390,7 @@ impl ThresholdPolicy {
     /// Human-readable reason for the current level, e.g. `foreground io stall 14% > 10%`.
     fn cause(&self, sig: &Signals) -> String {
         let cfg = &self.cfg;
+        let enter = &self.res.enter;
         let fg = sig.fg.map(|(r, v)| format!("foreground {r} stall {}", pct(v)));
         match self.st.level {
             Level::Red => {
@@ -371,8 +403,8 @@ impl ThresholdPolicy {
                 }
             }
             Level::Yellow => {
-                if let Some(r) = Resource::ALL.into_iter().find(|r| sig.some[idx(*r)] > cfg.enter.get(*r)) {
-                    format!("system {r} pressure {} > {}", pct(sig.some[idx(r)]), pct(cfg.enter.get(r)))
+                if let Some(r) = Resource::ALL.into_iter().find(|r| sig.some[idx(*r)] > enter.get(*r)) {
+                    format!("system {r} pressure {} > {}", pct(sig.some[idx(r)]), pct(enter.get(r)))
                 } else if let Some((r, v)) = sig.fg.filter(|(_, v)| *v > cfg.foreground_yellow) {
                     format!("foreground {r} stall {} > {}", pct(v), pct(cfg.foreground_yellow))
                 } else {
@@ -393,7 +425,7 @@ impl ThresholdPolicy {
         stalling: bool,
     ) -> &Aimd {
         let cfg = &self.cfg;
-        let floor = cfg.aimd_floor;
+        let (floor, step) = self.res.aimd_for(device);
         let key = (target.clone(), device.to_string());
         let st = self.st.aimd.entry(key).or_insert_with(|| {
             let (r, w) = unit
@@ -408,7 +440,7 @@ impl ThresholdPolicy {
                 if stalling {
                     ((v as f64 * cfg.aimd_decrease) as u64).max(floor)
                 } else {
-                    v.saturating_add(cfg.aimd_step).max(floor)
+                    v.saturating_add(step).max(floor)
                 }
             };
             st.rbps = next(st.rbps);
@@ -435,6 +467,12 @@ impl ThresholdPolicy {
         out.push(m("level", level_value(self.st.level)));
         out.push(m("epoch", f64::from(u8::from(epoch))));
         out.push(m("aimd_limits", self.st.aimd.len() as f64));
+        out.push(m("on_battery", f64::from(u8::from(self.res.on_battery))));
+        if let Some(v) = &self.res.virtualization {
+            let mut vm = m("virtualized", 1.0);
+            vm.labels.insert("kind".into(), v.clone());
+            out.push(vm);
+        }
         out
     }
 }
@@ -452,6 +490,7 @@ impl Plugin for ThresholdPolicy {
     fn init(&mut self, ctx: &InitContext) -> PluginResult<()> {
         self.cfg = ThresholdConfig::from_json(&ctx.config).map_err(|e| PluginError::Failed(format!("{NAME}: {e}")))?;
         self.st = State::default();
+        self.res_key = None;
         Ok(())
     }
 }
@@ -459,6 +498,7 @@ impl Plugin for ThresholdPolicy {
 impl Policy for ThresholdPolicy {
     fn evaluate(&mut self, snap: &Snapshot) -> PluginResult<PolicyOutput> {
         let now = snap.now;
+        self.refresh(&snap.caps);
         if !self.st.started {
             self.st.started = true;
             self.st.entered_at = now;
@@ -477,6 +517,11 @@ impl Policy for ThresholdPolicy {
         let cause = self.cause(&sig);
         let cfg = self.cfg.clone();
         let v = &cfg.values;
+        let critical_memory_low = self.res.critical_memory_low;
+        let fg_memory_low_max = self.res.fg_memory_low_max;
+        let fg_epoch_uclamp_min = self.res.fg_epoch_uclamp_min;
+        let yellow_background_uclamp_max = self.res.yellow_background_uclamp_max;
+        let hybrid = self.res.hybrid;
         let stalling = sig.fg_ratio() > cfg.foreground_red;
 
         // RED-only state is dropped as soon as we leave RED.
@@ -501,7 +546,7 @@ impl Policy for ThresholdPolicy {
                     let w = v.critical_weight;
                     plan.set(t, Setting::CpuWeight { value: w }, "critical: protected (static)");
                     plan.set(t, Setting::IoWeight { value: w }, "critical: protected (static)");
-                    plan.set(t, Setting::MemoryLow { bytes: cfg.critical_memory_low }, "critical: protected (static)");
+                    plan.set(t, Setting::MemoryLow { bytes: critical_memory_low }, "critical: protected (static)");
                 }
                 continue;
             }
@@ -510,7 +555,7 @@ impl Policy for ThresholdPolicy {
                     let r = "critical: protected (static, work-conserving)";
                     plan.set(t, Setting::CpuWeight { value: v.critical_weight }, r);
                     plan.set(t, Setting::IoWeight { value: v.critical_weight }, r);
-                    plan.set(t, Setting::MemoryLow { bytes: cfg.critical_memory_low }, r);
+                    plan.set(t, Setting::MemoryLow { bytes: critical_memory_low }, r);
                 }
                 QosClass::Background => {
                     let r = "background: lower share (static, work-conserving)";
@@ -520,7 +565,7 @@ impl Policy for ThresholdPolicy {
                         let r = format!("{}: {cause}; background yields", level.as_str().to_uppercase());
                         plan.set(t, Setting::CpuWeight { value: v.yellow_background_weight }, &r);
                         plan.set(t, Setting::IoWeight { value: v.yellow_background_weight }, &r);
-                        plan.set(t, Setting::UclampMax { percent: v.yellow_background_uclamp_max }, &r);
+                        plan.set(t, Setting::UclampMax { percent: yellow_background_uclamp_max }, &r);
                     }
                 }
                 QosClass::Batch => {
@@ -531,7 +576,8 @@ impl Policy for ThresholdPolicy {
                     if level >= Level::Yellow {
                         let r = format!("{}: {cause}; batch yields", level.as_str().to_uppercase());
                         plan.set(t, Setting::IoWeight { value: v.yellow_batch_io_weight }, &r);
-                        plan.set(t, Setting::UclampMax { percent: v.yellow_batch_uclamp_max }, &r);
+                        let r = if hybrid { format!("{r}; uclamp.max keeps it on E-cores") } else { r };
+                        plan.set(t, Setting::UclampMax { percent: v.yellow_batch_uclamp_max }, r);
                     }
                     if mem_sustained && let Some(cur) = u.usage.as_ref().map(|u| u.mem_current).filter(|c| *c > 0) {
                         self.st.mem_high.entry(t.clone()).or_insert((cur as f64 * cfg.memory_high_ratio) as u64);
@@ -571,10 +617,8 @@ impl Policy for ThresholdPolicy {
         self.st.mem_high.retain(|t, _| live_batch.contains(t));
 
         if let Some(t) = &fg_target {
-            let mem_low = fg_unit
-                .and_then(|u| u.usage.as_ref())
-                .map(|u| u.mem_current.min(cfg.fg_memory_low_max))
-                .filter(|b| *b > 0);
+            let mem_low =
+                fg_unit.and_then(|u| u.usage.as_ref()).map(|u| u.mem_current.min(fg_memory_low_max)).filter(|b| *b > 0);
             let (w, r) = if epoch {
                 (v.fg_epoch_weight, "foreground: interaction epoch boost")
             } else {
@@ -589,7 +633,8 @@ impl Policy for ThresholdPolicy {
             plan.set(t, Setting::CpuWeight { value: cw }, r);
             plan.set(t, Setting::IoWeight { value: iw }, r);
             if epoch {
-                plan.set(t, Setting::UclampMin { percent: v.fg_epoch_uclamp_min }, r);
+                let r = if hybrid { format!("{r} (uclamp.min favours P-cores)") } else { r.to_string() };
+                plan.set(t, Setting::UclampMin { percent: fg_epoch_uclamp_min }, r);
             }
             if let Some(b) = mem_low {
                 let b = match plan.get(t, Knob::MemoryLow) {

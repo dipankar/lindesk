@@ -4,16 +4,32 @@
 # The .deb, .rpm and Arch packages all call this script with --destdir, so the layout is
 # defined here and nowhere else. Run it directly to install from a source tree:
 #
-#   ./packaging/install.sh                     # build, install to /usr and /etc, enable
+#   ./packaging/install.sh                     # check, build, install to /usr and /etc, enable
+#                                               # and start everything (asks for sudo)
 #   cargo build --release && sudo ./packaging/install.sh --no-build
 #   ./packaging/install.sh --destdir=/tmp/stage --no-build      # stage only (packagers)
 #   sudo ./packaging/install.sh --uninstall
+#   ./packaging/install.sh --preflight         # only check this host's requirements
+#
+# Before building or installing, a preflight step checks the host (Linux, kernel version,
+# cgroup v2, PSI, systemd, polkit, D-Bus, conflicting daemons) and, when building, the Rust
+# toolchain against the workspace MSRV. Hard failures stop the install; --skip-preflight
+# bypasses it. After a live install, `lindeskctl doctor --preflight` runs the daemons' own
+# requirement checks; if they fail, the services are installed but not enabled or started.
+# On success lindeskd is enabled and started, and lindesk-session is started for every user
+# already logged in to a graphical session (no logout needed).
+#
+# Run as a regular user, the script checks and builds as that user, then re-runs itself
+# with sudo for the install step (so target/ never gets root-owned files).
 #
 # Environment:
 #   LINDESK_BIN_DIR   directory holding prebuilt lindeskd, lindesk-session, lindeskctl,
 #                     lindesk-data and lindesk-bench (implies --no-build)
 #   CARGO_TARGET_DIR  honoured when locating/building binaries (default: <repo>/target)
 #   CARGO             cargo executable (default: cargo from PATH)
+#   RUSTC             rustc executable for the version check (default: next to cargo)
+#   LINDESK_PREFLIGHT_ROOT  check a host tree mounted here instead of / (tests)
+#   LINDESK_PREFLIGHT_OS    override `uname -s` (tests)
 #
 # shellcheck disable=SC2317  # functions are invoked indirectly through run()
 set -euo pipefail
@@ -40,6 +56,12 @@ do_manifest=1
 uninstall=0
 dry_run=0
 init=auto
+preflight_only=0
+skip_preflight=0
+preflight_failed=0
+preflight_done=0
+reexec_sudo=0
+started_users=()
 
 usage() {
 	cat <<EOF
@@ -62,6 +84,9 @@ Options:
                      (packages: the package manager tracks the files)
   --uninstall        remove everything a previous run installed (uses the manifest)
   --dry-run          print what would be done without changing anything
+  --preflight        only check this host's requirements (no root needed), then exit;
+                     with --no-build the Rust toolchain is not checked
+  --skip-preflight   skip the requirement checks before and after installing
   -h, --help         show this help
 EOF
 }
@@ -116,6 +141,9 @@ while (($#)); do
 	--no-manifest) do_manifest=0 ;;
 	--uninstall) uninstall=1 ;;
 	--dry-run) dry_run=1 ;;
+	--preflight) preflight_only=1 ;;
+	--skip-preflight) skip_preflight=1 ;;
+	--preflight-done) preflight_done=1 ;; # internal: set by the sudo re-run
 	-h | --help) usage; exit 0 ;;
 	*) usage >&2; die "unknown option: $arg" ;;
 	esac
@@ -147,8 +175,196 @@ fi
 live=0
 [[ -z $destdir ]] && live=1
 
+# ── preflight ────────────────────────────────────────────────────────────────────────────
+# Written in POSIX sh (no bashisms) so other installers can reuse it verbatim.
+# Host checks look at ${LINDESK_PREFLIGHT_ROOT:-}/proc, /sys, /run and /usr.
+pf_fails=0
+pf_warns=0
+pf_ok() { printf '  ok    %s\n' "$*"; }
+pf_warn() { printf '  WARN  %s\n' "$*"; pf_warns=$((pf_warns + 1)); }
+pf_fail() { printf '  FAIL  %s\n' "$*"; pf_fails=$((pf_fails + 1)); }
+
+# pf_ver_lt A B: dotted version A is older than B (compares up to three components).
+pf_ver_lt() {
+	awk -v a="$1" -v b="$2" 'BEGIN {
+		split(a, x, "."); split(b, y, ".")
+		for (i = 1; i <= 3; i++) { if (x[i] + 0 < y[i] + 0) exit 0; if (x[i] + 0 > y[i] + 0) exit 1 }
+		exit 1
+	}'
+}
+
+# find_cargo: set cargo_bin to a usable cargo, or to "" when there is none.
+find_cargo() {
+	cargo_bin=${CARGO:-cargo}
+	if have "$cargo_bin" || [ -x "$cargo_bin" ]; then return 0; fi
+	# Common case: `sudo ./install.sh`, where root's PATH lacks ~/.cargo/bin.
+	if [ -n "${SUDO_USER:-}" ]; then
+		pf_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+		if [ -x "$pf_home/.cargo/bin/cargo" ]; then
+			cargo_bin=$pf_home/.cargo/bin/cargo
+			return 0
+		fi
+	fi
+	cargo_bin=
+}
+
+# as_build_user CMD...: run as the invoking user under sudo (rustup toolchains are per user).
+as_build_user() {
+	if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && have sudo; then
+		sudo -u "$SUDO_USER" -H -- "$@"
+	else
+		"$@"
+	fi
+}
+
+pf_toolchain() {
+	pf_rustup="install Rust with rustup: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+	pf_msrv=$(sed -n 's/^rust-version[[:space:]]*=[[:space:]]*"\([0-9.]*\)".*/\1/p' "$ROOT/Cargo.toml" | head -n 1)
+	find_cargo
+	if [ -z "$cargo_bin" ]; then
+		pf_fail "cargo not found ($pf_rustup), or build first and re-run with --no-build"
+		return 0
+	fi
+	pf_rustc=${RUSTC:-}
+	if [ -z "$pf_rustc" ]; then
+		pf_rustc=rustc
+		case $cargo_bin in */*) [ -x "${cargo_bin%/*}/rustc" ] && pf_rustc=${cargo_bin%/*}/rustc ;; esac
+	fi
+	pf_rv=$(as_build_user "$pf_rustc" --version 2>/dev/null | awk '{ print $2 }' | sed 's/-.*//')
+	if [ -z "$pf_rv" ]; then
+		pf_fail "rustc not found or not working ($pf_rustup)"
+	elif [ -n "$pf_msrv" ] && pf_ver_lt "$pf_rv" "$pf_msrv"; then
+		pf_fail "rustc $pf_rv is older than the workspace MSRV $pf_msrv (run: rustup update stable)"
+	else
+		pf_ok "Rust toolchain: rustc $pf_rv (needs >= ${pf_msrv:-?})"
+	fi
+}
+
+pf_host() {
+	pf_root=${LINDESK_PREFLIGHT_ROOT:-}
+	pf_os=${LINDESK_PREFLIGHT_OS:-$(uname -s)}
+	if [ "$pf_os" != Linux ]; then
+		pf_fail "operating system is $pf_os: lindesk only runs on Linux"
+		return 0
+	fi
+	if [ ! -r "$pf_root/proc/sys/kernel/osrelease" ]; then
+		pf_fail "/proc is not mounted (cannot read /proc/sys/kernel/osrelease)"
+		return 0
+	fi
+	pf_rel=$(cat "$pf_root/proc/sys/kernel/osrelease")
+	pf_kv=$(printf '%s\n' "$pf_rel" | sed -n 's/^\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1.\2/p')
+	if [ -z "$pf_kv" ]; then
+		pf_warn "kernel $pf_rel: version not recognised"
+	elif pf_ver_lt "$pf_kv" 3.10; then
+		pf_fail "kernel $pf_rel is older than 3.10: lindesk cannot run (upgrade to >= 5.4)"
+	elif pf_ver_lt "$pf_kv" 4.20; then
+		pf_warn "kernel $pf_rel is older than 4.20: no PSI, lindesk only applies static class weights"
+	elif pf_ver_lt "$pf_kv" 5.4; then
+		pf_warn "kernel $pf_rel is older than 5.4: no cgroup uclamp, boosts use weights only"
+	else
+		pf_ok "kernel $pf_rel"
+	fi
+
+	if [ -f "$pf_root/sys/fs/cgroup/cgroup.controllers" ]; then
+		pf_ok "cgroup v2 ($(cat "$pf_root/sys/fs/cgroup/cgroup.controllers"))"
+	else
+		pf_warn "no cgroup v2 at /sys/fs/cgroup: CPU weights only, no I/O control" \
+			"(boot with systemd.unified_cgroup_hierarchy=1)"
+	fi
+
+	pf_cmdline=" $(cat "$pf_root/proc/cmdline" 2>/dev/null || true) "
+	if [ -r "$pf_root/proc/pressure/cpu" ]; then
+		pf_ok "PSI (/proc/pressure)"
+	else
+		case $pf_cmdline in
+		*" psi=0 "*) pf_warn "PSI disabled by psi=0 on the kernel command line: replace it with psi=1" ;;
+		*)
+			if grep -qs '^CONFIG_PSI_DEFAULT_DISABLED=y' "$pf_root/boot/config-$pf_rel"; then
+				pf_warn "PSI compiled but disabled by default: add psi=1 to the kernel command line"
+			else
+				pf_warn "no PSI (/proc/pressure missing): no stall feedback; add psi=1 to the kernel command line"
+			fi
+			;;
+		esac
+	fi
+
+	if [ -d "$pf_root/run/systemd/system" ]; then
+		pf_ok "systemd is running"
+	else
+		pf_warn "systemd is not running: lindeskd uses the raw cgroup backend (see --init)"
+	fi
+
+	pf_polkit=0
+	for pf_p in /usr/lib/polkit-1/polkitd /usr/libexec/polkitd /usr/libexec/polkit-1/polkitd \
+		/usr/lib/systemd/system/polkit.service /lib/systemd/system/polkit.service; do
+		if [ -e "$pf_root$pf_p" ]; then pf_polkit=1; fi
+	done
+	if [ "$pf_polkit" -eq 1 ]; then
+		pf_ok "polkit"
+	else
+		pf_warn "polkit not found: only root will be able to change classes (install polkit)"
+	fi
+
+	if [ -e "$pf_root/run/dbus/system_bus_socket" ]; then
+		pf_ok "D-Bus system bus"
+	else
+		pf_warn "no D-Bus system bus (/run/dbus/system_bus_socket): lindeskd needs it (or --no-dbus)"
+	fi
+
+	pf_conflicts=
+	for pf_c in "$pf_root"/proc/[0-9]*/comm; do
+		[ -r "$pf_c" ] || continue
+		read -r pf_comm <"$pf_c" 2>/dev/null || continue
+		case $pf_comm in
+		system76-schedu) pf_unit=com.system76.Scheduler ;;
+		ananicy-cpp | ananicy | uresourced) pf_unit=$pf_comm ;;
+		*) continue ;;
+		esac
+		case " $pf_conflicts " in *" $pf_unit "*) ;; *) pf_conflicts="$pf_conflicts $pf_unit" ;; esac
+	done
+	if [ -n "$pf_conflicts" ]; then
+		pf_warn "conflicting daemon(s) running:$pf_conflicts; they also adjust priorities" \
+			"(stop them: systemctl disable --now$pf_conflicts)"
+	else
+		pf_ok "no conflicting daemons running"
+	fi
+}
+
+# preflight [build]: run the checks and print a summary; returns 1 on any hard failure.
+preflight() {
+	pf_fails=0
+	pf_warns=0
+	info "preflight: checking requirements"
+	if [ -n "$destdir" ] && [ "$preflight_only" -eq 0 ]; then
+		pf_ok "staging into $destdir: host checks skipped (the target is checked at install time)"
+	else
+		pf_host
+	fi
+	if [ "${1:-}" = build ]; then pf_toolchain; fi
+	if [ "$pf_fails" -gt 0 ]; then
+		printf 'preflight: %s failed, %s warning(s)\n' "$pf_fails" "$pf_warns"
+		return 1
+	fi
+	if [ "$pf_warns" -gt 0 ]; then
+		printf 'preflight: passed with %s warning(s); lindesk will run with reduced control\n' "$pf_warns"
+	else
+		printf 'preflight: all requirements met\n'
+	fi
+	return 0
+}
+
+if ((preflight_only)); then
+	rc=0
+	if ((do_build)); then preflight build || rc=$?; else preflight || rc=$?; fi
+	exit "$rc"
+fi
+
 if ((live)) && ((!dry_run)) && [[ $(id -u) -ne 0 ]]; then
-	die "installing onto the live system needs root (try: sudo $0 ${ORIG_ARGS[*]}), or use --destdir/--dry-run"
+	if ((uninstall)) || ! have sudo; then
+		die "installing onto the live system needs root (try: sudo $0 ${ORIG_ARGS[*]}), or use --destdir/--dry-run"
+	fi
+	# Check and build as this user, then re-run the install step as root (see do_install).
+	reexec_sudo=1
 fi
 
 # ── layout ───────────────────────────────────────────────────────────────────────────────
@@ -298,18 +514,11 @@ manifest_conf_sum() {
 
 # ── build ────────────────────────────────────────────────────────────────────────────────
 build() {
-	local cargo=${CARGO:-cargo} pkgs=() b
+	local cargo pkgs=() b
 	for b in "${BINARIES[@]}"; do pkgs+=(-p "$b"); done
-	if ! have "$cargo"; then
-		# Common case: `sudo ./install.sh`, where root's PATH lacks ~/.cargo/bin.
-		if [[ -n ${SUDO_USER:-} ]]; then
-			local home
-			home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-			[[ -x $home/.cargo/bin/cargo ]] && cargo=$home/.cargo/bin/cargo
-		fi
-		have "$cargo" || [[ -x $cargo ]] ||
-			die "cargo not found. Build first (cargo build --release) and re-run with --no-build"
-	fi
+	find_cargo
+	[[ -n $cargo_bin ]] || die "cargo not found. Build first (cargo build --release) and re-run with --no-build"
+	cargo=$cargo_bin
 	info "building release binaries"
 	if [[ $(id -u) -eq 0 && -n ${SUDO_USER:-} ]]; then
 		# Don't leave root-owned files in the user's target dir.
@@ -366,7 +575,17 @@ install_generated() {
 do_install() {
 	local b f
 
+	if ((!skip_preflight && !preflight_done)); then
+		local pf_rc=0
+		if ((do_build)); then preflight build || pf_rc=$?; else preflight || pf_rc=$?; fi
+		((pf_rc == 0)) ||
+			die "preflight failed: fix the FAIL items above, or re-run with --skip-preflight to install anyway"
+	fi
 	((do_build)) && build
+	if ((reexec_sudo)); then
+		info "installing as root (sudo)"
+		exec sudo env LINDESK_BIN_DIR="$bin_src" "$SCRIPT_DIR/$PROG" "${ORIG_ARGS[@]}" --no-build --preflight-done
+	fi
 	for b in "${BINARIES[@]}"; do
 		[[ -f $bin_src/$b ]] || die "missing binary $bin_src/$b (build first, or set LINDESK_BIN_DIR)"
 	done
@@ -518,12 +737,17 @@ integrate_live() {
 			/org/freedesktop/DBus org.freedesktop.DBus.ReloadConfig
 	fi
 
-	if ((systemd)); then
+	post_install_check
+
+	if ((preflight_failed)); then
+		if ((systemd)); then try systemctl daemon-reload; fi
+	elif ((systemd)); then
 		try systemctl daemon-reload
 		if ((do_enable)); then
 			info "enabling lindeskd and the maintenance timer"
 			try systemctl enable --now "${ENABLE_SYSTEM[@]}"
 			try systemctl --global enable "${ENABLE_USER[@]}"
+			start_sessions
 		fi
 	else
 		case $init in
@@ -545,9 +769,77 @@ integrate_live() {
 	next_steps "$systemd"
 }
 
+# post_install_check: the daemons' own requirement checks (lindeskctl doctor --preflight,
+# exit 1 on a hard failure). On failure the services are not enabled or started.
+post_install_check() {
+	local ctl=$bindir/lindeskctl out rc=0
+	((skip_preflight)) && return 0
+	if ((dry_run)); then
+		run "$ctl" doctor --preflight
+		return 0
+	fi
+	if [[ ! -x $ctl ]] || ! with_timeout "$ctl" --help >/dev/null 2>&1 </dev/null; then
+		info "lindeskctl cannot run on this host; skipping the requirement check"
+		return 0
+	fi
+	info "checking the daemons' requirements (lindeskctl doctor --preflight)"
+	out=$(with_timeout "$ctl" doctor --preflight 2>&1 </dev/null) || rc=$?
+	case $rc in
+	0) if [[ -n $out ]]; then printf '%s\n' "$out"; fi ;;
+	1)
+		preflight_failed=1
+		printf '%s\n' "$out" >&2
+		warn "requirement checks failed: lindesk is installed, but its services were NOT enabled or started"
+		;;
+	*) info "lindeskctl doctor --preflight is not supported by this build (exit $rc); skipping" ;;
+	esac
+}
+
+# start_sessions: start lindesk-session for every user logged in to a graphical (Wayland or
+# X11) session, through their user manager, so nobody has to log out. Best effort.
+start_sessions() {
+	have loginctl || return 0
+	local sid _rest type user
+	local -a users=()
+	while read -r sid _rest; do
+		[[ -n $sid ]] || continue
+		type=$(loginctl show-session "$sid" -p Type --value 2>/dev/null) || continue
+		[[ $type == wayland || $type == x11 ]] || continue
+		user=$(loginctl show-session "$sid" -p Name --value 2>/dev/null) || continue
+		[[ -n $user && " ${users[*]} " != *" $user "* ]] && users+=("$user")
+	done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
+	for user in "${users[@]}"; do
+		if ((dry_run)); then
+			run systemctl --user -M "$user@" start lindesk-session.service
+			continue
+		fi
+		with_timeout systemctl --user -M "$user@" daemon-reload >/dev/null 2>&1 || true
+		if with_timeout systemctl --user -M "$user@" start lindesk-session.service >/dev/null 2>&1; then
+			info "started lindesk-session for $user"
+			started_users+=("$user")
+		else
+			warn "could not start lindesk-session for $user; it starts at their next login"
+		fi
+	done
+}
+
 next_steps() {
 	local systemd=$1
 	((dry_run)) && return 0
+	if ((preflight_failed)); then
+		cat <<EOF
+
+lindesk is installed, but this system does not meet its requirements (see above), so
+lindeskd and lindesk-session were not enabled or started.
+
+  1. Fix the FAIL items reported by:   lindeskctl doctor --preflight
+  2. Then enable the services:
+       sudo systemctl enable --now ${ENABLE_SYSTEM[*]}
+       sudo systemctl --global enable ${ENABLE_USER[*]}
+     (or re-run this installer, which checks again and enables them on success)
+EOF
+		return 0
+	fi
 	cat <<EOF
 
 lindesk is installed.
@@ -555,8 +847,13 @@ lindesk is installed.
 EOF
 	if ((systemd)); then
 		if ((do_enable)); then
-			echo "  lindeskd is running; lindesk-session starts with your next graphical login."
-			echo "  To start it in the current session now:  systemctl --user start lindesk-session.service"
+			echo "  lindeskd is running."
+			if ((${#started_users[@]})); then
+				echo "  lindesk-session is running for: ${started_users[*]} (and starts at every graphical login)."
+			else
+				echo "  lindesk-session starts at your next graphical login, or now with:"
+				echo "    systemctl --user start lindesk-session.service"
+			fi
 		else
 			echo "  Enable the services:"
 			echo "    sudo systemctl enable --now ${ENABLE_SYSTEM[*]}"
@@ -577,13 +874,15 @@ EOF
 	fi
 	cat <<EOF
 
-  Desktop adapters (per user):
-    GNOME:  gnome-extensions enable $GNOME_UUID     (log out and back in on Wayland first)
-    KDE:    kwriteconfig6 --file kwinrc --group Plugins --key lindeskEnabled true
-            qdbus6 org.kde.KWin /KWin reconfigure     (or System Settings > KWin Scripts)
-    COSMIC and X11 sessions are handled by lindesk-session itself.
+What now:
+  lindeskctl              what lindesk is doing right now
+  lindeskctl watch        the same, live
+  lindeskctl doctor       what this machine supports, and what to fix
 
-  Check what your system supports:  lindeskctl doctor
+  GNOME: lindesk-session enables its Shell extension on first start. If it stays off:
+           gnome-extensions enable $GNOME_UUID   (on Wayland, log out and back in first)
+  KDE:   enable "lindesk" in System Settings > Window Management > KWin Scripts.
+  COSMIC and X11 need nothing: lindesk-session handles them itself.
 EOF
 }
 

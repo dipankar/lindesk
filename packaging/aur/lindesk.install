@@ -1,21 +1,65 @@
 # pacman install hooks for lindesk.
 # The alpm hooks shipped with systemd already create the group and state directories
-# (sysusers.d / tmpfiles.d) and reload the units; these functions only enable, restore
-# and inform. Following Arch convention, the broker is not started automatically.
+# (sysusers.d / tmpfiles.d) and reload the units; these functions only enable, restore,
+# check requirements and inform. Following Arch convention, the broker is not started
+# automatically. The requirement check never fails the transaction.
+
+# _lindesk_preflight: 0 = requirements met (or check unavailable), 1 = a hard failure.
+_lindesk_preflight() {
+  [ -x /usr/bin/lindeskctl ] || return 0
+  _rc=0
+  if command -v timeout >/dev/null 2>&1; then
+    _out=$(timeout 30 /usr/bin/lindeskctl doctor --preflight --quiet 2>&1 </dev/null) || _rc=$?
+  else
+    _out=$(/usr/bin/lindeskctl doctor --preflight --quiet 2>&1 </dev/null) || _rc=$?
+  fi
+  [ "$_rc" -eq 1 ] || return 0
+  echo "==> lindesk: WARNING: this system does not meet lindesk's requirements:"
+  [ -z "$_out" ] || printf '%s\n' "$_out" | sed 's/^/      /'
+  echo "    Fix the failures before enabling lindeskd; check with: lindeskctl doctor --preflight"
+  return 1
+}
+
+# _lindesk_tmo CMD...: run with a 15 s timeout when timeout(1) exists.
+_lindesk_tmo() { if command -v timeout >/dev/null 2>&1; then timeout 15 "$@"; else "$@"; fi; }
+
+# _lindesk_start_sessions: start lindesk-session for every user logged in to a graphical
+# session, through their user manager, so nobody has to log out. Best effort, never fatal.
+_lindesk_start_sessions() {
+  command -v loginctl >/dev/null 2>&1 || return 0
+  [ -d /run/systemd/system ] || return 0
+  for _sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{ print $1 }'); do
+    _type=$(loginctl show-session "$_sid" -p Type --value 2>/dev/null) || continue
+    case $_type in wayland | x11) ;; *) continue ;; esac
+    loginctl show-session "$_sid" -p Name --value 2>/dev/null
+  done | sort -u | while read -r _u; do
+    [ -n "$_u" ] || continue
+    _lindesk_tmo systemctl --user -M "$_u@" daemon-reload >/dev/null 2>&1 || true
+    if _lindesk_tmo systemctl --user -M "$_u@" start lindesk-session.service >/dev/null 2>&1; then
+      echo "lindesk: started lindesk-session for $_u"
+    fi
+  done
+  return 0
+}
 
 post_install() {
   systemctl --global enable lindesk-session.service lindesk-compact.timer >/dev/null 2>&1 || true
+  _lindesk_preflight || return 0
+  _lindesk_start_sessions
   cat <<'MSG'
 ==> lindesk: enable the broker and its maintenance timer:
       sudo systemctl enable --now lindeskd.service lindesk-compact.timer
-    lindesk-session (per user) is enabled globally and starts at your next login.
-    GNOME: gnome-extensions enable lindesk@lindesk.org
+    lindesk-session is enabled for every user and runs in open graphical sessions.
+    What now: `lindeskctl` (what lindesk is doing), `lindeskctl watch` (live),
+              `lindeskctl doctor` (what this machine supports).
+    GNOME: lindesk-session enables its Shell extension on first start; if it stays off:
+           gnome-extensions enable lindesk@lindesk.org
     KDE:   enable "lindesk" in System Settings > Window Management > KWin Scripts
-    Then: lindeskctl doctor
 MSG
 }
 
 post_upgrade() {
+  _lindesk_preflight || return 0
   if [ -d /run/systemd/system ] && systemctl is-active --quiet lindeskd.service; then
     systemctl try-restart lindeskd.service || true
   fi

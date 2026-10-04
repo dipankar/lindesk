@@ -1,7 +1,9 @@
 //! `lindeskctl doctor`: turn a [`Probe`] into checks with concrete remedies.
 
+use lindesk_plugin_api::{PowerSource, StorageKind};
 use serde::{Deserialize, Serialize};
 
+use crate::hardware::{self, describe_cpu, describe_memory, describe_power, describe_storage};
 use crate::probe::{Backend, CgroupMode, DesktopKind, IoLatency, Probe, SessionType, SupportLevel, Writeback};
 
 /// How much a finding matters.
@@ -49,6 +51,9 @@ pub fn findings(p: &Probe) -> Vec<Finding> {
     match &p.kernel {
         Some(k) => push(Ok, "Kernel", k.clone(), None),
         None => push(Warn, "Kernel", "unknown".into(), Some("/proc/sys/kernel/osrelease is unreadable")),
+    }
+    for f in hardware_findings(p).into_iter().chain(swap_findings(p)) {
+        push(f.severity, &f.check, f.status, f.remedy.as_deref());
     }
 
     let unified = "boot with systemd.unified_cgroup_hierarchy=1 to switch to cgroup v2";
@@ -273,6 +278,202 @@ pub fn findings(p: &Probe) -> Vec<Finding> {
     out
 }
 
+/// The hardware section: `CPU`, `Memory`, one `Storage` line per managed disk, `Power` and
+/// `Virtualized`, with the hardware-specific advice.
+pub fn hardware_findings(p: &Probe) -> Vec<Finding> {
+    use Severity::*;
+    let hw = &p.hardware;
+    let mut out = Vec::new();
+    let mut push = |sev, check: &str, status: String, remedy: Option<String>| {
+        out.push(Finding::new(sev, check, status, remedy));
+    };
+
+    let cpu = describe_cpu(hw);
+    if hw.cpus == 0 {
+        push(Info, "CPU", cpu, Some("could not read /sys/devices/system/cpu".into()));
+    } else if hw.is_hybrid() {
+        let note = if p.uclamp {
+            "foreground boosts favour P-cores via uclamp.min (EAS/ITMT); batch is capped with uclamp.max \
+             under pressure, which keeps it on E-cores"
+        } else {
+            "no cgroup uclamp: lindesk cannot steer the foreground towards P-cores"
+        };
+        push(Info, "CPU", cpu, Some(note.into()));
+    } else {
+        push(Ok, "CPU", cpu, None);
+    }
+
+    cpu_feature_findings(hw, &mut push);
+
+    let mem = describe_memory(hw);
+    if hw.mem_total > 0 && hw.mem_total < 4 << 30 {
+        push(
+            Info,
+            "Memory",
+            mem,
+            Some("small RAM: memory.low protections are scaled down (critical ≤ 4%, foreground ≤ 10% of RAM)".into()),
+        );
+    } else {
+        push(if hw.mem_total == 0 { Info } else { Ok }, "Memory", mem, None);
+    }
+
+    for s in &hw.storage {
+        let status = describe_storage(s);
+        if s.kind == StorageKind::Hdd && matches!(s.scheduler.as_str(), "none" | "") {
+            let r = format!(
+                "rotational disk on 'none': switch to bfq or mq-deadline (echo bfq > /sys/block/{}/queue/scheduler; \
+                 persist with a udev rule)",
+                s.name
+            );
+            push(Warn, "Storage", status, Some(r));
+        } else {
+            push(Ok, "Storage", status, None);
+        }
+    }
+
+    let power = describe_power(hw);
+    match hw.power {
+        PowerSource::Ac => push(Ok, "Power", power, None),
+        PowerSource::Battery => {
+            push(Info, "Power", power, Some("on battery: shorter interaction boosts, background yields harder".into()))
+        }
+        PowerSource::Unknown => push(Info, "Power", power, None),
+    }
+
+    match hw.virtualization.as_deref() {
+        None => push(Ok, "Virtualized", "no".into(), None),
+        Some(v) if hardware::is_container(v) => push(
+            Warn,
+            "Virtualized",
+            format!("{v} (container)"),
+            Some("cgroup and I/O control are likely restricted by the container runtime".into()),
+        ),
+        Some(v) => push(Info, "Virtualized", v.to_string(), Some("PSI and I/O control reflect the guest only".into())),
+    }
+    out
+}
+
+/// The "Memory & swap" section: each swap area, the reclaim tunables, zswap, MGLRU, swap
+/// activity, the top swapped units, then every [`crate::swap::SwapFinding`] (its proposed
+/// change ops are listed in the remedy).
+pub fn swap_findings(p: &Probe) -> Vec<Finding> {
+    use crate::swap::{describe_device, describe_tunables};
+    use Severity::*;
+    let r = &p.swap;
+    let mut out = Vec::new();
+    for d in &r.devices {
+        out.push(Finding::new(Ok, "Swap", describe_device(d), None));
+    }
+    if r.devices.is_empty() {
+        out.push(Finding::new(Info, "Swap", "none", None));
+    }
+    if r.vm.swappiness.is_some() {
+        out.push(Finding::new(Ok, "Reclaim tunables", describe_tunables(&r.vm), None));
+    }
+    if let Some(z) = &r.zswap {
+        let status = if z.enabled {
+            format!(
+                "on ({}, max pool {}%)",
+                z.compressor.as_deref().unwrap_or("?"),
+                z.max_pool_percent.map_or("?".into(), |v| v.to_string())
+            )
+        } else {
+            "off".into()
+        };
+        out.push(Finding::new(Ok, "zswap", status, None));
+    }
+    if let Some(m) = &r.mglru {
+        out.push(Finding::new(Ok, "MGLRU", format!("{} ({})", if m.enabled { "on" } else { "off" }, m.raw), None));
+    }
+    if r.counters.pswpin + r.counters.pswpout > 0 {
+        let mut s = format!(
+            "{} swapped in, {} out since boot",
+            hardware::fmt_bytes(r.counters.pswpin * 4096),
+            hardware::fmt_bytes(r.counters.pswpout * 4096)
+        );
+        if let Some(rt) = r.rates {
+            s.push_str(&format!("; now {:.0} in / {:.0} out pages/s", rt.pswpin_per_s, rt.pswpout_per_s));
+        }
+        out.push(Finding::new(Ok, "Swap activity", s, None));
+    }
+    if !r.top_units.is_empty() {
+        let top: Vec<String> = r
+            .top_units
+            .iter()
+            .take(3)
+            .map(|u| {
+                format!("{} {}", u.cgroup.rsplit('/').next().unwrap_or(&u.cgroup), hardware::fmt_bytes(u.swap_bytes))
+            })
+            .collect();
+        out.push(Finding::new(Ok, "Top swap users", top.join(", "), None));
+    }
+    for f in &r.findings {
+        let ops: Vec<String> = f.proposed_ops.iter().map(|o| o.to_string()).collect();
+        let remedy =
+            if ops.is_empty() { f.detail.clone() } else { format!("{} Proposed: {}", f.detail, ops.join(" ")) };
+        out.push(Finding::new(f.severity, "Swap advice", f.title.clone(), Some(remedy)));
+    }
+    out
+}
+
+/// `CPU features` line plus arch/vendor-specific advice.
+fn cpu_feature_findings(
+    hw: &lindesk_plugin_api::Hardware,
+    push: &mut impl FnMut(Severity, &str, String, Option<String>),
+) {
+    use Severity::*;
+    let f = &hw.features;
+    if hw.arch.is_empty() && f.cpufreq_driver.is_none() {
+        return;
+    }
+    push(Ok, "CPU features", hardware::describe_features(hw), None);
+    let arm = matches!(hw.arch.as_str(), "aarch64" | "arm" | "armv7l" | "armv8l");
+    if arm && hw.is_hybrid() && !f.eas {
+        push(
+            Warn,
+            "EAS",
+            "off on a big.LITTLE CPU".into(),
+            Some(
+                "uclamp won't steer tasks between big and little cores; EAS needs an energy model and the \
+                 schedutil governor (echo 1 > /proc/sys/kernel/sched_energy_aware)"
+                    .into(),
+            ),
+        );
+    }
+    if hw.vendor == lindesk_plugin_api::CpuVendor::Intel && hw.is_hybrid() && !f.itmt {
+        push(
+            Info,
+            "ITMT",
+            "off on a hybrid Intel CPU".into(),
+            Some("the scheduler does not rank P-cores first; foreground boosts rely on uclamp alone".into()),
+        );
+    }
+    if f.cpufreq_driver.as_deref() == Some("intel_cpufreq") && f.governor.as_deref() == Some("powersave") {
+        push(
+            Warn,
+            "cpufreq governor",
+            "powersave with intel_pstate in passive mode".into(),
+            Some(
+                "passive-mode powersave pins every CPU at its minimum frequency; use schedutil, or boot with \
+                 intel_pstate=active"
+                    .into(),
+            ),
+        );
+    }
+    if f.epp.as_deref() == Some("power") && hw.power == PowerSource::Ac {
+        push(
+            Warn,
+            "EPP",
+            "power while on AC".into(),
+            Some(
+                "energy_performance_preference=power ramps frequency slowly and hurts responsiveness; use \
+                 balance_performance on AC"
+                    .into(),
+            ),
+        );
+    }
+}
+
 const WIDTH: usize = 25;
 
 fn color_code(s: Severity) -> &'static str {
@@ -392,6 +593,86 @@ mod tests {
         let colored = render_text(&p, true);
         assert!(colored.contains("\x1b[33m"));
         assert!(colored.contains("Kernel                   7.0.11"));
+    }
+
+    #[test]
+    fn hardware_section() {
+        let (_d, p) = run(fixture::pop_os);
+        let text = render_text(&p, false);
+        assert!(
+            text.contains(
+                "\nCPU                      12th Gen Intel Core i9-12950HX — hybrid: 8P (16 threads) + 8E → "
+            ),
+            "{text}"
+        );
+        assert!(text.contains("\nMemory                   62.5 GiB RAM, 20 GiB swap (compressed)\n"), "{text}");
+        assert!(text.contains("\nStorage                  nvme0n1 NVMe (none)\n"), "{text}");
+        assert!(text.contains("\nPower                    AC\n"), "{text}");
+        assert!(text.contains("\nVirtualized              no\n"), "{text}");
+
+        let (_d, p) = run(fixture::hdd_desktop);
+        let fs = hardware_findings(&p);
+        let f = find(&fs, "Storage");
+        assert_eq!((f.severity, f.status.as_str()), (Severity::Warn, "sda HDD (none)"));
+        assert!(f.remedy.as_deref().unwrap().contains("bfq or mq-deadline"));
+        assert_eq!(find(&fs, "CPU").severity, Severity::Ok);
+
+        let (_d, p) = run(fixture::arm_big_little);
+        let fs = hardware_findings(&p);
+        assert!(find(&fs, "Memory").remedy.as_deref().unwrap().contains("scaled down"));
+        assert_eq!(find(&fs, "Storage").status, "mmcblk0 eMMC (mq-deadline)");
+
+        let (_d, p) = run(fixture::kvm_guest);
+        let fs = hardware_findings(&p);
+        let f = find(&fs, "Virtualized");
+        assert_eq!((f.severity, f.status.as_str()), (Severity::Info, "kvm"));
+        assert_eq!(f.remedy.as_deref(), Some("PSI and I/O control reflect the guest only"));
+
+        let (_d, p) = run(fixture::intel_hybrid_laptop);
+        let fs = hardware_findings(&p);
+        assert_eq!(find(&fs, "Power").status, "battery (laptop)");
+        assert!(find(&fs, "CPU").remedy.as_deref().unwrap().contains("P-cores"));
+    }
+
+    #[test]
+    fn cpu_feature_and_swap_sections() {
+        let (_d, p) = run(fixture::pop_os);
+        let text = render_text(&p, false);
+        assert!(
+            text.contains("\nCPU features             x86_64, intel; intel_pstate/powersave, EPP balance_performance; 1 NUMA node\n"),
+            "{text}"
+        );
+        assert!(text.contains("\nSwap                     zram0 zram/zstd 16 GiB"), "{text}");
+        assert!(text.contains("\nReclaim tunables         swappiness 180, page-cluster 0"), "{text}");
+        assert!(text.contains("\nMGLRU                    on (0x0007)\n"), "{text}");
+        assert!(text.contains("\nTop swap users           app-firefox.scope 1 GiB, docker.service 50 MiB\n"), "{text}");
+        let fs = findings(&p);
+        assert!(fs.iter().all(|f| f.check != "Swap advice"), "the dev host is well tuned");
+        let ita = fs.iter().find(|f| f.check == "ITMT").unwrap();
+        assert_eq!(ita.severity, Severity::Info, "Intel hybrid without ITMT");
+
+        let (_d, p) = run(fixture::asahi_m1);
+        let f = find(&findings(&p), "EAS").clone();
+        assert_eq!(f.severity, Severity::Warn);
+        assert!(f.remedy.unwrap().starts_with("uclamp won't steer"));
+
+        let (_d, p) = run(fixture::arm_big_little);
+        assert!(findings(&p).iter().all(|f| f.check != "EAS"), "EAS is on");
+
+        let (_d, p) = run(fixture::hdd_desktop);
+        let fs = findings(&p);
+        assert_eq!(find(&fs, "cpufreq governor").status, "powersave with intel_pstate in passive mode");
+        let adv = fs.iter().find(|f| f.check == "Swap advice" && f.status == "Swap on a hard disk").unwrap();
+        assert_eq!(adv.severity, Severity::Warn);
+        let rem = adv.remedy.as_deref().unwrap();
+        assert!(
+            rem.contains("Proposed: {") && rem.contains(r#""key":"vm.swappiness""#) && rem.contains(r#""value":"10""#)
+        );
+
+        let (_d, p) = run(fixture::amd_desktop);
+        let fs = findings(&p);
+        assert_eq!(find(&fs, "EPP").status, "power while on AC");
+        assert!(find(&fs, "zswap").status.starts_with("on (zstd"));
     }
 
     #[test]

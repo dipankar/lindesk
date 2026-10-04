@@ -68,8 +68,8 @@ impl Default for Roots {
 
 /// The desktop-session environment variables lindesk cares about.
 ///
-/// Only the variables in [`Env::DESKTOP_VARS`] are ever captured, so an `Env` built from a
-/// process's `environ` never carries secrets.
+/// Only the variables in [`Env::DESKTOP_VARS`] (and, for this process, [`Env::RUNTIME_VARS`])
+/// are ever captured, so an `Env` never carries secrets.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Env {
     vars: BTreeMap<String, String>,
@@ -86,14 +86,24 @@ impl Env {
         "DESKTOP_SESSION",
     ];
 
+    /// Bus and runtime variables the requirement checks read, captured only by
+    /// [`Env::from_process`] (never from another process's `environ`).
+    pub const RUNTIME_VARS: &'static [&'static str] =
+        &["DBUS_SESSION_BUS_ADDRESS", "DBUS_SYSTEM_BUS_ADDRESS", "XDG_RUNTIME_DIR", "LINDESK_ALLOW_UNPRIVILEGED"];
+
     /// An empty environment.
     pub fn new() -> Self {
         Env::default()
     }
 
-    /// Capture [`Env::DESKTOP_VARS`] from this process's environment.
+    /// Capture [`Env::DESKTOP_VARS`] and [`Env::RUNTIME_VARS`] from this process's
+    /// environment.
     pub fn from_process() -> Self {
-        Self::DESKTOP_VARS.iter().filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v))).collect()
+        Self::DESKTOP_VARS
+            .iter()
+            .chain(Self::RUNTIME_VARS)
+            .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+            .collect()
     }
 
     /// Capture [`Env::DESKTOP_VARS`] from the raw contents of `/proc/<pid>/environ`

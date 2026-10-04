@@ -1,11 +1,58 @@
 #!/bin/sh
-# lindesk postinst: group, state dirs, enable and (re)start services.
+# lindesk postinst: group, state dirs, requirement check, enable and (re)start services.
 # Works without systemd as PID 1 (containers, chroots, sysvinit): every systemctl call
 # is either offline-safe (enable) or guarded by /run/systemd/system.
+# The requirement check (lindeskctl doctor --preflight) never fails the transaction: on a
+# hard failure lindeskd is installed and enabled but not started.
 set -e
 
 SYSTEM_UNITS="lindeskd.service lindesk-compact.timer"
 USER_UNITS="lindesk-session.service lindesk-compact.timer"
+
+# tmo CMD...: run with a 15 s timeout when timeout(1) exists.
+tmo() { if command -v timeout >/dev/null 2>&1; then timeout 15 "$@"; else "$@"; fi; }
+
+# start_sessions: start lindesk-session for every user logged in to a
+
+# graphical session, through their user manager, so nobody has to log out.
+
+# Best effort, never fatal.
+start_sessions() {
+	command -v loginctl >/dev/null 2>&1 || return 0
+	[ -d /run/systemd/system ] || return 0
+	for _sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{ print $1 }'); do
+		_type=$(loginctl show-session "$_sid" -p Type --value 2>/dev/null) || continue
+		case $_type in wayland | x11) ;; *) continue ;; esac
+		loginctl show-session "$_sid" -p Name --value 2>/dev/null
+	done | sort -u | while read -r _u; do
+		[ -n "$_u" ] || continue
+		tmo systemctl --user -M "$_u@" daemon-reload >/dev/null 2>&1 || true
+		if tmo systemctl --user -M "$_u@" start lindesk-session.service >/dev/null 2>&1; then
+			echo "lindesk: started lindesk-session for $_u"
+		fi
+	done
+	return 0
+}
+
+# preflight: 0 = requirements met (or the check is unavailable), 1 = a hard failure.
+preflight() {
+	[ -z "$DPKG_ROOT" ] && [ -x /usr/bin/lindeskctl ] || return 0
+	rc=0
+	if command -v timeout >/dev/null 2>&1; then
+		out=$(timeout 30 /usr/bin/lindeskctl doctor --preflight --quiet 2>&1 </dev/null) || rc=$?
+	else
+		out=$(/usr/bin/lindeskctl doctor --preflight --quiet 2>&1 </dev/null) || rc=$?
+	fi
+	[ "$rc" -eq 1 ] || return 0
+	{
+		echo "lindesk: WARNING: this system does not meet lindesk's requirements:"
+		[ -z "$out" ] || printf '%s\n' "$out" | sed 's/^/lindesk:   /'
+		echo "lindesk: lindeskd was installed but NOT started. Fix the failures, check with"
+		echo "lindesk:   lindeskctl doctor --preflight"
+		echo "lindesk: then start it:  systemctl start lindeskd.service"
+	} >&2
+	return 1
+}
 
 case "$1" in
 configure | abort-upgrade | abort-deconfigure | abort-remove)
@@ -37,7 +84,12 @@ configure | abort-upgrade | abort-deconfigure | abort-remove)
 		systemctl --global enable $USER_UNITS >/dev/null 2>&1 || true
 	fi
 
-	if [ -d /run/systemd/system ]; then
+	ok=1
+	preflight || ok=0
+
+	if [ -d /run/systemd/system ] && [ "$ok" -eq 0 ]; then
+		systemctl --system daemon-reload >/dev/null || true
+	elif [ -d /run/systemd/system ]; then
 		systemctl --system daemon-reload >/dev/null || true
 		if [ -n "$2" ]; then action=try-restart; else action=start; fi
 		# shellcheck disable=SC2086
@@ -46,14 +98,18 @@ configure | abort-upgrade | abort-deconfigure | abort-remove)
 		else
 			systemctl $action $SYSTEM_UNITS >/dev/null || true
 		fi
-		echo "lindesk: lindeskd is running; lindesk-session starts at your next graphical login."
+		start_sessions
+		echo "lindesk: lindeskd is running; lindesk-session runs in every graphical session."
 	else
 		echo "lindesk: systemd is not running; services enabled but not started."
 		echo "lindesk: without systemd, lindesk-session starts from /etc/xdg/autostart."
 	fi
 	if [ -z "$2" ]; then
-		echo "lindesk: GNOME users: gnome-extensions enable lindesk@lindesk.org"
-		echo "lindesk: KDE users:   enable 'lindesk' in System Settings > Window Management > KWin Scripts"
+		echo "lindesk: what now: 'lindeskctl' shows what lindesk is doing, 'lindeskctl watch' follows it live,"
+		echo "lindesk:   'lindeskctl doctor' shows what this machine supports."
+		echo "lindesk: GNOME: lindesk-session enables its Shell extension on first start; if it stays off:"
+		echo "lindesk:   gnome-extensions enable lindesk@lindesk.org   (on Wayland, log out and back in first)"
+		echo "lindesk: KDE: enable 'lindesk' in System Settings > Window Management > KWin Scripts"
 	fi
 	;;
 esac

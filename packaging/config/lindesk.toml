@@ -91,7 +91,9 @@ max_size = "2GiB"
 #   always   critical: weights 200, memory.low; background: weights 50;
 #            batch: cpu.idle, io.weight 10; foreground: weights 200, memory.low
 #   epoch    (focus or input in the last `epoch`) foreground: weights 500, uclamp.min 30%
-#   YELLOW   background: weights 20, uclamp.max 60%; batch: io.weight 1, uclamp.max 40%
+#            (15% on battery)
+#   YELLOW   background: weights 20, uclamp.max 60% (40% on battery);
+#            batch: io.weight 1, uclamp.max 40%
 #   RED      io.max AIMD on background and batch; memory.high on batch under sustained
 #            memory "full" pressure
 [plugins.threshold]
@@ -99,9 +101,15 @@ enabled = true
 # priority = 0
 
 [plugins.threshold.config]
+# Hardware-scaled tunables: keys set to "auto" are derived from the detected hardware
+# (`lindeskctl doctor` shows it) every time it changes, e.g. when a laptop goes on
+# battery. Replace "auto" with a value to pin it. With unknown hardware "auto" means the
+# value in brackets. `lindeskctl explain` shows the resolved values and why.
+
 # Interaction epoch: a focus change or input on the foreground boosts it until
 # event time + epoch. Input extends it; EndInteraction ends it early.
-epoch = "500ms"
+# auto [500ms]: 300ms on battery, 500ms on AC.
+epoch = "auto"
 
 # System-wide PSI ratios are smoothed with an EWMA of this half-life ...
 ewma_half_life = "2s"
@@ -129,15 +137,21 @@ red_min_dwell = "2s"
 
 # memory.low for critical units, and the cap on the foreground's memory.low
 # (which tracks its current usage).
-critical_memory_low = "512MiB"
-fg_memory_low_max = "2GiB"
+# auto [512MiB]: min(512MiB, 4% of RAM), at least 128MiB.
+critical_memory_low = "auto"
+# auto [2GiB]: min(2GiB, 10% of RAM).
+fg_memory_low_max = "auto"
 
 # io.max AIMD admission control (RED only, background and batch, per device, needs io.max).
 # Initial limit = max(observed rate, aimd_floor) × aimd_decrease, per direction.
 # Every aimd_interval: × aimd_decrease while the foreground stalls, + aimd_step otherwise.
 # Limits never go below aimd_floor (bytes/s) and disappear when RED ends.
-aimd_floor = "16MiB"
-aimd_step = "32MiB"
+# auto: per device, from its measured bandwidth (`lindeskctl calibrate`, unless noisy) or
+# else its kind's nominal bandwidth (NVMe 2000MiB/s, SSD 500, HDD 150,
+# eMMC 250, SD 50, virtual 500, network 100): floor = 2% (at least 4MiB/s), step = 4%
+# (at least 2MiB/s). E.g. NVMe 40/80MiB/s, SATA SSD 10/20, HDD 4/6. Unknown kind [16/32].
+aimd_floor = "auto"
+aimd_step = "auto"
 aimd_decrease = 0.5
 aimd_interval = "1s"
 
@@ -150,21 +164,30 @@ priority = 0
 
 # YELLOW enter thresholds for the smoothed system-wide PSI "some" ratios.
 [plugins.threshold.config.enter]
-cpu = 0.30
-io = 0.20
-memory = 0.10
+# auto [0.30]: 0.40 with 4 or fewer logical CPUs (one runnable task already shows up).
+cpu = "auto"
+# auto [0.20]: 0.15 when a managed disk is an HDD (rotational disks feel stalls sooner).
+io = "auto"
+# auto [0.10]: 0.15 with zram/zswap (compressed reclaim is cheap, early stalls are benign).
+memory = "auto"
 
 # The values written. Weights apply to cpu.weight and io.weight (default 100);
 # uclamp values are percentages.
+#
+# Hybrid CPUs (Intel P/E cores, ARM big.LITTLE): the epoch uclamp.min boost makes the
+# scheduler (EAS, ITMT) favour performance cores for the foreground, and the YELLOW
+# uclamp.max on batch keeps batch work on efficiency cores. No cpuset pinning is done.
 [plugins.threshold.config.values]
 critical_weight = 200
 fg_epoch_weight = 500
-fg_epoch_uclamp_min = 30.0
+# auto [30.0]: 15.0 on battery.
+fg_epoch_uclamp_min = "auto"
 fg_weight = 200
 background_weight = 50
 batch_io_weight = 10
 yellow_background_weight = 20
-yellow_background_uclamp_max = 60.0
+# auto [60.0]: 40.0 on battery.
+yellow_background_uclamp_max = "auto"
 yellow_batch_io_weight = 1
 yellow_batch_uclamp_max = 40.0
 

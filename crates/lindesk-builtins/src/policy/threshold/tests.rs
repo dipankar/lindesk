@@ -644,14 +644,32 @@ fn config_from_json_and_validation() {
         "values": { "fg_epoch_weight": 800 }
     })))
     .unwrap();
-    assert_eq!(p.config().epoch, Duration::from_millis(300));
-    assert_eq!(p.config().aimd_floor, 32 * MIB_U);
-    assert_eq!(p.config().enter.io, 0.4);
-    assert_eq!(p.config().enter.cpu, 0.3);
+    assert_eq!(p.config().epoch, Auto::Value(Duration::from_millis(300)));
+    assert_eq!(p.config().aimd_floor, Auto::Value(32 * MIB_U));
+    assert_eq!(p.config().enter.io, Auto::Value(0.4));
+    assert_eq!(p.config().enter.cpu, Auto::Auto);
     assert_eq!(p.config().values.fg_epoch_weight, 800);
     assert!(p.init(&ctx(serde_json::json!({ "exit_ratio": 1.5 }))).is_err());
     assert!(p.init(&ctx(serde_json::json!({ "epoch": "soon" }))).is_err());
     assert!(p.init(&ctx(serde_json::json!({ "typo": 1 }))).is_err());
+    assert!(p.init(&ctx(serde_json::json!({ "aimd_floor": 0 }))).is_err());
+    assert!(p.init(&ctx(serde_json::json!({ "enter": { "io": 1.5 } }))).is_err());
+    assert!(p.init(&ctx(serde_json::json!({ "values": { "fg_epoch_uclamp_min": 150.0 } }))).is_err());
+    assert!(p.init(&ctx(serde_json::json!({ "aimd_step": "soon" }))).is_err());
+    // "auto" is accepted everywhere it is the default, case-insensitively.
+    p.init(&ctx(serde_json::json!({
+        "epoch": "auto", "aimd_floor": "Auto", "enter": { "cpu": "auto" },
+        "values": { "fg_epoch_uclamp_min": "auto" }
+    })))
+    .unwrap();
+    assert_eq!(p.config(), &ThresholdConfig::default());
+    // Serialisation round-trips both forms.
+    let cfg = ThresholdConfig { aimd_floor: Auto::Value(8 * MIB_U), ..Default::default() };
+    let json = serde_json::to_value(&cfg).unwrap();
+    assert_eq!(json["aimd_floor"], "8.0MiB");
+    assert_eq!(json["aimd_step"], "auto");
+    assert_eq!(json["enter"]["cpu"], "auto");
+    assert_eq!(ThresholdConfig::from_json(&json).unwrap(), cfg);
     assert_eq!(p.info().name, "threshold");
 }
 
@@ -685,4 +703,324 @@ fn packaged_default_config_matches_code_defaults() {
         .join("\n");
     let with_override = Config::from_toml(&example).unwrap();
     assert_eq!(with_override.overrides.len(), 2);
+}
+
+// ── hardware-scaled tunables ──────────────────────────────────────────────────────────────
+
+mod hardware {
+    use super::*;
+    use lindesk_plugin_api::{Hardware, PowerSource, StorageDevice, StorageKind};
+    use lindesk_sys::{Env, Roots, fixture, probe};
+    use std::path::Path;
+
+    fn caps_of(build: fn(&Path) -> (Roots, Env)) -> HostCaps {
+        let d = tempfile::tempdir().unwrap();
+        let (roots, env) = build(d.path());
+        probe(&roots, &env).host_caps()
+    }
+
+    fn resolve(caps: &HostCaps) -> ResolvedThreshold {
+        ThresholdConfig::default().resolve(caps)
+    }
+
+    fn why<'a>(r: &'a ResolvedThreshold, key: &str) -> &'a Resolution {
+        r.why.iter().find(|w| w.key == key).unwrap_or_else(|| panic!("no {key}: {:#?}", r.why))
+    }
+
+    #[test]
+    fn unknown_hardware_resolves_to_the_previous_constants() {
+        let mut caps = Snap::at(0).build().caps;
+        let r = resolve(&caps);
+        assert_eq!(r.epoch_ms, 500);
+        assert_eq!(r.enter, ResourceThresholds { cpu: 0.30, io: 0.20, memory: 0.10 });
+        assert_eq!(r.critical_memory_low, 512 * MIB_U);
+        assert_eq!(r.fg_memory_low_max, 2048 * MIB_U);
+        assert_eq!(r.aimd_for(DEV), (16 * MIB_U, 32 * MIB_U));
+        assert_eq!(r.aimd_for("1:2"), (16 * MIB_U, 32 * MIB_U), "unlisted device");
+        assert_eq!((r.fg_epoch_uclamp_min, r.yellow_background_uclamp_max), (30.0, 60.0));
+        assert!(r.why.iter().all(|w| w.source == Source::Default), "{:#?}", r.why);
+        assert_eq!(r, ResolvedThreshold::default().clone_with_aimd(&r));
+        // A device of unknown kind keeps the fixed AIMD values too.
+        caps.hardware.storage.push(StorageDevice { dev: DEV.into(), name: "sda".into(), ..Default::default() });
+        assert_eq!(resolve(&caps).aimd_for(DEV), (16 * MIB_U, 32 * MIB_U));
+    }
+
+    trait CloneWithAimd {
+        fn clone_with_aimd(&self, other: &ResolvedThreshold) -> ResolvedThreshold;
+    }
+    impl CloneWithAimd for ResolvedThreshold {
+        /// `Default` resolves against no devices; borrow the device rows to compare the rest.
+        fn clone_with_aimd(&self, other: &ResolvedThreshold) -> ResolvedThreshold {
+            let mut r = self.clone();
+            r.aimd = other.aimd.clone();
+            r.why = other.why.clone();
+            r
+        }
+    }
+
+    #[test]
+    fn dev_host_nvme_desktop() {
+        let caps = caps_of(fixture::pop_os);
+        let r = resolve(&caps);
+        assert_eq!(r.aimd_for("259:0"), (40 * MIB_U, 80 * MIB_U));
+        assert_eq!(
+            why(&r, "aimd_floor[nvme0n1]").to_string(),
+            "aimd_floor[nvme0n1] 40MiB/s (auto: NVMe nominal ~2000MiB/s × 2%)"
+        );
+        assert_eq!(why(&r, "aimd_step[nvme0n1]").value, "80MiB/s");
+        assert_eq!(r.epoch_ms, 500);
+        assert_eq!(r.enter, ResourceThresholds { cpu: 0.30, io: 0.20, memory: 0.15 }, "zram");
+        assert_eq!((r.critical_memory_low, r.fg_memory_low_max), (512 * MIB_U, 2048 * MIB_U));
+        assert!(r.hybrid && !r.on_battery);
+        assert!(why(&r, "hybrid").why.contains("P-cores"));
+        assert_eq!(r.virtualization, None);
+    }
+
+    #[test]
+    fn intel_laptop_on_battery() {
+        let caps = caps_of(fixture::intel_hybrid_laptop);
+        let r = resolve(&caps);
+        assert!(r.on_battery && r.hybrid);
+        assert_eq!(r.epoch_ms, 300);
+        assert_eq!((r.fg_epoch_uclamp_min, r.yellow_background_uclamp_max), (15.0, 40.0));
+        assert_eq!(why(&r, "epoch").source, Source::Auto);
+        // 31.3 GiB: 4% = 1.25 GiB → capped at 512MiB; 10% = 3.1 GiB → capped at 2GiB.
+        assert_eq!((r.critical_memory_low, r.fg_memory_low_max), (512 * MIB_U, 2048 * MIB_U));
+        assert_eq!(r.aimd_for("259:0"), (40 * MIB_U, 80 * MIB_U));
+    }
+
+    #[test]
+    fn arm_board_with_emmc_and_small_ram() {
+        let caps = caps_of(fixture::arm_big_little);
+        let r = resolve(&caps);
+        assert_eq!(r.aimd_for("179:0"), (5 * MIB_U, 10 * MIB_U), "eMMC 250MiB/s × 2% / 4%");
+        // 4,000,000 kB: 4% = 156MiB, 10% = 391MiB.
+        assert_eq!(r.critical_memory_low, 156 * MIB_U);
+        assert_eq!(r.fg_memory_low_max, 391 * MIB_U);
+        assert_eq!(r.enter, ResourceThresholds { cpu: 0.30, io: 0.20, memory: 0.10 }, "8 CPUs, no swap");
+        assert!(r.hybrid);
+        assert_eq!(r.epoch_ms, 500, "no supplies = mains");
+    }
+
+    #[test]
+    fn hdd_desktop_with_four_cpus() {
+        let caps = caps_of(fixture::hdd_desktop);
+        let r = resolve(&caps);
+        assert_eq!(r.aimd_for("8:0"), (4 * MIB_U, 6 * MIB_U), "HDD: floor clamped to 4MiB/s, step 6MiB/s");
+        assert!(why(&r, "aimd_floor[sda]").why.ends_with("× 2%, clamped"), "{}", why(&r, "aimd_floor[sda]"));
+        assert_eq!(r.enter.io, 0.15);
+        assert!(why(&r, "enter.io").why.contains("sda is a rotational disk"));
+        assert_eq!(r.enter.cpu, 0.40);
+        assert!(!r.hybrid);
+    }
+
+    #[test]
+    fn kvm_guest_is_not_scaled_but_reported() {
+        let caps = caps_of(fixture::kvm_guest);
+        let r = resolve(&caps);
+        assert_eq!(r.virtualization.as_deref(), Some("kvm"));
+        assert_eq!(r.aimd_for("252:0"), (10 * MIB_U, 20 * MIB_U), "virtio 500MiB/s");
+        assert!(why(&r, "virtualization").why.contains("guest only"));
+
+        let mut p = ThresholdPolicy::new(crisp());
+        let mut snap = Snap::at(0).build();
+        snap.caps = caps;
+        let out = p.evaluate(&snap).unwrap();
+        let m = out.metrics.iter().find(|m| m.name == "threshold.virtualized").expect("metric");
+        assert_eq!((m.value, m.labels["kind"].as_str()), (1.0, "kvm"));
+        assert!(out.metrics.iter().any(|m| m.name == "threshold.on_battery" && m.value == 0.0));
+    }
+
+    #[test]
+    fn explicit_values_win() {
+        let caps = caps_of(fixture::intel_hybrid_laptop);
+        let cfg = ThresholdConfig::from_json(&serde_json::json!({
+            "epoch": "700ms",
+            "aimd_floor": "8MiB",
+            "critical_memory_low": "1GiB",
+            "enter": { "io": 0.33 },
+            "values": { "fg_epoch_uclamp_min": 50.0 }
+        }))
+        .unwrap();
+        let r = cfg.resolve(&caps);
+        assert_eq!(r.epoch_ms, 700);
+        assert_eq!(r.aimd_for("259:0"), (8 * MIB_U, 80 * MIB_U), "explicit floor, auto step");
+        assert_eq!(r.critical_memory_low, 1024 * MIB_U);
+        assert_eq!(r.enter.io, 0.33);
+        assert_eq!(r.fg_epoch_uclamp_min, 50.0, "explicit beats the battery cap");
+        assert_eq!(r.yellow_background_uclamp_max, 40.0, "still auto");
+        assert_eq!(why(&r, "epoch").source, Source::Explicit);
+        assert_eq!(why(&r, "aimd_floor[nvme0n1]").source, Source::Explicit);
+        assert_eq!(why(&r, "aimd_step[nvme0n1]").source, Source::Auto);
+        assert_eq!(r.aimd_default, (8 * MIB_U, 32 * MIB_U));
+    }
+
+    fn laptop(power: PowerSource) -> HostCaps {
+        let mut caps = Snap::at(0).build().caps;
+        caps.hardware = Hardware {
+            cpus: 8,
+            cores: 4,
+            smt: true,
+            mem_total: 16 << 30,
+            storage: vec![StorageDevice {
+                dev: DEV.into(),
+                name: "nvme0n1".into(),
+                kind: StorageKind::Nvme,
+                scheduler: "none".into(),
+                nominal_bps: 2000 * MIB_U,
+            }],
+            power,
+            portable: true,
+            ..Default::default()
+        };
+        caps
+    }
+
+    #[test]
+    fn battery_vs_ac_behaviour() {
+        let run = |power: PowerSource| {
+            let mut p = ThresholdPolicy::new(crisp());
+            let mk = |now: i64| {
+                let mut s = desktop(now, 0.0).build();
+                s.caps = laptop(power);
+                s
+            };
+            let mut s = mk(0);
+            s.events.push(Event::Focus {
+                ts: 0,
+                pid: None,
+                app_id: None,
+                target: Some(unit("app.scope")),
+                source: "test".into(),
+            });
+            let at0 = p.evaluate(&s).unwrap();
+            let at400 = p.evaluate(&mk(400)).unwrap();
+            // Push into YELLOW with system CPU pressure.
+            let mut y = None;
+            for i in 0..4 {
+                y = Some(p.evaluate(&desktop_with(mk(1000 + i * TICK), Resource::Cpu, 0.5)).unwrap());
+            }
+            (at0, at400, y.unwrap())
+        };
+        let (ac0, ac400, ac_y) = run(PowerSource::Ac);
+        let (b0, b400, b_y) = run(PowerSource::Battery);
+        assert_eq!(get(&ac0, "app.scope", Knob::UclampMin), Some(Setting::UclampMin { percent: 30.0 }));
+        assert_eq!(get(&b0, "app.scope", Knob::UclampMin), Some(Setting::UclampMin { percent: 15.0 }));
+        assert!(get(&ac400, "app.scope", Knob::UclampMin).is_some(), "AC epoch lasts 500ms");
+        assert_eq!(get(&b400, "app.scope", Knob::UclampMin), None, "battery epoch is 300ms");
+        assert_eq!(ac_y.level, Some(Level::Yellow));
+        assert_eq!(b_y.level, Some(Level::Yellow));
+        assert_eq!(get(&ac_y, "tracker.service", Knob::UclampMax), Some(Setting::UclampMax { percent: 60.0 }));
+        assert_eq!(get(&b_y, "tracker.service", Knob::UclampMax), Some(Setting::UclampMax { percent: 40.0 }));
+        assert!(b0.metrics.iter().any(|m| m.name == "threshold.on_battery" && m.value == 1.0));
+    }
+
+    fn desktop_with(mut s: Snapshot, r: Resource, some: f64) -> Snapshot {
+        let now = s.now;
+        s.pressure.retain(|p| p.resource != r);
+        s.pressure.push(sample(now, Scope::System, r, some, None));
+        s
+    }
+
+    #[test]
+    fn power_change_is_picked_up_without_reinit() {
+        let mut p = ThresholdPolicy::new(crisp());
+        let mut s = desktop(0, 0.0).build();
+        s.caps = laptop(PowerSource::Ac);
+        p.evaluate(&s).unwrap();
+        assert_eq!(p.res.epoch_ms, 500);
+        s.caps = laptop(PowerSource::Battery);
+        s.now = 250;
+        p.evaluate(&s).unwrap();
+        assert_eq!(p.res.epoch_ms, 300);
+        assert_eq!(p.effective_config(&s.caps), p.res);
+    }
+
+    #[test]
+    fn hdd_aimd_uses_per_device_floor_and_step() {
+        let mut caps = Snap::at(0).build().caps;
+        caps.devices = vec!["8:0".into(), "259:0".into()];
+        caps.hardware.storage = vec![
+            StorageDevice {
+                dev: "8:0".into(),
+                name: "sda".into(),
+                kind: StorageKind::Hdd,
+                nominal_bps: 150 * MIB_U,
+                ..Default::default()
+            },
+            StorageDevice {
+                dev: "259:0".into(),
+                name: "nvme0n1".into(),
+                kind: StorageKind::Nvme,
+                nominal_bps: 2000 * MIB_U,
+                ..Default::default()
+            },
+        ];
+        let mut p = ThresholdPolicy::new(crisp());
+        let mut last = None;
+        for i in 0..12 {
+            let mut s = desktop(i * TICK, 0.3).usage("build.scope", 0, 0, 1 << 30).build();
+            s.caps = caps.clone();
+            last = Some(p.evaluate(&s).unwrap());
+        }
+        let out = last.unwrap();
+        assert_eq!(out.level, Some(Level::Red));
+        let lim = |dev: &str| {
+            out.intents
+                .iter()
+                .find_map(|i| match &i.setting {
+                    Setting::IoMax { device, limit } if device == dev && i.target == unit("build.scope") => {
+                        Some(limit.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(lim("8:0").wbps, Some(4 * MIB_U), "HDD floor");
+        assert_eq!(lim("259:0").wbps, Some(40 * MIB_U), "NVMe floor");
+    }
+
+    #[test]
+    fn measured_bandwidth_wins_over_nominal_unless_noisy() {
+        use lindesk_plugin_api::{LatencyMap, StorageLatency};
+        let mut caps = caps_of(fixture::pop_os);
+        let lat = LatencyMap {
+            storage: vec![StorageLatency {
+                dev: "259:0".into(),
+                seq_read_bps: 3000 * MIB_U,
+                seq_write_bps: 1000 * MIB_U,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        caps.hardware.latency = Some(lat.clone());
+        let r = resolve(&caps);
+        assert_eq!(r.aimd_for("259:0"), (20 * MIB_U, 40 * MIB_U), "lower of read/write: 1000MiB/s");
+        assert_eq!(why(&r, "aimd_floor[nvme0n1]").why, "NVMe measured 1000MiB/s × 2%");
+        caps.hardware.latency = Some(LatencyMap { noisy: true, ..lat });
+        let r = resolve(&caps);
+        assert_eq!(r.aimd_for("259:0"), (40 * MIB_U, 80 * MIB_U), "noisy calibration: nominal");
+        assert!(why(&r, "aimd_floor[nvme0n1]").why.contains("nominal"));
+    }
+
+    #[test]
+    fn unknown_hardware_is_never_more_aggressive_than_the_old_defaults() {
+        let r = resolve(&HostCaps::default());
+        let d = ResolvedThreshold::default();
+        assert_eq!(r, d);
+        assert!(r.enter.cpu >= 0.30 && r.enter.io >= 0.20 && r.enter.memory >= 0.10);
+        assert_eq!(r.aimd_default, (16 * MIB_U, 32 * MIB_U));
+        assert_eq!((r.epoch_ms, r.fg_epoch_uclamp_min, r.yellow_background_uclamp_max), (500, 30.0, 60.0));
+    }
+
+    #[test]
+    #[ignore = "probes the real host"]
+    fn real_host_resolution() {
+        let caps = probe(&Roots::host(), &Env::from_process()).host_caps();
+        let r = ThresholdPolicy::default().effective_config(&caps);
+        for w in &r.why {
+            eprintln!("{w}");
+        }
+        eprintln!("{}", serde_json::to_string_pretty(&r).unwrap());
+    }
 }
