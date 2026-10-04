@@ -639,3 +639,87 @@ fn disabled_builtins_are_listed_but_not_run() {
     assert!(h.detail.unwrap().contains("[plugins.throttle]"));
     assert!(e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).is_err(), "duplicate");
 }
+
+/// Acts on system units only; everything else is `Unsupported` (like `systemd` on the
+/// system bus, or the broker's `relay` for non-user units).
+#[derive(Clone, Default)]
+struct SystemUnitsOnly(Arc<Mutex<Vec<String>>>);
+
+impl Plugin for SystemUnitsOnly {
+    fn info(&self) -> PluginInfo {
+        info("system-only", PluginKind::Actuator)
+    }
+}
+
+impl Actuator for SystemUnitsOnly {
+    fn caps(&self) -> ActuatorCaps {
+        ActuatorCaps { knobs: vec![Knob::CpuWeight], targets: vec!["unit".into()] }
+    }
+    fn read(&mut self, t: &Target, k: &Knob) -> PluginResult<Option<Setting>> {
+        lock(&self.0).push(format!("read {k} {t}"));
+        if t.user().is_some() {
+            return Err(PluginError::Unsupported(format!("{t} is not a system unit")));
+        }
+        Ok(None)
+    }
+    fn apply(&mut self, t: &Target, s: &Setting) -> PluginResult<()> {
+        lock(&self.0).push(format!("apply {s} {t}"));
+        if t.user().is_some() {
+            return Err(PluginError::Unsupported(format!("{t} is not a system unit")));
+        }
+        Ok(())
+    }
+    fn reset(&mut self, t: &Target, k: &Knob, _o: Option<&Setting>) -> PluginResult<()> {
+        lock(&self.0).push(format!("reset {k} {t}"));
+        if t.user().is_some() {
+            return Err(PluginError::Unsupported(format!("{t} is not a system unit")));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn unsupported_target_falls_back_to_the_next_actuator() {
+    let w = world();
+    let mut e = engine(&w);
+    let picky = SystemUnitsOnly::default();
+    // Higher priority than the recorder (0): asked first.
+    e.registry_mut().register_actuator(Box::new(picky.clone()), 10).unwrap();
+    e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).unwrap();
+    e.registry_mut().register_policy(Box::new(throttle_policy(Arc::new(Mutex::new(20)))), 0).unwrap();
+
+    w.sensor.set_pressure(Resource::Io, 80.0);
+    let r = e.step(1000);
+    let a = r.actions.iter().find(|a| a.target == cargo()).expect("cargo throttled");
+    assert_eq!(a.outcome, ActionOutcome::Applied);
+    assert_eq!(a.actuator.as_deref(), Some("recorder"), "the user unit went to the next capable actuator");
+    assert_eq!(*lock(&picky.0), vec![format!("read cpu.weight {}", cargo())], "asked once, said Unsupported");
+    assert!(lock(&w.act.log).calls.iter().any(|c| c.starts_with("apply cpu.weight=20")));
+    assert!(e.explain(&cargo()).notes.iter().all(|n| n.kind != "no_actuator"));
+    let stats = e.registry().health().into_iter().find(|h| h.name == "system-only").unwrap();
+    assert_eq!(stats.stats.errors, 0, "Unsupported is an answer, not an error");
+
+    // The revert takes the same route.
+    w.sensor.set_pressure(Resource::Io, 0.0);
+    let r = e.step(2000);
+    let a = r.actions.iter().find(|a| a.target == cargo()).expect("cargo restored");
+    assert_eq!((a.outcome.clone(), a.actuator.as_deref()), (ActionOutcome::Reverted, Some("recorder")));
+    assert!(e.applied().is_empty());
+}
+
+#[test]
+fn every_actuator_unsupported_is_no_actuator() {
+    let w = world();
+    let mut e =
+        Engine::new(Config::default(), Box::new(w.env.clone()), EngineOptions::new("t", Privilege::System)).unwrap();
+    e.registry_mut().register_sensor(Box::new(w.sensor.clone()), Duration::from_millis(1)).unwrap();
+    e.registry_mut().register_actuator(Box::new(SystemUnitsOnly::default()), 0).unwrap();
+    e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).unwrap();
+    e.registry_mut().register_policy(Box::new(throttle_policy(Arc::new(Mutex::new(20)))), 0).unwrap();
+    w.sensor.set_pressure(Resource::Io, 80.0);
+    let r = e.step(1000);
+    let a = r.actions.iter().find(|a| a.target == cargo()).unwrap();
+    assert_eq!(a.outcome, ActionOutcome::NoActuator);
+    let note = e.explain(&cargo()).notes.into_iter().find(|n| n.kind == "no_actuator").unwrap();
+    assert!(note.message.contains("is not a system unit"), "{}", note.message);
+}

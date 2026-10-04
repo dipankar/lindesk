@@ -5,18 +5,25 @@
 //! connected. `BeginInteraction` is coalesced to at most one event per pid every
 //! [`INTERACTION_COALESCE`] (GNOME may call it several times a second); `EndInteraction`
 //! always passes and resets the window.
+//!
+//! The control-plane members (docs/CONTROL-PLANE.md §5, user scope) only serve the agent's
+//! own user: every caller's uid is checked against it (`AccessDenied` otherwise; the
+//! session bus normally admits nobody else anyway). Guardrail refusals are the D-Bus error
+//! `org.lindesk.Error.Rejected` with the human-readable reasons.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lindesk_core::clock::now_ms;
 use lindesk_ipc::QOS_PATH;
 use lindesk_plugin_api::{Event, Metric, QosClass};
 use tokio::sync::mpsc::UnboundedSender;
+use zbus::message::Header;
 use zbus::object_server::SignalEmitter;
 use zbus::{Connection, fdo, interface};
 
+use crate::common::control::{self, Control, CtlError};
 use crate::common::engine_thread::{EngineGone, EngineHandle};
 use crate::common::proc_uid;
 use crate::link::Forward;
@@ -57,6 +64,8 @@ pub struct QoS {
     pub uid: u32,
     pub forward: UnboundedSender<Forward>,
     pub coalesce: Mutex<Coalescer>,
+    /// User-scope versioned changes; `None` when the store couldn't be opened.
+    pub control: Option<Arc<Control<SessionExt>>>,
 }
 
 fn gone(e: EngineGone) -> fdo::Error {
@@ -64,6 +73,26 @@ fn gone(e: EngineGone) -> fdo::Error {
 }
 
 impl QoS {
+    /// The control plane, for a caller of this agent's own uid.
+    async fn control_for(
+        &self,
+        conn: &Connection,
+        hdr: &Header<'_>,
+    ) -> Result<(&Control<SessionExt>, control::Caller), CtlError> {
+        let who = control::caller(conn, hdr).await?;
+        if who.uid != self.uid {
+            return Err(fdo::Error::AccessDenied(format!(
+                "uid {} may not use the control plane of uid {}'s agent",
+                who.uid, self.uid
+            ))
+            .into());
+        }
+        let ctl = self.control.as_deref().ok_or_else(|| {
+            CtlError::Failed("versioned changes are unavailable (see the lindesk-session log)".into())
+        })?;
+        Ok((ctl, who))
+    }
+
     fn push(&self, e: Event, fwd: Option<Forward>) -> fdo::Result<()> {
         self.engine.push_event(e).map_err(gone)?;
         if let Some(f) = fwd {
@@ -157,6 +186,103 @@ impl QoS {
         self.engine.recent_events(n as usize)
     }
 
+    // ---- control plane (docs/CONTROL-PLANE.md §5), user scope ------------------------------
+
+    /// Plan a changeset (no side effects): Plan JSON.
+    async fn plan_change(
+        &self,
+        ops_json: String,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<String, CtlError> {
+        self.control_for(conn, &hdr).await?.0.plan(&ops_json).await
+    }
+
+    /// Validate, apply and version a changeset: ChangeSet JSON.
+    async fn apply_change(
+        &self,
+        ops_json: String,
+        description: String,
+        ttl_secs: u32,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<String, CtlError> {
+        let (ctl, who) = self.control_for(conn, &hdr).await?;
+        ctl.apply(&ops_json, &description, ttl_secs, &who).await
+    }
+
+    /// Keep an applied changeset (stops its dead-man timer).
+    async fn confirm_change(
+        &self,
+        id: u64,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<(), CtlError> {
+        self.control_for(conn, &hdr).await?.0.confirm(id).await
+    }
+
+    /// Revert a changeset: the new ChangeSet JSON.
+    async fn revert_change(
+        &self,
+        id: u64,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<String, CtlError> {
+        let (ctl, who) = self.control_for(conn, &hdr).await?;
+        ctl.revert(id, &who).await
+    }
+
+    /// The newest `limit` changesets (JSON array, newest first).
+    async fn list_changes(
+        &self,
+        limit: u32,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<String, CtlError> {
+        self.control_for(conn, &hdr).await?.0.list(limit).await
+    }
+
+    /// One changeset.
+    async fn get_change(
+        &self,
+        id: u64,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<String, CtlError> {
+        self.control_for(conn, &hdr).await?.0.get(id).await
+    }
+
+    /// Profiles: name, description, active, matches_now, reason. While connected, the
+    /// broker's profile is the active one.
+    async fn list_profiles(&self) -> Result<String, CtlError> {
+        control::profiles_json(&self.engine).await
+    }
+
+    /// A `profile_use` changeset on the user's config (`"auto"` allowed): ChangeSet JSON.
+    async fn set_profile(
+        &self,
+        name: String,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<String, CtlError> {
+        let (ctl, who) = self.control_for(conn, &hdr).await?;
+        ctl.set_profile(&name, &who).await
+    }
+
+    /// `Hardware` JSON including the latency map.
+    async fn get_hardware(&self) -> Result<String, CtlError> {
+        control::hardware_json(&self.engine).await
+    }
+
+    /// Swap analysis JSON (computed on the blocking pool).
+    async fn swap_report(&self) -> Result<String, CtlError> {
+        control::swap_json(&self.engine).await
+    }
+
+    /// A user-scope changeset transition (ChangeSet JSON).
+    #[zbus(signal)]
+    pub async fn change_event(emitter: &SignalEmitter<'_>, json: &str) -> zbus::Result<()>;
+
     /// Health level changed: `green`, `yellow` or `red`.
     #[zbus(signal)]
     pub async fn level_changed(emitter: &SignalEmitter<'_>, level: &str) -> zbus::Result<()>;
@@ -172,6 +298,14 @@ pub async fn emit_level(conn: &Connection, level: &str) {
         && let Err(err) = QoS::level_changed(&e, level).await
     {
         tracing::debug!("LevelChanged not sent: {err}");
+    }
+}
+
+pub async fn emit_change_event(conn: &Connection, json: &str) {
+    if let Ok(e) = SignalEmitter::new(conn, QOS_PATH)
+        && let Err(err) = QoS::change_event(&e, json).await
+    {
+        tracing::debug!("ChangeEvent not sent: {err}");
     }
 }
 

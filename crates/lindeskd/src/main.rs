@@ -15,7 +15,7 @@ mod common;
 mod dbus;
 mod iocost;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,10 +29,11 @@ use lindesk_builtins::env::{Mode, SysEnvironment, UserWatch};
 use lindesk_builtins::policy::ThresholdPolicy;
 use lindesk_builtins::sensors::{CgroupStatSensor, PsiSensor};
 use lindesk_builtins::sinks::ParquetSink;
+use lindesk_changes::Scope as ChangeScope;
 use lindesk_core::config::Config;
 use lindesk_host::{Engine, EngineOptions};
 use lindesk_ipc::{BROKER_NAME, BROKER_PATH};
-use lindesk_plugin_api::{API_VERSION, Actuator, HostCaps, InitContext, Privilege};
+use lindesk_plugin_api::{Actuator, Privilege};
 use lindesk_sys::blockdev::{self, BlockDev, DevId};
 use lindesk_sys::requirements::Component;
 use lindesk_sys::{Backend, Env, Probe, Roots};
@@ -41,6 +42,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::broker::{BrokerHooks, HostInfo};
 use crate::common::Signals;
 use crate::common::calibration::Calibrator;
+use crate::common::control::Control;
 use crate::common::defaults::{ensure_dir, ensure_rules};
 use crate::common::engine_thread::{self, EngineHandle, Notification};
 use crate::common::observe::{Observed, PolicyMetrics};
@@ -97,50 +99,28 @@ fn main() -> ExitCode {
     }
 }
 
-fn init_context(caps: &HostCaps, config: serde_json::Value) -> InitContext {
-    InitContext {
-        api_version: API_VERSION,
-        host: "lindeskd".into(),
-        privilege: Privilege::System,
-        uid: None,
-        caps: caps.clone(),
-        config,
-    }
+/// The broker's actuators, highest priority first: the relay (user units; every other
+/// target is `Unsupported` there, so the engine moves on), then the backend's set (normally
+/// `systemd` on the system bus for system units, then `proc`).
+fn build_actuators(backend: Backend) -> (Vec<Box<dyn Actuator>>, RelayTable) {
+    let relay = RelayActuator::new();
+    let table = relay.table();
+    let mut all: Vec<Box<dyn Actuator>> = vec![Box::new(relay)];
+    all.extend(actuators::for_backend(backend, Bus::System));
+    (all, table)
 }
 
-/// The broker's actuators, highest priority first: the relay (user units), wrapping the
-/// backend's unit actuator (system units) as its fallback, then the rest of the backend set.
-fn build_actuators(backend: Backend, config: &Config, caps: &HostCaps) -> (Vec<Box<dyn Actuator>>, RelayTable) {
-    let mut relay = RelayActuator::new();
-    let table = relay.table();
-    let mut rest = Vec::new();
-    for mut a in actuators::for_backend(backend, Bus::System) {
-        let name = a.info().name;
-        if relay.fallback_name().is_none() && a.caps().targets.iter().any(|t| t == "unit") {
-            let pc = config.plugin(&name);
-            if !pc.enabled {
-                tracing::info!(plugin = %name, "disabled by [plugins.{name}]");
-                continue;
-            }
-            match a.init(&init_context(caps, pc.config)) {
-                Ok(()) => relay = relay.with_fallback(a),
-                Err(e) => tracing::warn!(plugin = %name, "init failed: {e}"),
-            }
-        } else {
-            rest.push(a);
-        }
-    }
-    let mut all: Vec<Box<dyn Actuator>> = vec![Box::new(relay)];
-    all.extend(rest);
-    (all, table)
+/// Persistent state (versioned changes, calibration): `/var/lib/lindesk` as root, else the
+/// state directory (unprivileged test runs).
+fn lib_dir(state_dir: &std::path::Path) -> PathBuf {
+    if rustix::process::geteuid().is_root() { PathBuf::from(LIB_DIR) } else { state_dir.to_path_buf() }
 }
 
 fn restore(cli: &Cli) -> ExitCode {
     arm_timeout("lindeskd --restore");
     let roots = Roots::host();
     let probe = lindesk_sys::probe(&roots, &Env::from_process());
-    let config = Config::load(&cli.config).unwrap_or_default();
-    let (acts, _) = build_actuators(probe.backend(), &config, &probe.host_caps());
+    let (acts, _) = build_actuators(probe.backend());
     let state = cli.state_dir.join("state.json");
     let mut ok = true;
     match restore_state(&state, "lindeskd", Privilege::System, None, acts) {
@@ -183,6 +163,25 @@ fn managed_devices(config: &Config, probe: &Probe, roots: &Roots) -> Vec<BlockDe
 
 fn run(cli: Cli) -> anyhow::Result<()> {
     std::fs::create_dir_all(&cli.state_dir).with_context(|| format!("creating {}", cli.state_dir.display()))?;
+    // The engine's command queue exists before the engine: the change store reports
+    // recovered changesets into it.
+    let (handle, inbox) = engine_thread::channel()?;
+    let (change_tx, change_rx) = tokio::sync::mpsc::unbounded_channel();
+    let lib = lib_dir(&cli.state_dir);
+    let mut control_error = None;
+    let control =
+        match Control::open(&lib.join("changes"), ChangeScope::System, cli.config.clone(), handle.clone(), change_tx) {
+            Ok(c) => {
+                // Before the config is read: a rolled-back changeset may have restored it.
+                c.recover();
+                Some(Arc::new(c))
+            }
+            Err(e) => {
+                tracing::error!("versioned changes unavailable: {e}");
+                control_error = Some(format!("versioned changes unavailable: {e}"));
+                None
+            }
+        };
     let prepare = {
         let (dry, tel, state) = (cli.dry_run, cli.telemetry_dir.clone(), cli.state_dir.clone());
         move |c: &mut Config| {
@@ -243,7 +242,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         v
     };
     let mut caps = probe.host_caps();
-    if let Ok(map) = lindesk_sys::calibrate::load(Path::new(CALIBRATION)) {
+    let calibration = if rustix::process::geteuid().is_root() {
+        lindesk_sys::calibrate::default_path(true)
+    } else {
+        lib.join("calibration.json")
+    };
+    if let Ok(map) = lindesk_sys::calibrate::load(&calibration) {
+        tracing::info!("using the calibration in {}", calibration.display());
         lindesk_sys::calibrate::attach(&mut caps.hardware, map);
     }
     let mut profiles = Profiles::load(config.clone(), &lindesk_core::profile::default_dirs(None));
@@ -262,7 +267,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     opts.state_path = Some(state_path.clone());
     let mut engine = Engine::new(config.clone(), Box::new(env.clone()), opts)?;
     let metrics = PolicyMetrics::default();
-    let relay = register_builtins(&mut engine, &config, probe.backend(), &caps, &metrics);
+    let relay = register_builtins(&mut engine, &config, probe.backend(), &metrics);
     setup::load_externals(&mut engine, Privilege::System);
     match engine.load_state(&state_path) {
         Ok(0) => {}
@@ -289,8 +294,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     hooks.requirements = requirements;
     hooks.rules_source = rules_source.as_str();
     hooks.degraded = degraded_reasons(&probe, cli.no_dbus);
-    hooks.calibrator = (!dry_run)
-        .then(|| Calibrator::new(PathBuf::from(CALIBRATION), roots.clone(), lindesk_core::clock::now_ms(), false));
+    hooks.degraded.extend(control_error);
+    let calibrator = Calibrator::new(calibration.clone(), roots.clone(), lindesk_core::clock::now_ms(), false);
+    let calibration = dbus::CalibrationSetup { roots: roots.clone(), path: calibration, busy: calibrator.busy() };
+    hooks.calibrator = (!dry_run).then_some(calibrator);
     let summary = format!(
         "lindeskd ready: level {}, profile {profile_name}, {}, mode broker{}, rules {}",
         probe.support_level(),
@@ -298,7 +305,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         if dry_run { " (dry run)" } else { "" },
         rules_source.as_str()
     );
-    let (handle, inbox) = engine_thread::channel()?;
     let thread = engine_thread::spawn(engine, hooks, inbox)?;
     let (notes, join) = thread.split();
     tracing::info!("{summary}");
@@ -310,7 +316,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     if insecure {
         tracing::warn!("{}=1: polkit checks are DISABLED (test mode)", dbus::INSECURE_ENV);
     }
-    let served = rt.block_on(serve(&cli, handle.clone(), notes, insecure, signals));
+    let served = rt.block_on(serve(&cli, handle.clone(), notes, insecure, signals, control, calibration, change_rx));
     handle.shutdown();
     if join.join().is_err() {
         tracing::error!("the engine thread panicked");
@@ -327,8 +333,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
 /// Default system telemetry lake.
 const TELEMETRY_DIR: &str = "/var/lib/lindesk/telemetry";
-/// System calibration result.
-const CALIBRATION: &str = "/var/lib/lindesk/calibration.json";
+/// Persistent broker state (changes, calibration) when running as root.
+const LIB_DIR: &str = "/var/lib/lindesk";
 
 /// Why the broker runs with less than the full feature set.
 fn degraded_reasons(probe: &Probe, no_dbus: bool) -> Vec<String> {
@@ -348,13 +354,7 @@ fn degraded_reasons(probe: &Probe, no_dbus: bool) -> Vec<String> {
     v
 }
 
-fn register_builtins(
-    engine: &mut Engine,
-    config: &Config,
-    backend: Backend,
-    caps: &HostCaps,
-    metrics: &PolicyMetrics,
-) -> RelayTable {
+fn register_builtins(engine: &mut Engine, config: &Config, backend: Backend, metrics: &PolicyMetrics) -> RelayTable {
     let tick = config.general.tick;
     let reg = engine.registry_mut();
     registered("psi", reg.register_sensor(Box::new(PsiSensor::new()), tick));
@@ -364,7 +364,7 @@ fn register_builtins(
         "threshold",
         reg.register_policy(Box::new(Observed::new(ThresholdPolicy::default(), metrics.clone())), 0),
     );
-    let (acts, table) = build_actuators(backend, config, caps);
+    let (acts, table) = build_actuators(backend);
     let n = acts.len() as i32;
     for (i, a) in acts.into_iter().enumerate() {
         let name = a.info().name;
@@ -376,20 +376,28 @@ fn register_builtins(
     table
 }
 
-/// D-Bus, signals, watchdog and heartbeat until SIGTERM/SIGINT or the engine stops.
+/// D-Bus, signals, watchdog, heartbeat and the changes' dead-man timer until SIGTERM/SIGINT
+/// or the engine stops.
+#[allow(clippy::too_many_arguments)]
 async fn serve(
     cli: &Cli,
     handle: EngineHandle<broker::BrokerExt>,
     mut notes: UnboundedReceiver<Notification>,
     insecure: bool,
     signals: Signals,
+    control: Option<Arc<Control<broker::BrokerExt>>>,
+    calibration: dbus::CalibrationSetup,
+    mut changes: UnboundedReceiver<String>,
 ) -> anyhow::Result<()> {
     let Signals { mut term, mut int, mut hup } = signals;
     let sessions = dbus::Sessions::default();
+    if let Some(c) = &control {
+        tokio::spawn(c.clone().run_expiry());
+    }
     let conn = if cli.no_dbus {
         None
     } else {
-        let iface = dbus::Broker { engine: handle.clone(), sessions: sessions.clone(), insecure };
+        let iface = dbus::Broker { engine: handle.clone(), sessions: sessions.clone(), insecure, control, calibration };
         let conn = zbus::connection::Builder::system()?
             .serve_at(BROKER_PATH, iface)?
             .name(BROKER_NAME)?
@@ -431,12 +439,15 @@ async fn serve(
                     }
                 }
             }
+            Some(json) = changes.recv() => {
+                if let Some(c) = &conn { dbus::send_change_event(c, &json).await; }
+            }
             n = notes.recv() => match n {
                 Some(Notification::UserState { uid, json }) => {
                     if let Some(c) = &conn { dbus::send_user_state(c, &sessions, uid, &json).await; }
                 }
-                Some(Notification::Events(json)) => {
-                    if let Some(c) = &conn { dbus::send_events(c, &json).await; }
+                Some(Notification::Events { json, audience }) => {
+                    if let Some(c) = &conn { dbus::send_events(c, &sessions, &json, audience).await; }
                 }
                 Some(Notification::LevelChanged(level)) => {
                     let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Status(&format!("level {level}"))]);
@@ -528,16 +539,12 @@ mod tests {
     }
 
     #[test]
-    fn actuators_relay_first_with_unit_fallback() {
-        let (acts, _) = build_actuators(Backend::Systemd, &Config::default(), &HostCaps::default());
+    fn actuators_relay_first_then_the_backend() {
+        let (acts, _) = build_actuators(Backend::Systemd);
         let names: Vec<String> = acts.iter().map(|a| a.info().name).collect();
-        assert_eq!(names, ["relay", "proc"]);
-        assert!(acts[0].info().description.contains("systemd"), "systemd is the relay's fallback");
-        let (acts, _) = build_actuators(Backend::CgroupV2Raw, &Config::default(), &HostCaps::default());
+        assert_eq!(names, ["relay", "systemd", "proc"]);
+        let (acts, _) = build_actuators(Backend::CgroupV2Raw);
         let names: Vec<String> = acts.iter().map(|a| a.info().name).collect();
         assert_eq!(names, ["relay", "cgroup-v2-raw", "proc"]);
-        let off = Config::from_toml("[plugins.systemd]\nenabled = false\n").unwrap();
-        let (acts, _) = build_actuators(Backend::Systemd, &off, &HostCaps::default());
-        assert!(!acts[0].info().description.contains("systemd"));
     }
 }

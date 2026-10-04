@@ -7,7 +7,10 @@
 //! * a command queue ([`Command`]) plus an eventfd that wakes the thread's `poll(2)`;
 //! * an `Arc<RwLock<Published>>` snapshot written after every step (status JSON, level,
 //!   per-uid session states for the broker);
-//! * an unbounded tokio channel of [`Notification`]s (level changes, user states).
+//! * an unbounded tokio channel of [`Notification`]s (level changes, user states, events).
+//!
+//! Every streamed event has an [`Audience`] ([`Hooks::audience`]): the broker sends events
+//! about one user's units only to that user (and root), never broadcasts them.
 //!
 //! The loop: `poll` on the command eventfd plus [`Engine::wake_fds`] with a timeout of
 //! `[general] tick` → drain commands → [`Engine::step`] → publish → notify. Steps happen on
@@ -16,6 +19,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::os::fd::{BorrowedFd, OwnedFd, RawFd};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, RwLock};
@@ -24,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use lindesk_core::clock::now_ms;
 use lindesk_host::{Engine, StepReport};
-use lindesk_plugin_api::{Event, Level, Metric, QosClass, Resource, Sample, Target, TimestampMs};
+use lindesk_plugin_api::{Event, Hardware, LatencyMap, Level, Metric, QosClass, Resource, Sample, Target, TimestampMs};
 use rustix::event::{EventfdFlags, PollFd, PollFlags, Timespec};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc as tmpsc, oneshot};
@@ -49,6 +53,23 @@ pub const EVENTS_PER_SIGNAL: usize = 100;
 /// Reply channel of a command.
 pub type Reply<T> = oneshot::Sender<T>;
 
+/// Who may see an event: `None` = everyone (system scope); `Some(uid)` = that user and root.
+pub type Audience = Option<u32>;
+
+/// Whether `viewer` (a uid) may see an event for `audience`. Root sees everything.
+pub fn visible_to(audience: Audience, viewer: u32) -> bool {
+    viewer == 0 || audience.is_none_or(|u| u == viewer)
+}
+
+/// The profiles as the engine thread sees them (for guardrails and `ListProfiles`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProfilesView {
+    /// Every known profile name.
+    pub names: Vec<String>,
+    /// `ListProfiles` JSON: an array of `lindesk_core::profile::ProfileInfo`.
+    pub list: Value,
+}
+
 /// Requests to the engine thread. `X` carries daemon-specific commands.
 pub enum Command<X> {
     /// Queue an event (Focus, Interaction, …) and step soon.
@@ -61,8 +82,15 @@ pub enum Command<X> {
     Explain { what: String, reply: Reply<Result<String, String>> },
     /// Fresh status JSON.
     Status { reply: Reply<String> },
-    /// Re-read the config, apply it and rediscover plugins. Replies with a summary.
+    /// Re-read the config (and the profiles), apply it and rediscover plugins. Replies with
+    /// a summary.
     Reload { reply: Reply<Result<String, String>> },
+    /// The host's hardware profile (`HostCaps.hardware`, with the latency map).
+    Hardware { reply: Reply<Hardware> },
+    /// Known profiles and the `ListProfiles` rows.
+    Profiles { reply: Reply<ProfilesView> },
+    /// A calibration finished and was saved to `path`: put it into the caps and announce it.
+    Calibrated { map: Box<LatencyMap>, path: PathBuf },
     /// Restore everything, stop plugins and end the thread.
     Shutdown,
     /// Daemon-specific.
@@ -78,8 +106,11 @@ pub enum Notification {
         uid: u32,
         json: String,
     },
-    /// Events of one step, as a JSON array (at most [`EVENTS_PER_SIGNAL`]).
-    Events(String),
+    /// Events of one step for one audience, as a JSON array (at most [`EVENTS_PER_SIGNAL`]).
+    Events {
+        json: String,
+        audience: Audience,
+    },
     /// The engine thread has shut down.
     Stopped,
 }
@@ -131,6 +162,21 @@ pub trait Hooks: Send + 'static {
         (None, "unknown")
     }
 
+    /// Who may see `event` (default: everyone).
+    fn audience(&self, _event: &Event) -> Audience {
+        None
+    }
+
+    /// Known profiles (default: none).
+    fn profiles(&self, _engine: &Engine) -> ProfilesView {
+        ProfilesView { names: Vec::new(), list: Value::Array(Vec::new()) }
+    }
+
+    /// A calibration result arrived ([`Command::Calibrated`]).
+    fn calibrated(&mut self, engine: &mut Engine, map: LatencyMap, path: &std::path::Path) {
+        super::calibration::attach(engine, map, path, now_ms());
+    }
+
     /// Candidate targets for a bare unit name in `explain`, most likely first.
     fn unit_candidates(&self, engine: &Engine, name: &str) -> Vec<Target>;
 
@@ -173,7 +219,7 @@ pub struct EngineHandle<X> {
     waker: Arc<OwnedFd>,
     published: Arc<RwLock<Published>>,
     alive: Arc<AtomicI64>,
-    recent: Arc<Mutex<VecDeque<String>>>,
+    recent: Arc<Mutex<VecDeque<(Audience, String)>>>,
 }
 
 impl<X> Clone for EngineHandle<X> {
@@ -248,9 +294,31 @@ impl<X: Send + 'static> EngineHandle<X> {
 
     /// The last `n` events (oldest first) as a JSON array (`RecentEvents`).
     pub fn recent_events(&self, n: usize) -> String {
+        self.recent_events_for(n, None)
+    }
+
+    /// The last `n` events `viewer` may see (all when `None`), oldest first, as a JSON array.
+    pub fn recent_events_for(&self, n: usize, viewer: Option<u32>) -> String {
         let ring = self.recent.lock().unwrap_or_else(|e| e.into_inner());
-        let skip = ring.len().saturating_sub(n);
-        format!("[{}]", ring.iter().skip(skip).map(String::as_str).collect::<Vec<_>>().join(","))
+        let mut out: Vec<&str> = ring
+            .iter()
+            .rev()
+            .filter(|(a, _)| viewer.is_none_or(|v| visible_to(*a, v)))
+            .take(n)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        out.reverse();
+        format!("[{}]", out.join(","))
+    }
+
+    /// The host's hardware profile.
+    pub async fn hardware(&self) -> Result<Hardware, EngineGone> {
+        self.call(|reply| Command::Hardware { reply }).await
+    }
+
+    /// Known profiles.
+    pub async fn profiles(&self) -> Result<ProfilesView, EngineGone> {
+        self.call(|reply| Command::Profiles { reply }).await
     }
 
     /// Wall-clock ms of the loop's latest iteration (for the systemd watchdog).
@@ -265,7 +333,7 @@ pub struct Inbox<X> {
     waker: Arc<OwnedFd>,
     published: Arc<RwLock<Published>>,
     alive: Arc<AtomicI64>,
-    recent: Arc<Mutex<VecDeque<String>>>,
+    recent: Arc<Mutex<VecDeque<(Audience, String)>>>,
 }
 
 /// A command queue with its wake-up eventfd. Create it first when something (adapters)
@@ -347,7 +415,7 @@ struct Loop<H: Hooks> {
     waker: Arc<OwnedFd>,
     published: Arc<RwLock<Published>>,
     alive: Arc<AtomicI64>,
-    recent: Arc<Mutex<VecDeque<String>>>,
+    recent: Arc<Mutex<VecDeque<(Audience, String)>>>,
     notify: tmpsc::UnboundedSender<Notification>,
     last_level: Option<Level>,
     steps: u64,
@@ -487,6 +555,18 @@ impl<H: Hooks> Loop<H> {
                 let _ = reply.send(r);
                 true
             }
+            Command::Hardware { reply } => {
+                let _ = reply.send(self.engine.options().caps.hardware.clone());
+                false
+            }
+            Command::Profiles { reply } => {
+                let _ = reply.send(self.hooks.profiles(&self.engine));
+                false
+            }
+            Command::Calibrated { map, path } => {
+                self.hooks.calibrated(&mut self.engine, *map, &path);
+                true
+            }
             Command::Ext(x) => {
                 let mut cx = LoopCx { published: &self.published, notify: &self.notify, want_step: false };
                 self.hooks.ext(&mut self.engine, x, &mut cx);
@@ -534,15 +614,15 @@ impl<H: Hooks> Loop<H> {
         }
     }
 
-    /// Append events to the ring and emit them in `Events` chunks.
+    /// Append events to the ring and emit them in `Events` chunks, one series per audience.
     fn stream_events(&mut self, events: &[Event]) {
         if events.is_empty() {
             return;
         }
-        let mut lines = Vec::with_capacity(events.len());
+        let mut lines: Vec<(Audience, String)> = Vec::with_capacity(events.len());
         for e in events {
             self.seq += 1;
-            lines.push(event_json(self.seq, e));
+            lines.push((self.hooks.audience(e), event_json(self.seq, e)));
         }
         {
             let mut ring = self.recent.lock().unwrap_or_else(|e| e.into_inner());
@@ -553,8 +633,15 @@ impl<H: Hooks> Loop<H> {
                 ring.push_back(l.clone());
             }
         }
-        for chunk in lines.chunks(EVENTS_PER_SIGNAL) {
-            let _ = self.notify.send(Notification::Events(format!("[{}]", chunk.join(","))));
+        let mut by_audience: BTreeMap<Audience, Vec<&str>> = BTreeMap::new();
+        for (a, l) in &lines {
+            by_audience.entry(*a).or_default().push(l.as_str());
+        }
+        for (audience, lines) in by_audience {
+            for chunk in lines.chunks(EVENTS_PER_SIGNAL) {
+                let json = format!("[{}]", chunk.join(","));
+                let _ = self.notify.send(Notification::Events { json, audience });
+            }
         }
     }
 
@@ -689,6 +776,14 @@ mod tests {
         let e = Event::Focus { ts: 5, pid: Some(1), app_id: None, target: None, source: "dbus".into() };
         let v: Value = serde_json::from_str(&event_json(7, &e)).unwrap();
         assert_eq!((v["kind"].as_str(), v["seq"].as_u64(), v["pid"].as_i64()), (Some("focus"), Some(7), Some(1)));
+    }
+
+    #[test]
+    fn audience_visibility() {
+        assert!(visible_to(None, 1000));
+        assert!(visible_to(Some(1000), 1000));
+        assert!(!visible_to(Some(1001), 1000));
+        assert!(visible_to(Some(1001), 0), "root sees everything");
     }
 
     #[test]

@@ -321,7 +321,10 @@ impl ExternalPlugin {
     /// spawns the process. `dir` is the working directory; `manifest.plugin.exec` is
     /// resolved against it.
     pub fn new(manifest: Manifest, dir: impl Into<PathBuf>, ctx: InitContext, opts: ExternalOptions) -> Self {
+        // The process runs inside `dir`: a relative program path would be resolved against it
+        // a second time (`steam-games/steam-games/steam_games.py`), so make `dir` absolute.
         let dir = dir.into();
+        let dir = if dir.is_absolute() { dir } else { std::path::absolute(&dir).unwrap_or(dir) };
         let exec = {
             let e = Path::new(&manifest.plugin.exec);
             if e.is_absolute() { e.to_path_buf() } else { dir.join(e) }

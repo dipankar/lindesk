@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 
 use crate::common::calibration::Calibrator;
-use crate::common::engine_thread::{Hooks, LoopCx};
+use crate::common::engine_thread::{Hooks, LoopCx, ProfilesView};
 use crate::common::observe::PolicyMetrics;
 use crate::common::profiles::Profiles;
 use crate::common::setup;
@@ -37,12 +37,18 @@ pub struct BrokerView {
     pub desired: usize,
     pub dry_run: bool,
     pub updated: TimestampMs,
+    /// The broker's status `daemon.profile` (the profile in effect while connected).
+    pub profile: Value,
 }
 
 /// Turn a `SessionState` JSON into relay settings for `uid`. Settings for other users are
 /// dropped. Returns (level, settings, broker dry-run).
 pub fn parse_state(uid: u32, json: &str) -> Result<(Level, Vec<RelayedSetting>, bool), String> {
     let v: Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    parse_state_value(uid, v)
+}
+
+fn parse_state_value(uid: u32, v: Value) -> Result<(Level, Vec<RelayedSetting>, bool), String> {
     let dry = v.get("dry_run").and_then(Value::as_bool).unwrap_or(false);
     let st: SessionState = serde_json::from_value(v).map_err(|e| e.to_string())?;
     if st.uid != uid {
@@ -123,6 +129,10 @@ impl SessionHooks {
         if !e.threshold {
             self.metrics.clear();
         }
+        // Connected, the broker's profile is the one in effect; ours resumes when standalone.
+        if let Some(p) = self.profiles.as_mut() {
+            p.frozen = mode == Mode::Connected;
+        }
         if e.relay {
             match state {
                 Some(s) => self.apply_state(s, engine_dry_run),
@@ -140,6 +150,10 @@ impl SessionHooks {
         if self.mode != Mode::Connected {
             return;
         }
+        let profile = serde_json::from_str::<Value>(json)
+            .ok()
+            .and_then(|mut v| v.get_mut("profile").map(Value::take))
+            .unwrap_or(Value::Null);
         match parse_state(self.uid, json) {
             Ok((level, settings, broker_dry)) => {
                 let n = settings.len();
@@ -154,9 +168,37 @@ impl SessionHooks {
                     settings
                 };
                 self.feed.set(level, settings);
-                self.broker = Some(BrokerView { level, desired: n, dry_run: broker_dry, updated: now_ms() });
+                self.broker = Some(BrokerView { level, desired: n, dry_run: broker_dry, updated: now_ms(), profile });
             }
             Err(e) => tracing::warn!("ignoring broker state: {e}"),
+        }
+    }
+
+    /// The broker's active profile while connected.
+    fn broker_profile(&self) -> Option<&Value> {
+        let b = self.broker.as_ref().filter(|_| self.mode == Mode::Connected)?;
+        (!b.profile.is_null()).then_some(&b.profile)
+    }
+
+    /// Status `daemon.profile`: ours, or the broker's while connected (`"source": "broker"`).
+    fn profile_status(&self) -> Value {
+        let own = self.profiles.as_ref().map_or(Value::Null, Profiles::status);
+        match self.broker_profile() {
+            Some(b) => {
+                let mut v = b.clone();
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("source".into(), json!("broker"));
+                    o.insert("local".into(), own);
+                }
+                v
+            }
+            None => {
+                let mut v = own;
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("source".into(), json!("local"));
+                }
+                v
+            }
         }
     }
 
@@ -175,7 +217,7 @@ impl Hooks for SessionHooks {
         m.insert("forced_standalone".into(), json!(self.forced_standalone));
         m.insert("degraded".into(), json!(self.degraded));
         m.insert("rules".into(), json!(self.rules_source));
-        m.insert("profile".into(), self.profiles.as_ref().map_or(Value::Null, Profiles::status));
+        m.insert("profile".into(), self.profile_status());
         m.insert(
             "broker".into(),
             match &self.broker {
@@ -201,6 +243,14 @@ impl Hooks for SessionHooks {
             Mode::Standalone => (self.metrics.epoch_active(), "threshold"),
             Mode::Starting => (None, "none"),
         }
+    }
+
+    fn profiles(&self, engine: &Engine) -> ProfilesView {
+        let broker_active = self.broker_profile().and_then(|p| p["active"].as_str());
+        self.profiles
+            .as_ref()
+            .map(|p| p.view(engine, broker_active))
+            .unwrap_or_else(|| ProfilesView { names: Vec::new(), list: json!([]) })
     }
 
     fn unit_candidates(&self, _engine: &Engine, name: &str) -> Vec<Target> {
@@ -244,7 +294,7 @@ impl Hooks for SessionHooks {
     fn reload(&mut self, engine: &mut Engine) -> Result<String, String> {
         let profiles = &mut self.profiles;
         let mut apply = |engine: &mut Engine, cfg: Config| match profiles.as_mut() {
-            Some(p) => p.rebase(engine, cfg),
+            Some(p) => p.rebase(engine, cfg, now_ms()),
             None => engine.reload_config(cfg).map_err(|e| e.to_string()),
         };
         setup::reload(engine, &self.config_path, Privilege::User, &*self.prepare, &mut apply)
@@ -320,6 +370,23 @@ mod tests {
 
         h.set_mode(Mode::Connected, None, false);
         assert_eq!(h.feed.get(), Some((Level::Green, vec![])), "connected without a state yet");
+    }
+
+    #[test]
+    fn connected_shows_the_brokers_profile() {
+        let mut h = hooks();
+        h.profiles = Some(Profiles::load(lindesk_core::config::Config::default(), &[]));
+        assert_eq!(h.profile_status()["source"], "local");
+        let mut v: Value = serde_json::from_str(&state(1000, false)).unwrap();
+        v["profile"] = json!({"active": "gaming", "pinned": false, "reason": "steam", "matched": ["gaming"]});
+        h.set_mode(Mode::Connected, Some(&v.to_string()), false);
+        assert!(h.profiles.as_ref().unwrap().frozen);
+        let st = h.profile_status();
+        assert_eq!((st["active"].as_str(), st["source"].as_str()), (Some("gaming"), Some("broker")));
+        assert!(st["local"].is_object());
+        h.set_mode(Mode::Standalone, None, false);
+        assert!(!h.profiles.as_ref().unwrap().frozen);
+        assert_eq!(h.profile_status()["source"], "local");
     }
 
     #[test]

@@ -208,8 +208,7 @@ pub fn discover(opts: &DiscoveryOptions<'_>) -> Discovery {
 /// Validate one plugin directory without privilege or ownership rules (used by
 /// `lindeskctl plugin test` and conformance). `path` may be the directory or the manifest.
 pub fn inspect_dev(path: &Path) -> Result<DiscoveredPlugin, Rejected> {
-    let dir = if path.is_dir() { path.to_path_buf() } else { path.parent().unwrap_or(Path::new(".")).to_path_buf() };
-    let manifest_path = if path.is_dir() { path.join(MANIFEST) } else { path.to_path_buf() };
+    let (dir, manifest_path) = plugin_paths(path);
     let reject = |name: Option<String>, reason: String| Rejected { path: dir.clone(), name, reason, skipped: false };
     let manifest = load_manifest(&manifest_path).map_err(|e| reject(None, e.to_string()))?;
     validate(&manifest, &dir).map_err(|e| reject(Some(manifest.plugin.name.clone()), e))?;
@@ -284,6 +283,23 @@ pub fn inspect(
         merge_json(&mut p.config, &pc.config);
     }
     Ok(p)
+}
+
+/// The plugin directory and manifest path for `path` (a plugin directory or its
+/// `plugin.toml`), both absolute: the directory is canonicalised (made absolute against the
+/// current directory when that fails), so a relative `exec` is resolved exactly once and
+/// the plugin process, which runs with the directory as its working directory, gets an
+/// absolute program path.
+pub fn plugin_paths(path: &Path) -> (PathBuf, PathBuf) {
+    let (dir, file) = if path.is_dir() {
+        (path.to_path_buf(), None)
+    } else {
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        (parent.to_path_buf(), path.file_name().map(PathBuf::from))
+    };
+    let dir = std::fs::canonicalize(&dir).or_else(|_| std::path::absolute(&dir)).unwrap_or(dir);
+    let manifest = dir.join(file.unwrap_or_else(|| PathBuf::from(MANIFEST)));
+    (dir, manifest)
 }
 
 fn resolve_exec(m: &Manifest, dir: &Path) -> PathBuf {

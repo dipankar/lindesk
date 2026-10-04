@@ -3,8 +3,8 @@
 //! When `lindesk-session` is connected to `lindeskd`, the broker is the brain: it computes
 //! the desired settings for this user's units and sends them as a `SessionState`. The agent
 //! feeds the latest set into a [`RelayFeed`]; [`RelayPolicy`] returns it as intents (priority
-//! [`PRIORITY`], reason `"broker: <original plugin>: <reason>"`) together with the broker's
-//! level. Because policies are declarative, the engine reverts whatever the broker stops
+//! [`PRIORITY`], reason `"<original plugin>: <reason>"`, which explain shows as
+//! `broker: <plugin>: <reason>`) together with the broker's level. Because policies are declarative, the engine reverts whatever the broker stops
 //! asking for, and a cleared feed (broker gone, standalone mode) reverts everything relayed.
 
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -88,13 +88,15 @@ impl RelayPolicy {
     }
 }
 
-/// `"broker: <plugin>: <reason>"` (the reason part omitted when empty).
+/// `"<plugin>: <reason>"` of the broker's decision (either part omitted when empty). The
+/// relayed provenance's plugin is [`NAME`] (`broker`), so explain and the events render it as
+/// `broker: <plugin>: <reason>`, with a single `broker` prefix.
 pub fn relay_reason(p: &Provenance) -> String {
     match (p.plugin.is_empty(), p.reason.is_empty()) {
-        (true, true) => "broker".into(),
-        (false, true) => format!("broker: {}", p.plugin),
-        (true, false) => format!("broker: {}", p.reason),
-        (false, false) => format!("broker: {}: {}", p.plugin, p.reason),
+        (true, true) => String::new(),
+        (false, true) => p.plugin.clone(),
+        (true, false) => p.reason.clone(),
+        (false, false) => format!("{}: {}", p.plugin, p.reason),
     }
 }
 
@@ -175,7 +177,7 @@ mod tests {
                 target: t,
                 setting: Setting::CpuWeight { value: 300 },
                 priority: PRIORITY,
-                reason: "broker: threshold: foreground boost".into()
+                reason: "threshold: foreground boost".into()
             }]
         );
         feed.set(Level::Green, vec![]);
@@ -193,9 +195,9 @@ mod tests {
             reason: reason.into(),
             ..Default::default()
         };
-        assert_eq!(relay_reason(&p("a", "b")), "broker: a: b");
-        assert_eq!(relay_reason(&p("a", "")), "broker: a");
-        assert_eq!(relay_reason(&p("", "b")), "broker: b");
-        assert_eq!(relay_reason(&p("", "")), "broker");
+        assert_eq!(relay_reason(&p("a", "b")), "a: b");
+        assert_eq!(relay_reason(&p("a", "")), "a");
+        assert_eq!(relay_reason(&p("", "b")), "b");
+        assert_eq!(relay_reason(&p("", "")), "");
     }
 }

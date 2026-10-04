@@ -213,6 +213,9 @@ impl Supervisor {
                     self.health = Health::Running;
                 }
             }
+            // "Not mine" (e.g. a unit of another manager): the engine asks the next actuator;
+            // it is an answer, not an error.
+            Err(PluginError::Unsupported(_)) => {}
             Err(e) => {
                 self.note_error(&e.to_string());
                 if let Some(kind) = is_failure(e) {

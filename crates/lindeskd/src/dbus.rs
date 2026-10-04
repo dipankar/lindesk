@@ -7,17 +7,24 @@
 //! | `RegisterSession` | anyone; the caller's uid is recorded |
 //! | `ReportForeground`, `Interaction` | pid owned by the caller, else polkit `set-class-any`; root always. `pid <= 0` with an app id: only that user's units match |
 //! | `SetClass` | own pid: polkit `set-class-own`; other pids: `set-class-any`; root always |
-//! | `GetStatus`, `Explain`, `RecentEvents` | anyone |
-//! | `Reload` | polkit `manage` |
+//! | `GetStatus`, `Explain` | anyone |
+//! | `RecentEvents` | anyone; filtered: root sees every event, other users system-scope events plus their own |
+//! | `PlanChange`, `ListChanges`, `GetChange`, `ListProfiles`, `GetHardware`, `SwapReport` | anyone |
+//! | `Reload`, `ApplyChange`, `ConfirmChange`, `RevertChange`, `SetProfile`, `Calibrate`, `CalibrateWith` | polkit `manage` |
 //!
 //! polkit checks are non-interactive unless the message carries
 //! `ALLOW_INTERACTIVE_AUTHORIZATION`. `LINDESK_INSECURE_NO_POLKIT=1` skips polkit (test
 //! buses have none); it is honoured only when the broker does not run as root.
 //!
 //! `UserState` is sent *unicast* to each registered agent of that user (other users never
-//! see it). `Events` is broadcast.
+//! see it). `Events` carrying system-scope events is broadcast; events about one user's
+//! units or processes go unicast to that user's registered agents only. `ChangeEvent`
+//! (system-scope changesets) is broadcast. Guardrail refusals are the D-Bus error
+//! `org.lindesk.Error.Rejected` with the human-readable reasons.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
@@ -30,7 +37,9 @@ use zbus::object_server::SignalEmitter;
 use zbus::{Connection, fdo, interface};
 
 use crate::broker::BrokerExt;
-use crate::common::engine_thread::{EngineGone, EngineHandle};
+use crate::common::calibration;
+use crate::common::control::{self, Control, CtlError};
+use crate::common::engine_thread::{Audience, Command, EngineGone, EngineHandle};
 use crate::common::proc_uid;
 
 /// Env var that disables polkit checks for unprivileged test runs.
@@ -44,10 +53,23 @@ pub fn insecure_no_polkit(env: Option<&str>, euid_is_root: bool) -> bool {
 /// Registered session agents: unique bus name → uid.
 pub type Sessions = Arc<Mutex<BTreeMap<OwnedUniqueName, u32>>>;
 
+/// Where and how on-demand calibrations run.
+#[derive(Clone, Debug)]
+pub struct CalibrationSetup {
+    pub roots: lindesk_sys::Roots,
+    /// Where the result is saved (`/var/lib/lindesk/calibration.json` as root).
+    pub path: PathBuf,
+    /// Shared with the first-run calibrator: one calibration at a time.
+    pub busy: Arc<AtomicBool>,
+}
+
 pub struct Broker {
     pub engine: EngineHandle<BrokerExt>,
     pub sessions: Sessions,
     pub insecure: bool,
+    /// System-scope versioned changes; `None` when the store couldn't be opened.
+    pub control: Option<Arc<Control<BrokerExt>>>,
+    pub calibration: CalibrationSetup,
 }
 
 fn gone(e: EngineGone) -> fdo::Error {
@@ -92,6 +114,47 @@ impl Broker {
             self.polkit(conn, hdr, &caller, actions::SET_CLASS_ANY).await?;
         }
         Ok(caller)
+    }
+
+    fn control(&self) -> Result<&Control<BrokerExt>, CtlError> {
+        self.control
+            .as_deref()
+            .ok_or_else(|| CtlError::Failed("versioned changes are unavailable (see the lindeskd log)".into()))
+    }
+
+    /// The caller, after polkit `org.lindesk.manage`.
+    async fn manager(&self, conn: &Connection, hdr: &Header<'_>) -> Result<control::Caller, CtlError> {
+        let who = control::caller(conn, hdr).await?;
+        let caller = auth::Caller { uid: who.uid, pid: None };
+        self.polkit(conn, hdr, &caller, actions::MANAGE).await?;
+        Ok(who)
+    }
+
+    /// Run a calibration (`CalibrateWith` options: `quick`, plus the broker extensions
+    /// `storage` (default true) and `force` (default true: a busy machine yields a map
+    /// flagged `noisy` instead of an error)).
+    async fn run_calibration(&self, options: &serde_json::Value) -> Result<String, CtlError> {
+        let flag = |k: &str, d: bool| options.get(k).and_then(serde_json::Value::as_bool).unwrap_or(d);
+        let opts = lindesk_sys::calibrate::CalibrateOptions {
+            quick: flag("quick", false),
+            force: flag("force", true),
+            storage: flag("storage", true),
+            ..Default::default()
+        };
+        let c = &self.calibration;
+        if c.busy.swap(true, Ordering::SeqCst) {
+            return Err(CtlError::Failed("a calibration is already running; try again in a few seconds".into()));
+        }
+        tracing::info!("calibrating on request ({} mode)", if opts.quick { "quick" } else { "full" });
+        let rx = calibration::spawn_run(c.roots.clone(), opts, c.path.clone(), c.busy.clone())
+            .map_err(|e| CtlError::Failed(format!("cannot start the calibration: {e}")))?;
+        let map = rx
+            .await
+            .map_err(|_| CtlError::Failed("the calibration thread died".into()))?
+            .map_err(|e| CtlError::Failed(format!("calibration: {e}")))?;
+        let json = serde_json::to_string(&map).map_err(|e| CtlError::Failed(e.to_string()))?;
+        self.engine.send(Command::Calibrated { map: Box::new(map), path: c.path.clone() })?;
+        Ok(json)
     }
 
     /// Track a session agent until its bus name vanishes.
@@ -219,9 +282,16 @@ impl Broker {
         self.engine.explain(what).await.map_err(gone)?.map_err(fdo::Error::InvalidArgs)
     }
 
-    /// The last `n` events (oldest first) as a JSON array.
-    async fn recent_events(&self, n: u32) -> String {
-        self.engine.recent_events(n as usize)
+    /// The last `n` events the caller may see (oldest first) as a JSON array: root gets
+    /// everything, other users system-scope events plus their own.
+    async fn recent_events(
+        &self,
+        n: u32,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> fdo::Result<String> {
+        let caller = self.caller(conn, &hdr).await?;
+        Ok(self.engine.recent_events_for(n as usize, Some(caller.uid)))
     }
 
     /// Re-read the config and rediscover plugins.
@@ -230,6 +300,118 @@ impl Broker {
         self.polkit(conn, &hdr, &caller, actions::MANAGE).await?;
         self.engine.reload().await.map_err(gone)?.map(|_| ()).map_err(fdo::Error::Failed)
     }
+
+    // ---- control plane (docs/CONTROL-PLANE.md §5), system scope ----------------------------
+
+    /// Plan a changeset (no side effects): Plan JSON.
+    async fn plan_change(&self, ops_json: String) -> Result<String, CtlError> {
+        self.control()?.plan(&ops_json).await
+    }
+
+    /// Validate, apply and version a changeset: ChangeSet JSON.
+    async fn apply_change(
+        &self,
+        ops_json: String,
+        description: String,
+        ttl_secs: u32,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<String, CtlError> {
+        let ctl = self.control()?;
+        let who = self.manager(conn, &hdr).await?;
+        ctl.apply(&ops_json, &description, ttl_secs, &who).await
+    }
+
+    /// Keep an applied changeset (stops its dead-man timer).
+    async fn confirm_change(
+        &self,
+        id: u64,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<(), CtlError> {
+        let ctl = self.control()?;
+        self.manager(conn, &hdr).await?;
+        ctl.confirm(id).await
+    }
+
+    /// Revert a changeset: the new ChangeSet JSON.
+    async fn revert_change(
+        &self,
+        id: u64,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<String, CtlError> {
+        let ctl = self.control()?;
+        let who = self.manager(conn, &hdr).await?;
+        ctl.revert(id, &who).await
+    }
+
+    /// The newest `limit` changesets (JSON array, newest first).
+    async fn list_changes(&self, limit: u32) -> Result<String, CtlError> {
+        self.control()?.list(limit).await
+    }
+
+    /// One changeset.
+    async fn get_change(&self, id: u64) -> Result<String, CtlError> {
+        self.control()?.get(id).await
+    }
+
+    /// Profiles: name, description, active, matches_now, reason.
+    async fn list_profiles(&self) -> Result<String, CtlError> {
+        control::profiles_json(&self.engine).await
+    }
+
+    /// A `profile_use` changeset (`"auto"` allowed): ChangeSet JSON.
+    async fn set_profile(
+        &self,
+        name: String,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<String, CtlError> {
+        let ctl = self.control()?;
+        let who = self.manager(conn, &hdr).await?;
+        ctl.set_profile(&name, &who).await
+    }
+
+    /// `Hardware` JSON including the latency map.
+    async fn get_hardware(&self) -> Result<String, CtlError> {
+        control::hardware_json(&self.engine).await
+    }
+
+    /// Swap analysis JSON.
+    async fn swap_report(&self) -> Result<String, CtlError> {
+        control::swap_json(&self.engine).await
+    }
+
+    /// Run the calibration (≈15 s) and return the `LatencyMap` JSON.
+    async fn calibrate(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<String, CtlError> {
+        self.manager(conn, &hdr).await?;
+        self.run_calibration(&serde_json::Value::Null).await
+    }
+
+    /// [`Self::calibrate`] with options (`{"quick": true}`; see `CalibrateRequest`).
+    async fn calibrate_with(
+        &self,
+        options_json: String,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<String, CtlError> {
+        let options: serde_json::Value = if options_json.trim().is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(&options_json).map_err(|e| fdo::Error::InvalidArgs(format!("options_json: {e}")))?
+        };
+        self.manager(conn, &hdr).await?;
+        self.run_calibration(&options).await
+    }
+
+    /// A system-scope changeset transition (ChangeSet JSON).
+    #[zbus(signal)]
+    pub async fn change_event(emitter: &SignalEmitter<'_>, json: &str) -> zbus::Result<()>;
 
     /// Desired settings for one user's units (unicast to that user's agents).
     #[zbus(signal)]
@@ -240,13 +422,14 @@ impl Broker {
     pub async fn events(emitter: &SignalEmitter<'_>, json: &str) -> zbus::Result<()>;
 }
 
+fn agents_of(sessions: &Sessions, uid: u32) -> Vec<OwnedUniqueName> {
+    let s = sessions.lock().unwrap_or_else(|e| e.into_inner());
+    s.iter().filter(|(_, u)| **u == uid).map(|(n, _)| n.clone()).collect()
+}
+
 /// Send `UserState` to every registered agent of `uid`.
 pub async fn send_user_state(conn: &Connection, sessions: &Sessions, uid: u32, json: &str) {
-    let names: Vec<OwnedUniqueName> = {
-        let s = sessions.lock().unwrap_or_else(|e| e.into_inner());
-        s.iter().filter(|(_, u)| **u == uid).map(|(n, _)| n.clone()).collect()
-    };
-    for name in names {
+    for name in agents_of(sessions, uid) {
         let emitter = match SignalEmitter::new(conn, BROKER_PATH) {
             Ok(e) => e.set_destination(BusName::from(name.as_ref())),
             Err(e) => {
@@ -260,15 +443,39 @@ pub async fn send_user_state(conn: &Connection, sessions: &Sessions, uid: u32, j
     }
 }
 
-/// Broadcast `Events`.
-pub async fn send_events(conn: &Connection, json: &str) {
+/// Send `Events`: broadcast for system-scope events, unicast to the registered agents of
+/// the user they are about otherwise (nobody else, not even other processes of that user).
+pub async fn send_events(conn: &Connection, sessions: &Sessions, json: &str, audience: Audience) {
+    let emitter = match SignalEmitter::new(conn, BROKER_PATH) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("Events: {e}");
+            return;
+        }
+    };
+    let Some(uid) = audience else {
+        if let Err(e) = Broker::events(&emitter, json).await {
+            tracing::debug!("Events not sent: {e}");
+        }
+        return;
+    };
+    for name in agents_of(sessions, uid) {
+        let to = emitter.clone().set_destination(BusName::from(name.as_ref()));
+        if let Err(e) = Broker::events(&to, json).await {
+            tracing::debug!(%name, "Events not delivered: {e}");
+        }
+    }
+}
+
+/// Broadcast `ChangeEvent`.
+pub async fn send_change_event(conn: &Connection, json: &str) {
     match SignalEmitter::new(conn, BROKER_PATH) {
         Ok(e) => {
-            if let Err(e) = Broker::events(&e, json).await {
-                tracing::debug!("Events not sent: {e}");
+            if let Err(e) = Broker::change_event(&e, json).await {
+                tracing::debug!("ChangeEvent not sent: {e}");
             }
         }
-        Err(e) => tracing::warn!("Events: {e}"),
+        Err(e) => tracing::warn!("ChangeEvent: {e}"),
     }
 }
 

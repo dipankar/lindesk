@@ -160,10 +160,21 @@ with roots for tests.
 | `GetHardware()` | → `s` | `Hardware` JSON incl. latency map |
 | `SwapReport()` | → `s` | |
 | `Calibrate()` | → `s` | Broker only; runs calibration, returns `LatencyMap`. |
+| `CalibrateWith(options_json)` | `s` → `s` | Broker only; `{"quick": bool}` (`CalibrateRequest`) plus broker extensions `force` (default true) and `storage` (default true). |
 | signal `ChangeEvent(json)` | `s` | Any changeset transition. |
 
 Callers' authorship is recorded (`uid`, bus name, and an `origin` hint passed in the ops
-envelope: `{"origin": "mcp", "client": "claude-code", "ops": [...]}`).
+envelope: `{"origin": "mcp", "client": "claude-code", "ops": [...]}`; `mcp` → `Mcp`, `cli`/
+`lindeskctl` → `Cli`, anything else → `Dbus`). Authorization: on the system bus the mutating
+members (`ApplyChange`, `ConfirmChange`, `RevertChange`, `SetProfile`, `Calibrate*`) need
+polkit `org.lindesk.manage`; the session agent serves only callers with its own uid.
+
+Errors: a guardrail refusal is the D-Bus error `org.lindesk.Error.Rejected` whose message is
+the human-readable list of reasons; an unknown id is `org.lindesk.Error.NotFound`; malformed
+`ops_json` is `org.freedesktop.DBus.Error.InvalidArgs`; other failures
+`org.lindesk.Error.Failed`. An apply whose writes failed and were rolled back returns the
+changeset with `status: "failed"`. Where the stores live and how the daemons wire them (recovery,
+dead-man timer, reloads) is in [ARCHITECTURE.md](ARCHITECTURE.md) ("Versioned changes").
 
 ## 6. MCP server (`lindesk-mcp`, rmcp)
 

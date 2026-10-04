@@ -7,12 +7,11 @@
 //! state) into the per-uid `SessionState` it sends to that user's agent. `read` returns
 //! `Ok(None)`: only the session agent knows (and keeps) the real originals.
 //!
-//! # Units of the system manager
+//! # Other targets
 //!
-//! The engine picks the first actuator (by priority) whose caps cover a target *kind*, and
-//! both this actuator and `systemd` act on `"unit"` targets. So the broker hands the
-//! system-unit actuator to [`RelayActuator::with_fallback`]: user units are relayed, every
-//! other target goes to the fallback. Without a fallback, other targets are `Unsupported`.
+//! Every other target (system units, cgroups, processes) is `Unsupported`. The engine then
+//! asks the next capable actuator (normally `systemd` on the system bus), so the broker
+//! registers this actuator ahead of the backend's actuators.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -85,18 +84,9 @@ impl RelayTable {
 }
 
 /// The built-in `relay` actuator. See the [module docs](self).
+#[derive(Debug)]
 pub struct RelayActuator {
     table: RelayTable,
-    fallback: Option<Box<dyn Actuator>>,
-}
-
-impl std::fmt::Debug for RelayActuator {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RelayActuator")
-            .field("table", &self.table)
-            .field("fallback", &self.fallback.as_ref().map(|a| a.info().name))
-            .finish()
-    }
 }
 
 impl Default for RelayActuator {
@@ -106,33 +96,19 @@ impl Default for RelayActuator {
 }
 
 impl RelayActuator {
-    /// A relay with a fresh table and no fallback.
+    /// A relay with a fresh table.
     pub fn new() -> Self {
-        RelayActuator { table: RelayTable::new(), fallback: None }
+        RelayActuator { table: RelayTable::new() }
     }
 
     /// A relay recording into `table`.
     pub fn with_table(table: RelayTable) -> Self {
-        RelayActuator { table, fallback: None }
-    }
-
-    /// Hand every target that is not a user unit to `fallback` (normally the system
-    /// `systemd` actuator). The fallback must already be initialised: [`Plugin::init`] of the
-    /// relay does not forward (the fallback has its own `[plugins.<name>]` config);
-    /// [`Plugin::shutdown`] does.
-    pub fn with_fallback(mut self, fallback: Box<dyn Actuator>) -> Self {
-        self.fallback = Some(fallback);
-        self
+        RelayActuator { table }
     }
 
     /// The shared table.
     pub fn table(&self) -> RelayTable {
         self.table.clone()
-    }
-
-    /// Name of the fallback actuator, if any.
-    pub fn fallback_name(&self) -> Option<String> {
-        self.fallback.as_ref().map(|a| a.info().name)
     }
 
     fn user_of(target: &Target) -> Option<u32> {
@@ -142,8 +118,9 @@ impl RelayActuator {
         }
     }
 
-    fn other(&mut self, target: &Target) -> PluginResult<&mut Box<dyn Actuator>> {
-        self.fallback.as_mut().ok_or_else(|| unsupported_target(NAME, target))
+    /// Only user units are relayed.
+    fn uid(target: &Target) -> PluginResult<u32> {
+        Self::user_of(target).ok_or_else(|| unsupported_target(NAME, target))
     }
 }
 
@@ -156,68 +133,39 @@ fn all_knobs() -> Vec<Knob> {
 
 impl Plugin for RelayActuator {
     fn info(&self) -> PluginInfo {
-        let description = match self.fallback_name() {
-            Some(f) => format!("Relays user-unit settings to session agents; other targets via '{f}'"),
-            None => "Relays user-unit settings to session agents".into(),
-        };
         PluginInfo {
             name: NAME.into(),
             version: env!("CARGO_PKG_VERSION").into(),
             kinds: vec![PluginKind::Actuator],
-            description,
+            description: "Relays user-unit settings to session agents".into(),
         }
     }
 
     fn init(&mut self, _ctx: &InitContext) -> PluginResult<()> {
         Ok(())
     }
-
-    fn shutdown(&mut self) {
-        if let Some(f) = self.fallback.as_mut() {
-            f.shutdown();
-        }
-    }
 }
 
 impl Actuator for RelayActuator {
     fn caps(&self) -> ActuatorCaps {
-        let mut caps = ActuatorCaps { knobs: all_knobs(), targets: vec!["unit".into()] };
-        if let Some(f) = &self.fallback {
-            for t in f.caps().targets {
-                if !caps.targets.contains(&t) {
-                    caps.targets.push(t);
-                }
-            }
-        }
-        caps
+        ActuatorCaps { knobs: all_knobs(), targets: vec!["unit".into()] }
     }
 
-    fn read(&mut self, target: &Target, knob: &Knob) -> PluginResult<Option<Setting>> {
-        match Self::user_of(target) {
-            // The session agent reads and keeps the real original.
-            Some(_) => Ok(None),
-            None => self.other(target)?.read(target, knob),
-        }
+    fn read(&mut self, target: &Target, _knob: &Knob) -> PluginResult<Option<Setting>> {
+        // The session agent reads and keeps the real original.
+        Self::uid(target).map(|_| None)
     }
 
     fn apply(&mut self, target: &Target, setting: &Setting) -> PluginResult<()> {
-        match Self::user_of(target) {
-            Some(uid) => {
-                self.table.record(uid, target, setting, None);
-                Ok(())
-            }
-            None => self.other(target)?.apply(target, setting),
-        }
+        let uid = Self::uid(target)?;
+        self.table.record(uid, target, setting, None);
+        Ok(())
     }
 
-    fn reset(&mut self, target: &Target, knob: &Knob, original: Option<&Setting>) -> PluginResult<()> {
-        match Self::user_of(target) {
-            Some(uid) => {
-                self.table.remove(uid, target, knob);
-                Ok(())
-            }
-            None => self.other(target)?.reset(target, knob, original),
-        }
+    fn reset(&mut self, target: &Target, knob: &Knob, _original: Option<&Setting>) -> PluginResult<()> {
+        let uid = Self::uid(target)?;
+        self.table.remove(uid, target, knob);
+        Ok(())
     }
 }
 
@@ -225,39 +173,6 @@ impl Actuator for RelayActuator {
 mod tests {
     use super::*;
     use lindesk_plugin_api::PluginError;
-
-    /// Records calls; accepts system units only.
-    #[derive(Default)]
-    struct Fake(Arc<Mutex<Vec<String>>>);
-
-    impl Plugin for Fake {
-        fn info(&self) -> PluginInfo {
-            PluginInfo {
-                name: "fake".into(),
-                version: "0".into(),
-                kinds: vec![PluginKind::Actuator],
-                description: String::new(),
-            }
-        }
-    }
-
-    impl Actuator for Fake {
-        fn caps(&self) -> ActuatorCaps {
-            ActuatorCaps { knobs: vec![Knob::CpuWeight], targets: vec!["unit".into(), "cgroup".into()] }
-        }
-        fn read(&mut self, t: &Target, k: &Knob) -> PluginResult<Option<Setting>> {
-            self.0.lock().unwrap().push(format!("read {t} {k}"));
-            Ok(Some(Setting::CpuWeight { value: 100 }))
-        }
-        fn apply(&mut self, t: &Target, s: &Setting) -> PluginResult<()> {
-            self.0.lock().unwrap().push(format!("apply {t} {s}"));
-            Ok(())
-        }
-        fn reset(&mut self, t: &Target, k: &Knob, _o: Option<&Setting>) -> PluginResult<()> {
-            self.0.lock().unwrap().push(format!("reset {t} {k}"));
-            Ok(())
-        }
-    }
 
     #[test]
     fn records_user_units_and_reads_nothing() {
@@ -297,26 +212,12 @@ mod tests {
     }
 
     #[test]
-    fn other_targets_go_to_the_fallback() {
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let mut r = RelayActuator::new().with_fallback(Box::new(Fake(log.clone())));
-        assert_eq!(r.fallback_name().as_deref(), Some("fake"));
-        assert!(r.caps().supports_target(&Target::Cgroup { path: "/x".into() }));
+    fn other_targets_are_unsupported() {
+        let mut r = RelayActuator::new();
         let sys = Target::system_unit("packagekit.service");
-        assert_eq!(r.read(&sys, &Knob::CpuWeight).unwrap(), Some(Setting::CpuWeight { value: 100 }));
-        r.apply(&sys, &Setting::CpuWeight { value: 10 }).unwrap();
-        r.reset(&sys, &Knob::CpuWeight, None).unwrap();
-        r.apply(&Target::user_unit(5, "a.scope"), &Setting::CpuWeight { value: 10 }).unwrap();
-        assert_eq!(
-            *log.lock().unwrap(),
-            vec![
-                "read system:packagekit.service cpu.weight",
-                "apply system:packagekit.service cpu.weight=10",
-                "reset system:packagekit.service cpu.weight"
-            ]
-        );
-        assert!(r.table().user(5).len() == 1);
-        let mut bare = RelayActuator::new();
-        assert!(matches!(bare.apply(&sys, &Setting::CpuWeight { value: 1 }), Err(PluginError::Unsupported(_))));
+        assert!(matches!(r.read(&sys, &Knob::CpuWeight), Err(PluginError::Unsupported(_))));
+        assert!(matches!(r.apply(&sys, &Setting::CpuWeight { value: 1 }), Err(PluginError::Unsupported(_))));
+        assert!(matches!(r.reset(&sys, &Knob::CpuWeight, None), Err(PluginError::Unsupported(_))));
+        assert!(r.table().snapshot().is_empty());
     }
 }

@@ -9,8 +9,9 @@
 //! result is saved, put into `HostCaps.hardware.latency` (`Engine::set_caps`) and announced
 //! with `Notice { name: "calibration.done" }`.
 
-use std::path::PathBuf;
-
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use lindesk_host::{Engine, StepReport};
@@ -67,6 +68,50 @@ impl IdleGate {
     }
 }
 
+/// Put a saved calibration into the engine's `HostCaps.hardware.latency` and announce it
+/// with `Notice { name: "calibration.done", data: <the map> }`.
+pub fn attach(engine: &mut Engine, map: LatencyMap, path: &Path, now: TimestampMs) {
+    let source = engine.options().host.clone();
+    let mut caps = engine.options().caps.clone();
+    calibrate::attach(&mut caps.hardware, map.clone());
+    engine.set_caps(caps);
+    engine.push_event(Event::Notice {
+        ts: now,
+        name: "calibration.done".into(),
+        source,
+        message: format!(
+            "calibration saved to {}{}",
+            path.display(),
+            if map.noisy { " (noisy: the machine was busy)" } else { "" }
+        ),
+        data: serde_json::to_value(&map).unwrap_or_default(),
+    });
+    tracing::info!("calibration done: {}", path.display());
+}
+
+/// Run a calibration on its own thread, save it to `path` and send the result. `busy` must
+/// already be set by the caller (it guards against two runs at once); it is cleared when
+/// the run ends.
+pub fn spawn_run(
+    roots: Roots,
+    opts: CalibrateOptions,
+    path: PathBuf,
+    busy: Arc<AtomicBool>,
+) -> std::io::Result<tokio::sync::oneshot::Receiver<std::io::Result<LatencyMap>>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let b = busy.clone();
+    let spawned = std::thread::Builder::new().name("lindesk-calibrate".into()).spawn(move || {
+        let r = calibrate::run(&roots, &opts).and_then(|map| calibrate::save(&path, &map).map(|()| map));
+        b.store(false, Ordering::SeqCst);
+        let _ = tx.send(r);
+    });
+    if let Err(e) = spawned {
+        busy.store(false, Ordering::SeqCst);
+        return Err(e);
+    }
+    Ok(rx)
+}
+
 /// Calibration attempts per daemon run.
 pub const MAX_ATTEMPTS: u32 = 3;
 
@@ -79,6 +124,8 @@ pub struct Calibrator {
     /// Quick mode (the standalone session agent).
     pub quick: bool,
     roots: Roots,
+    /// Set while any calibration (this one or a `Calibrate` call) runs.
+    busy: Arc<AtomicBool>,
     running: Option<mpsc::Receiver<Outcome>>,
     disturbed: bool,
     attempts: u32,
@@ -98,11 +145,17 @@ impl Calibrator {
             gate: IdleGate::new(started),
             quick,
             roots,
+            busy: Arc::new(AtomicBool::new(false)),
             running: None,
             disturbed: false,
             attempts: 0,
             finished: false,
         }
+    }
+
+    /// The "a calibration is running" flag, shared with on-demand calibrations.
+    pub fn busy(&self) -> Arc<AtomicBool> {
+        self.busy.clone()
     }
 
     /// True when a calibration result exists already (or we gave up for this run).
@@ -137,6 +190,9 @@ impl Calibrator {
     }
 
     fn start(&mut self) {
+        if self.busy.swap(true, Ordering::SeqCst) {
+            return; // an on-demand calibration is running
+        }
         self.attempts += 1;
         self.disturbed = false;
         let (tx, rx) = mpsc::channel();
@@ -154,6 +210,7 @@ impl Calibrator {
             Ok(_) => self.running = Some(rx),
             Err(e) => {
                 tracing::warn!("cannot start calibration: {e}");
+                self.busy.store(false, Ordering::SeqCst);
                 self.finished = true;
             }
         }
@@ -161,23 +218,13 @@ impl Calibrator {
 
     fn finish_attempt(&mut self, outcome: Option<Outcome>, engine: &mut Engine, now: TimestampMs) {
         self.running = None;
-        let source = engine.options().host.clone();
+        self.busy.store(false, Ordering::SeqCst);
         match outcome {
             Some(Ok(map)) if !self.disturbed => {
                 if let Err(e) = calibrate::save(&self.path, &map) {
                     tracing::warn!("saving calibration to {}: {e}", self.path.display());
                 }
-                let mut caps = engine.options().caps.clone();
-                calibrate::attach(&mut caps.hardware, map.clone());
-                engine.set_caps(caps);
-                engine.push_event(Event::Notice {
-                    ts: now,
-                    name: "calibration.done".into(),
-                    source,
-                    message: format!("calibration saved to {}", self.path.display()),
-                    data: serde_json::to_value(&map).unwrap_or_default(),
-                });
-                tracing::info!("calibration done: {}", self.path.display());
+                attach(engine, map, &self.path, now);
                 self.finished = true;
                 return;
             }

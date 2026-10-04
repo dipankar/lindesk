@@ -119,6 +119,13 @@ impl CompiledOverride {
     }
 }
 
+/// Check that a config's `[[override]]` entries compile (globs valid, `unit` and/or `comm`
+/// given), exactly as [`Engine::new`] and [`Engine::reload_config`] would. Used to validate a
+/// config before a change to it is applied.
+pub fn validate_overrides(config: &Config) -> Result<(), EngineError> {
+    compile_overrides(config).map(|_| ())
+}
+
 fn compile_overrides(config: &Config) -> Result<Vec<CompiledOverride>, EngineError> {
     let glob = |index: usize, g: &Option<String>| -> Result<Option<GlobMatcher>, EngineError> {
         g.as_ref()
@@ -834,13 +841,27 @@ impl Engine {
         resolution
     }
 
-    fn pick_actuator(&self, target: &Target, knob: &Knob) -> Option<usize> {
-        self.registry.actuators.iter().position(|s| {
-            s.meta.is_available() && {
-                let caps = s.plugin.caps();
-                caps.supports_target(target) && caps.supports_knob(knob)
-            }
-        })
+    /// Available actuators whose caps cover the target's kind and the knob, highest
+    /// priority first. Caps only describe target *kinds*; an actuator that can't handle a
+    /// particular target (e.g. a unit of another systemd manager) answers `Unsupported` and
+    /// the engine moves on to the next candidate.
+    fn actuator_candidates(&self, target: &Target, knob: &Knob) -> Vec<usize> {
+        self.registry
+            .actuators
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                s.meta.is_available() && {
+                    let caps = s.plugin.caps();
+                    caps.supports_target(target) && caps.supports_knob(knob)
+                }
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn no_actuator_message(what: String, unsupported: &[String]) -> String {
+        if unsupported.is_empty() { what } else { format!("{what} ({})", unsupported.join("; ")) }
     }
 
     fn execute(&mut self, action: Action, revert_reason: &str, cx: &mut Ctx) {
@@ -868,25 +889,43 @@ impl Engine {
                     cx.actions.push(report);
                     return;
                 }
-                let Some(idx) = self.pick_actuator(&target, &knob) else {
+                // The first candidate that doesn't answer `Unsupported` handles it.
+                let mut unsupported = Vec::new();
+                let mut handled = None;
+                for idx in self.actuator_candidates(&target, &knob) {
+                    let slot = &mut self.registry.actuators[idx];
+                    let name = slot.meta.name.clone();
+                    let mut original = None;
+                    let mut read_error = None;
+                    if first {
+                        match slot.meta.guard(|| slot.plugin.read(&target, &knob)) {
+                            Ok(v) => original = v,
+                            Err(PluginError::Unsupported(why)) => {
+                                unsupported.push(format!("{name}: {why}"));
+                                continue;
+                            }
+                            Err(e) => read_error = Some(format!("reading original {knob}: {e}")),
+                        }
+                    }
+                    match slot.meta.guard(|| slot.plugin.apply(&target, &setting)) {
+                        Err(PluginError::Unsupported(why)) => unsupported.push(format!("{name}: {why}")),
+                        result => {
+                            handled = Some((name, original, read_error, result));
+                            break;
+                        }
+                    }
+                }
+                let Some((actuator, original, read_error, result)) = handled else {
                     report.outcome = ActionOutcome::NoActuator;
-                    let msg = format!("no available actuator supports {knob} on {target}");
+                    let msg = Self::no_actuator_message(
+                        format!("no available actuator supports {knob} on {target}"),
+                        &unsupported,
+                    );
                     self.note(Some(&target), "no_actuator", &provenance.plugin, Some(&knob), msg, true, cx);
                     cx.actions.push(report);
                     return;
                 };
-                let slot = &mut self.registry.actuators[idx];
-                report.actuator = Some(slot.meta.name.clone());
-                let mut original = None;
-                let mut read_error = None;
-                if first {
-                    match slot.meta.guard(|| slot.plugin.read(&target, &knob)) {
-                        Ok(v) => original = v,
-                        Err(e) => read_error = Some(format!("reading original {knob}: {e}")),
-                    }
-                }
-                let result = slot.meta.guard(|| slot.plugin.apply(&target, &setting));
-                let actuator = slot.meta.name.clone();
+                report.actuator = Some(actuator.clone());
                 if let Some(msg) = read_error {
                     self.note(Some(&target), "actuator_error", &actuator, Some(&knob), msg, true, cx);
                 }
@@ -932,26 +971,45 @@ impl Engine {
                 let ok = if dry {
                     report.outcome = ActionOutcome::DryRun;
                     true
-                } else if let Some(idx) = self.pick_actuator(&target, &knob) {
-                    let slot = &mut self.registry.actuators[idx];
-                    report.actuator = Some(slot.meta.name.clone());
-                    match slot.meta.guard(|| slot.plugin.reset(&target, &knob, original.as_ref())) {
-                        Ok(()) => true,
-                        // Nothing left to restore.
-                        Err(PluginError::Gone(_)) => true,
-                        Err(e) => {
-                            let actuator = slot.meta.name.clone();
-                            report.outcome = ActionOutcome::Failed { error: e.to_string() };
-                            let msg = format!("reverting {knob} failed (will retry): {e}");
-                            self.note(Some(&target), "actuator_error", &actuator, Some(&knob), msg, true, cx);
+                } else {
+                    let mut unsupported = Vec::new();
+                    let mut handled = None;
+                    for idx in self.actuator_candidates(&target, &knob) {
+                        let slot = &mut self.registry.actuators[idx];
+                        let name = slot.meta.name.clone();
+                        match slot.meta.guard(|| slot.plugin.reset(&target, &knob, original.as_ref())) {
+                            Err(PluginError::Unsupported(why)) => unsupported.push(format!("{name}: {why}")),
+                            result => {
+                                handled = Some((name, result));
+                                break;
+                            }
+                        }
+                    }
+                    match handled {
+                        Some((name, result)) => {
+                            report.actuator = Some(name.clone());
+                            match result {
+                                Ok(()) => true,
+                                // Nothing left to restore.
+                                Err(PluginError::Gone(_)) => true,
+                                Err(e) => {
+                                    report.outcome = ActionOutcome::Failed { error: e.to_string() };
+                                    let msg = format!("reverting {knob} failed (will retry): {e}");
+                                    self.note(Some(&target), "actuator_error", &name, Some(&knob), msg, true, cx);
+                                    false
+                                }
+                            }
+                        }
+                        None => {
+                            report.outcome = ActionOutcome::NoActuator;
+                            let msg = Self::no_actuator_message(
+                                format!("no available actuator can revert {knob} on {target} (will retry)"),
+                                &unsupported,
+                            );
+                            self.note(Some(&target), "no_actuator", "host", Some(&knob), msg, true, cx);
                             false
                         }
                     }
-                } else {
-                    report.outcome = ActionOutcome::NoActuator;
-                    let msg = format!("no available actuator can revert {knob} on {target} (will retry)");
-                    self.note(Some(&target), "no_actuator", "host", Some(&knob), msg, true, cx);
-                    false
                 };
                 if ok {
                     self.applied.record_reset(&target, &knob);

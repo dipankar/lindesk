@@ -16,7 +16,7 @@ use lindesk_plugin_api::{Event, Level, Privilege, Target};
 use serde_json::{Value, json};
 
 use crate::common::calibration::Calibrator;
-use crate::common::engine_thread::{Hooks, LoopCx, Notification, Reply};
+use crate::common::engine_thread::{Audience, Hooks, LoopCx, Notification, ProfilesView, Reply};
 use crate::common::observe::PolicyMetrics;
 use crate::common::profiles::Profiles;
 use crate::common::setup;
@@ -36,12 +36,14 @@ pub enum BrokerExt {
 
 /// The `SessionState` JSON for `uid` from the engine's applied state. The applied state (not
 /// the relay table) is authoritative: it includes entries adopted from the state file after a
-/// restart and simulated entries in dry-run. The extra `"dry_run"` field tells the agent the
-/// broker is only observing.
+/// restart and simulated entries in dry-run. Extra fields: `"dry_run"` tells the agent the
+/// broker is only observing; `"profile"` is the broker's status `daemon.profile` (in
+/// connected mode the broker's profile is the one in effect, and the agent shows it).
 pub fn session_state_json<'a>(
     uid: u32,
     level: Level,
     dry_run: bool,
+    profile: &Value,
     entries: impl Iterator<Item = &'a Entry>,
 ) -> String {
     let desired = entries
@@ -54,7 +56,42 @@ pub fn session_state_json<'a>(
         .collect();
     let mut v = serde_json::to_value(SessionState { uid, level, desired }).unwrap_or_else(|_| json!({}));
     v["dry_run"] = json!(dry_run);
+    if !profile.is_null() {
+        v["profile"] = profile.clone();
+    }
     v.to_string()
+}
+
+/// The uid owning a cgroup path under `user-<uid>.slice`.
+fn cgroup_user(path: &str) -> Option<u32> {
+    path.split('/').find_map(|c| c.strip_prefix("user-")?.strip_suffix(".slice")?.parse().ok())
+}
+
+/// Who may see a broker event. Events about one user's units or processes go to that user
+/// (and root) only; system-scope events (system units, levels, plugin errors, notices) go to
+/// everyone. An event naming a process whose owner can't be determined is root-only.
+/// `pid_uid` maps a pid to its owner (`/proc`).
+pub fn event_audience(e: &Event, pid_uid: impl Fn(i32) -> Option<u32>) -> Audience {
+    let by_pid = |pid: i32| match pid_uid(pid) {
+        Some(0) => None,
+        Some(uid) => Some(uid),
+        None => Some(0),
+    };
+    let by_target = |t: &Target| match t {
+        Target::Unit { .. } => t.user(),
+        Target::Cgroup { path } => cgroup_user(path),
+        Target::Process { pid } => by_pid(*pid),
+    };
+    match e {
+        Event::Focus { target: Some(t), .. } | Event::Interaction { target: Some(t), .. } => by_target(t),
+        Event::Focus { pid: Some(pid), .. } | Event::Interaction { pid: Some(pid), .. } => by_pid(*pid),
+        // An app id we couldn't resolve to a unit: don't tell other users about it.
+        Event::Focus { .. } | Event::Interaction { .. } => Some(0),
+        Event::ClassSet { target, .. } | Event::ActionApplied { target, .. } | Event::ActionReverted { target, .. } => {
+            by_target(target)
+        }
+        _ => None,
+    }
 }
 
 /// Static facts shown in the status.
@@ -108,7 +145,8 @@ impl BrokerHooks {
     }
 
     fn state(&self, engine: &Engine, uid: u32) -> String {
-        session_state_json(uid, engine.level(), engine.dry_run(), engine.applied().entries())
+        let profile = self.profiles.as_ref().map_or(Value::Null, Profiles::status);
+        session_state_json(uid, engine.level(), engine.dry_run(), &profile, engine.applied().entries())
     }
 
     fn unregister(&mut self, engine: &mut Engine, uid: u32, cx: &mut LoopCx<'_>) {
@@ -154,6 +192,17 @@ impl Hooks for BrokerHooks {
 
     fn epoch(&self, _engine: &Engine) -> (Option<bool>, &'static str) {
         (self.metrics.epoch_active(), "threshold")
+    }
+
+    fn audience(&self, event: &Event) -> Audience {
+        event_audience(event, |pid| crate::common::proc_uid("/proc".as_ref(), pid))
+    }
+
+    fn profiles(&self, engine: &Engine) -> ProfilesView {
+        self.profiles
+            .as_ref()
+            .map(|p| p.view(engine, None))
+            .unwrap_or_else(|| ProfilesView { names: Vec::new(), list: json!([]) })
     }
 
     fn unit_candidates(&self, _engine: &Engine, name: &str) -> Vec<Target> {
@@ -228,7 +277,7 @@ impl Hooks for BrokerHooks {
     fn reload(&mut self, engine: &mut Engine) -> Result<String, String> {
         let profiles = &mut self.profiles;
         let mut apply = |engine: &mut Engine, cfg: Config| match profiles.as_mut() {
-            Some(p) => p.rebase(engine, cfg),
+            Some(p) => p.rebase(engine, cfg, now_ms()),
             None => engine.reload_config(cfg).map_err(|e| e.to_string()),
         };
         setup::reload(engine, &self.config_path, Privilege::System, &*self.prepare, &mut apply)
@@ -365,9 +414,54 @@ mod tests {
         st.record_apply(&Target::user_unit(1000, "a.scope"), &Setting::IoWeight { value: 300 }, None, &p, 1);
         st.record_apply(&Target::user_unit(1001, "b.scope"), &Setting::IoWeight { value: 300 }, None, &p, 1);
         st.record_apply(&Target::system_unit("c.service"), &Setting::IoWeight { value: 30 }, None, &p, 1);
-        let s = SessionState::from_json(&session_state_json(1001, Level::Red, false, st.entries())).unwrap();
+        let profile = json!({"active": "battery", "pinned": true});
+        let text = session_state_json(1001, Level::Red, false, &profile, st.entries());
+        let s = SessionState::from_json(&text).unwrap();
         assert_eq!(s.desired.len(), 1);
         assert_eq!(s.desired[0].target, Target::user_unit(1001, "b.scope"));
         assert_eq!(s.level, Level::Red);
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap()["profile"]["active"], "battery");
+    }
+
+    #[test]
+    fn events_about_a_user_go_to_that_user() {
+        let owner = |pid: i32| match pid {
+            1 => Some(0),
+            4242 => Some(1000),
+            _ => None,
+        };
+        let applied = |target: Target| Event::ActionApplied {
+            ts: 1,
+            target,
+            setting: Setting::CpuWeight { value: 1 },
+            provenance: Default::default(),
+        };
+        assert_eq!(event_audience(&applied(Target::user_unit(1000, "a.scope")), owner), Some(1000));
+        assert_eq!(event_audience(&applied(Target::system_unit("x.service")), owner), None);
+        let cg = Target::Cgroup { path: "/user.slice/user-1001.slice/session-2.scope".into() };
+        assert_eq!(event_audience(&applied(cg), owner), Some(1001));
+        assert_eq!(event_audience(&applied(Target::Cgroup { path: "/system.slice".into() }), owner), None);
+        let focus = |pid: Option<i32>, target: Option<Target>| Event::Focus {
+            ts: 1,
+            pid,
+            app_id: Some("org.example.App".into()),
+            target,
+            source: "dbus".into(),
+        };
+        assert_eq!(event_audience(&focus(Some(4242), None), owner), Some(1000));
+        assert_eq!(event_audience(&focus(Some(1), None), owner), None, "root's processes are system scope");
+        assert_eq!(event_audience(&focus(Some(9), None), owner), Some(0), "unknown owner: root only");
+        assert_eq!(event_audience(&focus(None, None), owner), Some(0), "unresolved app id: root only");
+        assert_eq!(event_audience(&focus(None, Some(Target::user_unit(7, "x.scope"))), owner), Some(7));
+        let level = Event::LevelChanged { ts: 1, from: Level::Green, to: Level::Red, policy: "threshold".into() };
+        assert_eq!(event_audience(&level, owner), None);
+        let notice = Event::Notice {
+            ts: 1,
+            name: "change.applied".into(),
+            source: "changes".into(),
+            message: String::new(),
+            data: Value::Null,
+        };
+        assert_eq!(event_audience(&notice, owner), None);
     }
 }

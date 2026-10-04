@@ -15,6 +15,7 @@ lindesk-host.workspace = true
 lindesk-builtins.workspace = true
 lindesk-sys.workspace = true
 lindesk-ipc.workspace = true
+lindesk-changes.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

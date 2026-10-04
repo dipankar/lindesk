@@ -406,3 +406,51 @@ fn engine_skips_a_crashing_external_policy() {
     let h = e.registry().plugin_health("dies").unwrap();
     assert!(h.detail.unwrap().contains("2 failures"));
 }
+
+/// `a` relative to `base` (both absolute).
+fn relative_to(a: &std::path::Path, base: &std::path::Path) -> std::path::PathBuf {
+    let a: Vec<_> = a.components().collect();
+    let b: Vec<_> = base.components().collect();
+    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let mut out = std::path::PathBuf::new();
+    for _ in common..b.len() {
+        out.push("..");
+    }
+    for c in &a[common..] {
+        out.push(c.as_os_str());
+    }
+    out
+}
+
+/// A plugin given by a relative path (`lindeskctl plugin test steam-games`) runs inside its
+/// directory: its relative `exec` must be resolved exactly once (it used to become
+/// `steam-games/steam-games/steam_games.py`).
+#[test]
+fn relative_plugin_path_resolves_exec_once() {
+    let base = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let body = "@lp.classifier\ndef classify(proc):\n    return None\n";
+    let dir = write_plugin(base.path(), "rel-plugin", &["classifier"], &python_sdk_script(body), "");
+    let real = std::fs::canonicalize(&dir).unwrap();
+    let rel = relative_to(&real, &std::env::current_dir().unwrap());
+    assert!(rel.is_relative() && rel.join("plugin.toml").is_file(), "{}", rel.display());
+
+    for path in [rel.clone(), rel.join("plugin.toml")] {
+        let d = discovery::inspect_dev(&path).unwrap();
+        assert_eq!(d.dir, real, "{}", path.display());
+        assert_eq!(d.manifest_path, real.join("plugin.toml"));
+        assert_eq!(d.exec, real.join("plugin"));
+    }
+
+    // Conformance (`lindeskctl plugin test <relative dir>`) starts the plugin.
+    let report = lindesk_host::run_conformance(&rel);
+    let init = report.checks.iter().find(|c| c.name.starts_with("initialize handshake")).expect("handshake check");
+    assert!(init.ok, "{:?}; logs: {:?}", init.detail, report.logs);
+
+    // So does an ExternalPlugin built from a relative directory and a relative `exec`.
+    let d = discovery::inspect_dev(&rel).unwrap();
+    let mut p = ExternalPlugin::new(d.manifest, &rel, ctx(), ExternalOptions::default());
+    assert!(p.dir().is_absolute());
+    p.start().unwrap_or_else(|e| panic!("start: {e}; logs: {:?}", p.recent_logs()));
+    assert_eq!(Classifier::classify(&mut p, &proc_info("x")).unwrap(), None);
+    p.shutdown();
+}

@@ -14,7 +14,8 @@ async fn qos_api_standalone_dry_run() {
     let tmp = fast_tempdir();
     let bus = Bus::session();
     let dir = |d: &str| tmp.path().join(d).display().to_string();
-    let (state, tel, cfg, xdg) = (dir("state"), dir("telemetry"), dir("none.toml"), dir("xdg"));
+    let (state, tel, cfg, xdg, xdg_state) =
+        (dir("state"), dir("telemetry"), dir("none.toml"), dir("xdg"), dir("xdg-state"));
     let mut agent = Daemon::spawn(
         "lindesk-session",
         &session_bin(),
@@ -34,6 +35,7 @@ async fn qos_api_standalone_dry_run() {
             ("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/nonexistent/lindesk-test"),
             ("XDG_CONFIG_HOME", &xdg),
             ("XDG_DATA_HOME", &xdg),
+            ("XDG_STATE_HOME", &xdg_state),
         ],
     );
     let conn = connect(&bus.address).await;

@@ -21,7 +21,7 @@ when you change one of these contracts.
 | `lindesk-sys` | core | Probe, cgroupfs, procfs, PSI, syscalls, block devices, iocost. Every function takes explicit roots (`/sys`, `/proc`) so tests run on fixtures. |
 | `lindesk-host` | core | Plugin discovery/supervision, stdio transport, the `Engine` pipeline, conformance tests, scaffolding templates. |
 | `lindesk-builtins` | core, sys, store | Built-in plugins (`policy/`, `classifier/`, `sensors/`, `actuators/`, `adapters/`, `sinks/`). |
-| `lindesk-store` | plugin-api, arrow/parquet | Telemetry *writer* only. No DuckDB. |
+| `lindesk-store` | plugin-api, arrow, vortex | Telemetry *writer* only (Vortex files, async low-priority writer thread). No DuckDB. |
 | `lindesk-query` | duckdb | Telemetry *reader and maintainer*: query, catalog, compact, rollup, prune, delete. |
 | `lindesk-ipc` | zbus | D-Bus interfaces (below) and polkit checks. |
 | `lindesk-plugin` | plugin-api | Rust SDK for external plugins. |
@@ -36,6 +36,8 @@ when you change one of these contracts.
 | Applied state | `/run/lindesk/state.json` | `$XDG_RUNTIME_DIR/lindesk/state.json` |
 | Telemetry | `/var/lib/lindesk/telemetry/` (0750 root:lindesk) | `$XDG_STATE_HOME/lindesk/telemetry/` (0700) |
 | DuckDB catalog | `/var/lib/lindesk/catalog.duckdb` | `$XDG_STATE_HOME/lindesk/catalog.duckdb` |
+| Versioned changes | `/var/lib/lindesk/changes/` (`<state-dir>/changes/` when not root) | `$XDG_STATE_HOME/lindesk/changes/` |
+| Calibration | `/var/lib/lindesk/calibration.json` (`<state-dir>/calibration.json` when not root) | `$XDG_STATE_HOME/lindesk/calibration.json` |
 
 ## D-Bus
 
@@ -57,8 +59,10 @@ to the agent's uid.
 | `Status()` | → `s` | Status JSON (below). |
 | `Explain(what)` | `s` → `s` | Explanation JSON (below). `InvalidArgs` when `what` doesn't parse. |
 | `RecentEvents(n)` | `u` → `s` | JSON array of the last `n` events (ring of 500, oldest first). |
+| control plane | | `PlanChange`, `ApplyChange`, `ConfirmChange`, `RevertChange`, `ListChanges`, `GetChange`, `ListProfiles`, `SetProfile`, `GetHardware`, `SwapReport` as in [CONTROL-PLANE.md §5](CONTROL-PLANE.md), user scope (the user's `lindesk.toml`, store `$XDG_STATE_HOME/lindesk/changes`). Callers whose uid isn't the agent's get `AccessDenied`. |
 | signal `LevelChanged(level)` | `s` | `green|yellow|red`. |
 | signal `Events(json)` | `s` | JSON array of the events of one engine step (at most 100 per signal). |
+| signal `ChangeEvent(json)` | `s` | ChangeSet JSON of every changeset transition (applied, confirmed, reverted, expired, failed). |
 
 In connected mode every focus/interaction/class call (and every built-in adapter event) also
 goes to the broker (`ReportForeground` with `pid = 0` for app ids, `Interaction`,
@@ -78,13 +82,39 @@ is asked non-interactively unless the call has `ALLOW_INTERACTIVE_AUTHORIZATION`
 | `SetClass(pid, class)` | `is` → | own pid: polkit `org.lindesk.set-class-own`; other users' pids: `org.lindesk.set-class-any` |
 | `GetStatus()` | → `s` | none |
 | `Explain(what)` | `s` → `s` | none |
-| `RecentEvents(n)` | `u` → `s` | none |
+| `RecentEvents(n)` | `u` → `s` | none; **filtered by caller**: root gets every event, other users the system-scope events plus the events about their own units and processes |
 | `Reload()` | → | polkit `org.lindesk.manage` |
+| `PlanChange`, `ListChanges`, `GetChange`, `ListProfiles`, `GetHardware`, `SwapReport` | see [CONTROL-PLANE.md §5](CONTROL-PLANE.md) | none (no side effects) |
+| `ApplyChange`, `ConfirmChange`, `RevertChange`, `SetProfile` | see [CONTROL-PLANE.md §5](CONTROL-PLANE.md) | polkit `org.lindesk.manage`; system scope (`/etc/lindesk/lindesk.toml` = `--config`, kernel tunables) |
+| `Calibrate()` / `CalibrateWith(options_json)` | → `s` / `s` → `s` | polkit `org.lindesk.manage`. Runs `lindesk_sys::calibrate::run` on a helper thread (one at a time; `Failed` while another runs), saves it, attaches it to `HostCaps.hardware.latency` and emits `calibration.done`; returns the `LatencyMap` JSON. Options: `quick` (`CalibrateRequest`), and broker extensions `force` (default true: a busy machine gives a map flagged `noisy`) and `storage` (default true; false skips the disk phase). Also in dry-run (it measures, it changes nothing). |
 | signal `UserState(uid, json)` | `us` | **Unicast** to each registered agent of `uid` (other users never receive it). JSON `SessionState` (`lindesk-ipc`): `{"uid":..., "level": ..., "desired": [{"target":..., "setting":..., "provenance":...}], "dry_run": bool}`: the complete desired set for that user's units. Sent when it changes and every 30 s as a heartbeat. |
-| signal `Events(json)` | `s` | Broadcast. JSON array of the events of one broker step, system and all users' units (at most 100 per signal). |
+| signal `Events(json)` | `s` | JSON array of events of one broker step (at most 100 per signal). **System-scope events are broadcast; events about one user's units or processes are unicast to that user's registered session agents only** (below). |
+| signal `ChangeEvent(json)` | `s` | Broadcast. ChangeSet JSON of every system-scope changeset transition. |
 
 `LINDESK_INSECURE_NO_POLKIT=1` makes `lindeskd` skip polkit (pid ownership checks remain).
 It exists for tests on private buses and is **ignored when `lindeskd` runs as root**.
+
+**Event privacy.** The broker sees every user's units, so its events are split by audience
+(`event_audience` in `lindeskd/src/broker.rs`): an event whose target is a user unit
+(`user/<uid>:…`), a cgroup under `user-<uid>.slice`, or a process of that uid (`focus`,
+`interaction`, `class_set`, `action_applied`, `action_reverted`) belongs to that uid; a
+process owned by root, a system unit, `level`, `plugin_error` and daemon notices
+(`profile.changed`, `change.*`, `calibration.done`, …) are system scope; an event whose
+owner can't be determined (unresolved app id, vanished pid) is root-only. The `Events`
+signal carries one audience per emission: system scope is broadcast, a user's events go
+unicast (D-Bus destination set) to each registered session agent of that uid, so neither
+other users nor unregistered clients of the same user receive them. `RecentEvents` applies
+the same rule to the caller's uid (root sees everything). The session agent's own `Events`
+on the session bus only ever contains its user's events.
+
+**Errors of the control-plane members** (both buses): a guardrail refusal (unknown key,
+out-of-range value, rate limit, ttl required, revert conflict, invalid state) is
+`org.lindesk.Error.Rejected` with the human-readable reasons as the message (lindesk-mcp
+maps it to `rejected`); an unknown changeset id is `org.lindesk.Error.NotFound`; other
+failures are `org.lindesk.Error.Failed`; malformed `ops_json` is
+`org.freedesktop.DBus.Error.InvalidArgs`; authorization failures are
+`org.freedesktop.DBus.Error.AccessDenied`. An apply whose writes failed (and were rolled
+back) is not an error: it returns the changeset with `status: "failed"` and `error`.
 
 A session agent is unregistered when its unique name leaves the bus; when it was the user's
 last agent the broker stops watching that user's units and *forgets* (does not revert) the
@@ -100,7 +130,10 @@ increases by one per event for the lifetime of the daemon process, so a client c
 events carry a provenance reason starting with `"dry run: "`. Daemon notices (`kind:
 "notice"`, `name`): `requirements.warning` (one per start-up warning, `data` = the
 requirement), `hardware.power` (`data: {from, to}` when AC/battery changes),
-`setup.desktop_integration` (`data: {action, desktop}`).
+`setup.desktop_integration` (`data: {action, desktop}`), `profile.changed` (`data: {from,
+to, reason, pinned}`), `calibration.done` (`data` = the `LatencyMap`), `change.applied`,
+`change.confirmed`, `change.reverted`, `change.expired`, `change.failed` (`data` = the
+changeset).
 
 **Status** (`Status`, `GetStatus`):
 
@@ -117,7 +150,9 @@ requirement), `hardware.power` (`data: {from, to}` when AC/battery changes),
     "steps": 50,
     "degraded": ["no PSI: …"],           // why the daemon runs with less than everything
     "rules": "system" | "embedded" | "configured", // where the vendor rules come from
-    "profile": {"active": "x86-hybrid", "setting": "auto", "pinned": false, "reason": "x86_64 hybrid CPU"},
+    "profile": {"active": "x86-hybrid", "setting": "auto", "pinned": false, "reason": "x86_64 hybrid CPU",
+                "matched": ["x86-hybrid"],    // profiles whose [match] holds now, best first
+                "source": "local" | "broker"}, // lindesk-session only; "broker" adds "local": {…}
     // lindeskd only:
     "sessions": [1000],                  // uids with a registered agent
     "support_level": "FULL", "backend": "systemd",
@@ -174,12 +209,16 @@ source re-probe → `Engine::set_caps`).
 `lindeskd [--config /etc/lindesk/lindesk.toml] [--state-dir /run/lindesk] [--telemetry-dir DIR]
 [--dry-run] [--log-level FILTER] [--restore] [--no-dbus]`
 
-Startup: requirements check (failures exit 78), probe, warn about running conflicting
-daemons, iocost (below), engine with `psi`, `cgroup-stat`, `rules`, `threshold`, the `relay`
-actuator (wrapping the backend's unit actuator, normally `systemd`, as its fallback for
-system units; the engine picks actuators by target kind only), the other backend actuators,
-`parquet-store` and discovered system plugins; load `state.json`; first step;
-`sd_notify(READY=1)` after the bus name is owned. `WATCHDOG=1` is sent at half of
+Startup: open the system change store and `recover()` interrupted changesets (before the
+config is read), requirements check (failures exit 78), probe, warn about running
+conflicting daemons, iocost (below), load a saved calibration into `HostCaps`, select the
+profile, engine with `psi`, `cgroup-stat`, `rules`, `threshold`, the `relay` actuator, the
+backend's actuators (normally `systemd` on the system bus, then `proc`), `parquet-store`
+and discovered system plugins; load `state.json`; first step; `sd_notify(READY=1)` after
+the bus name is owned. The engine asks the available actuators whose caps cover the
+target's kind and the knob in priority order and moves on to the next one when an actuator
+answers `Unsupported` (the relay for anything but user units, `systemd` for units of
+another manager); `Unsupported` is not counted as a plugin error. `WATCHDOG=1` is sent at half of
 `WATCHDOG_USEC` only while the engine loop is alive. On `SIGTERM`: `Engine::shutdown()`
 restores everything, then iocost is restored.
 
@@ -209,7 +248,7 @@ Modes (a pure state machine in `lindesk-session/src/mode.rs`):
 
 | Mode | When | Active |
 |---|---|---|
-| connected | `RegisterSession` succeeded | `broker` relay policy (priority 50, reason `broker: <plugin>: <reason>`, the broker's level) |
+| connected | `RegisterSession` succeeded | `broker` relay policy (priority 50, provenance plugin `broker` with reason `<plugin>: <reason>`, shown by explain as `broker: <plugin>: <reason>`; the broker's level) |
 | standalone | no broker, it vanished, registration failed, or `--standalone` | `psi` (2 s trigger windows unless configured), `threshold` |
 
 Both modes run `cgroup-stat`, `rules`, the `systemd` actuator on the user manager,
@@ -259,19 +298,48 @@ is installed, `kwriteconfig6 --file kwinrc --group Plugins --key lindeskEnabled 
 (a user who disables it later stays disabled); nothing is recorded while the integration
 isn't installed. Missing tools are not errors.
 
-**First-run calibration**: the broker (and a standalone agent, quick mode) waits for the first
-idle period (global PSI `some` < 5 % for 2 min, ≥ 3 min after start, on AC, no interaction
-or focus change) and then calibrates once (`/var/lib/lindesk/calibration.json`,
-`$XDG_STATE_HOME/lindesk/calibration.json`) with `lindesk_sys::calibrate::run` on a helper
-thread. A run during which the user became active or pressure rose is discarded and retried
-at the next idle period (3 attempts per daemon run). The result goes into
-`HostCaps.hardware.latency` and a `calibration.done` notice; a saved result is loaded at
-start-up. Not in dry-run.
+**First-run calibration** (`common/calibration.rs`): the broker (and a standalone agent,
+quick mode) waits for the first idle period (global PSI `some` < 5 % for 2 min, ≥ 3 min
+after start, not on battery, no interaction epoch, focus or interaction event) and then
+calibrates once (`/var/lib/lindesk/calibration.json`, `$XDG_STATE_HOME/lindesk/calibration.json`)
+with `lindesk_sys::calibrate::run` on a helper thread. The run can't be interrupted, so a run
+during which the user became active, the machine went on battery or pressure rose is
+discarded and retried at the next idle period (3 attempts per daemon run). The result goes
+into `HostCaps.hardware.latency` and a `calibration.done` notice; a saved result is loaded at
+start-up and suppresses the first run. Not in dry-run. It shares a "busy" flag with the
+broker's `Calibrate`, so the two never run at once.
 
-**Profiles**: `[general] profile = "auto"` (default) re-evaluates `lindesk_core::profile` on
-every step (power, hardware, foreground app id, 10 s dwell); a switch reloads the engine with
-`base ⊕ profile chain` (built-in sensors/classifiers/policies whose `[plugins.<name>] config`
-changed are re-initialised) and emits `profile.changed`. Status `daemon.profile` shows it.
+**Profiles** (`common/profiles.rs`): both daemons load a `ProfileSet` (built-ins, then
+`default_dirs`: `/usr/share` and `/etc` for the broker, plus the user's for the agent) at
+start-up and again on every reload. `[general] profile = "auto"` (default) re-evaluates
+`ProfileSelector::update` after every step against a `ProfileContext` from
+`HostCaps.hardware` and the foreground unit's app id (10 s dwell); `[general] profile =
+"<name>"` pins one (no auto-selection). A switch reloads the engine with `base ⊕ profile
+chain` (built-in sensors/classifiers/policies whose `[plugins.<name>] config` changed are
+re-initialised) and pushes `profile.changed` into the engine's events (so it reaches
+`Events`, the lake and `lindeskctl events`). A reload (SIGHUP, `Reload`, or a versioned
+change to the config file, e.g. `SetProfile`) re-runs the selection immediately, so a pin or
+unpin takes effect at once. Status `daemon.profile` is `{active, setting, pinned, reason,
+matched}`. In connected mode the broker's profile is the one that matters: the broker sends
+its `daemon.profile` in every `SessionState` (`"profile"`), the agent pauses its own
+auto-selection, and its status shows the broker's (`"source": "broker"`, own under
+`"local"`); `ListProfiles` marks the broker's as active.
+
+**Versioned changes** (`common/control.rs`, [CONTROL-PLANE.md §4](CONTROL-PLANE.md)): each
+daemon owns one `ChangeStore` (broker: system scope, `/var/lib/lindesk/changes`, editing
+`--config`; agent: user scope, `$XDG_STATE_HOME/lindesk/changes`, editing its config file),
+opened and `recover()`ed before the config is read and before D-Bus is served. Store
+operations run on tokio's blocking pool (they `fsync`), never on the reactor or the engine
+thread. The guardrail context has the profile names (`with_profiles`), the hardware from
+`HostCaps` and a config validator (`lindesk_builtins::validate::config`: `[[override]]`
+globs, and the configs of the built-in `threshold`, `psi`, `rules`, `systemd`, `x11`,
+`cosmic` plugins, so an unknown plugin key or out-of-range value is rejected). After a
+changeset that touched the config file (apply, revert, expiry) the daemon reloads config and
+profiles. A dead-man task sleeps until `next_expiry()` (at most 60 s, re-armed after every
+apply/confirm/revert) and calls `expire_due`. Every transition is sent as `ChangeEvent` and
+pushed as a `change.*` notice into the engine's events. Authorship: the caller's uid and
+unique bus name, plus `origin`/`client` from the ops envelope (`mcp` → `Mcp`, `cli` or
+`lindeskctl` → `Cli`, anything else → `Dbus`).
 
 **Hardware**: every 30 s the daemons re-detect the power source and, on a change, update the
 engine's `HostCaps` (`Engine::set_caps`) and emit `hardware.power`.
@@ -280,17 +348,25 @@ engine's `HostCaps` (`Engine::set_caps`) and emit `hardware.power`.
 
 Both interfaces are thin: each method maps to one engine command (`Command` in
 `engine_thread.rs`; daemon-specific ones in `BrokerExt` / `SessionExt`) and awaits its reply
-on a oneshot channel, or reads the `Published` snapshot. New members (the control-plane
-methods in CONTROL-PLANE.md §5) are one `#[interface]` method plus, when they need the engine,
-one command variant handled on the engine thread.
+on a oneshot channel, or reads the `Published` snapshot. New members are one `#[interface]`
+method plus, when they need the engine, one command variant handled on the engine thread.
+The control-plane members (CONTROL-PLANE.md §5) are implemented once in
+`common/control.rs` (`Control`, `CtlError`) and called from both interfaces after the
+interface's own authorization (polkit on the system bus, same-uid on the session bus);
+they use the generic `Hardware`, `Profiles` and `Calibrated` commands and `Reload`.
 
 ### Operational notes
 
 * The state directory must be on tmpfs (the defaults `/run/lindesk`, `$XDG_RUNTIME_DIR/lindesk`
   are): the applied state is rewritten on every change, and on a saturated ext4 disk a
   rename-over can stall the engine thread for seconds.
-* Sinks run on the engine thread; the `parquet-store` flush (every `[telemetry] flush`) and the
-  final flush at shutdown are synchronous. Steps or bookkeeping slower than 1 s are logged as
+* Sinks run on the engine thread, but `parquet-store` (which writes Vortex; the name is kept
+  for config compatibility) only enqueues into a bounded queue: a writer thread at idle I/O
+  priority and nice 10 encodes, fsyncs and renames, dropping the oldest rows (counted in the
+  `telemetry_dropped_rows` metric) when it cannot keep up. Flush and shutdown wait at most
+  `flush_timeout` (default 5 s). The daemons add no flush of their own: at shutdown the
+  engine thread runs `Engine::shutdown` (restore, one `flush()` per sink, plugin shutdown)
+  and nothing else touches the sink. Steps or bookkeeping slower than 1 s are logged as
   `slow engine step` with per-stage timings.
 
 ### Logging
@@ -298,6 +374,16 @@ one command variant handled on the engine thread.
 journald when `JOURNAL_STREAM` is set (syslog identifier = binary name), else stderr. Filter:
 `--log-level`, else `RUST_LOG`, else `info`. Every applied/reverted action is logged at info
 (target `lindesk::action`), resolver notes at debug.
+
+Plugin log lines (external plugins' `log` notifications and stderr, re-logged by
+`lindesk-host`, and built-ins logging with a `plugin` field) carry the tracing field
+`plugin = <name>`. `tracing-journald` (0.3) upper-cases field names and prefixes every
+field except `message` with its field prefix, which the daemons leave at the default `F`
+(`common/logging.rs` sets it explicitly), so the journal field is **`F_PLUGIN=<name>`**
+(also `F_SOURCE` for the stream); `TARGET`, `CODE_FILE` and `CODE_LINE` are unprefixed. Filter
+with `journalctl -u lindeskd F_PLUGIN=<name>` (`--user -u lindesk-session` for user
+plugins); `lindeskctl plugin logs` matches `F_PLUGIN` (and `PLUGIN`, for a build without
+the prefix).
 
 ## Intent priority
 

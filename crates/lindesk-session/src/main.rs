@@ -43,6 +43,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::common::Signals;
 use crate::common::calibration::Calibrator;
+use crate::common::control::Control;
 use crate::common::defaults::ensure_rules;
 use crate::common::engine_thread::{self, EngineHandle, Notification};
 use crate::common::observe::Observed;
@@ -159,10 +160,36 @@ fn default_psi_config(config: &mut Config) {
     }
 }
 
+/// `$XDG_STATE_HOME/lindesk/changes` (or `~/.local/state/...`).
+fn changes_dir() -> Option<PathBuf> {
+    xdg("XDG_STATE_HOME", ".local/state").map(|d| d.join("lindesk/changes"))
+}
+
 fn run(cli: Cli, uid: u32) -> anyhow::Result<()> {
     let config_path = cli.config_path();
     let state_dir = cli.state_dir(uid);
     std::fs::create_dir_all(&state_dir).with_context(|| format!("creating {}", state_dir.display()))?;
+    // The engine's command queue exists before the engine: the change store reports
+    // recovered changesets into it.
+    let (handle, inbox) = engine_thread::channel()?;
+    let (change_tx, change_rx) = unbounded_channel();
+    let mut control_error = None;
+    let control =
+        match changes_dir().ok_or_else(|| "neither XDG_STATE_HOME nor HOME is set".to_string()).and_then(|dir| {
+            Control::open(&dir, lindesk_changes::Scope::User, config_path.clone(), handle.clone(), change_tx)
+                .map_err(|e| e.to_string())
+        }) {
+            Ok(c) => {
+                // Before the config is read: a rolled-back changeset may have restored it.
+                c.recover();
+                Some(Arc::new(c))
+            }
+            Err(e) => {
+                tracing::error!("versioned changes unavailable: {e}");
+                control_error = Some(format!("versioned changes unavailable: {e}"));
+                None
+            }
+        };
     let prepare = {
         let (dry, tel, state) = (cli.dry_run, cli.telemetry_dir.clone(), state_dir.clone());
         move |c: &mut Config| {
@@ -229,6 +256,7 @@ fn run(cli: Cli, uid: u32) -> anyhow::Result<()> {
     hooks.requirements = requirements.clone();
     hooks.rules_source = rules_source.as_str();
     hooks.degraded = degraded_reasons(&probe, uid);
+    hooks.degraded.extend(control_error);
     hooks.calibrator = calibration.map(|p| Calibrator::new(p, roots.clone(), lindesk_core::clock::now_ms(), true));
     hooks.set_mode(initial_mode, initial_state.as_deref(), config.general.dry_run);
     {
@@ -259,7 +287,6 @@ fn run(cli: Cli, uid: u32) -> anyhow::Result<()> {
 
     requirement_notices(&mut engine, &requirements);
 
-    let (handle, inbox) = engine_thread::channel()?;
     let (fwd_tx, fwd_rx) = unbounded_channel::<Forward>();
     if !cli.no_adapters {
         hooks.adapters = start_adapters(&engine, &config, &handle, fwd_tx.clone());
@@ -290,8 +317,8 @@ fn run(cli: Cli, uid: u32) -> anyhow::Result<()> {
     );
     desktop_integration(&config, &handle);
 
-    let served =
-        rt.block_on(serve(uid, handle.clone(), notes, sys_conn, initial_mode, cli.standalone, fwd_tx, fwd_rx, signals));
+    let links = Links { sys_conn, initial_mode, standalone: cli.standalone, fwd_tx, fwd_rx };
+    let served = rt.block_on(serve(uid, handle.clone(), notes, links, signals, control, change_rx));
     handle.shutdown();
     if join.join().is_err() {
         tracing::error!("the engine thread panicked");
@@ -395,20 +422,31 @@ fn start_adapters(
     running
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn serve(
-    uid: u32,
-    handle: EngineHandle<SessionExt>,
-    mut notes: UnboundedReceiver<Notification>,
+/// The broker link's pieces.
+struct Links {
     sys_conn: Option<zbus::Connection>,
     initial_mode: Mode,
     standalone: bool,
     fwd_tx: tokio::sync::mpsc::UnboundedSender<Forward>,
     fwd_rx: UnboundedReceiver<Forward>,
+}
+
+async fn serve(
+    uid: u32,
+    handle: EngineHandle<SessionExt>,
+    mut notes: UnboundedReceiver<Notification>,
+    links: Links,
     signals: Signals,
+    control: Option<Arc<Control<SessionExt>>>,
+    mut changes: UnboundedReceiver<String>,
 ) -> anyhow::Result<()> {
     let Signals { mut term, mut int, mut hup } = signals;
-    let iface = dbus::QoS { engine: handle.clone(), uid, forward: fwd_tx, coalesce: Mutex::new(Default::default()) };
+    let Links { sys_conn, initial_mode, standalone, fwd_tx, fwd_rx } = links;
+    if let Some(c) = &control {
+        tokio::spawn(c.clone().run_expiry());
+    }
+    let iface =
+        dbus::QoS { engine: handle.clone(), uid, forward: fwd_tx, coalesce: Mutex::new(Default::default()), control };
     let built = match zbus::connection::Builder::session() {
         Ok(b) => b.serve_at(QOS_PATH, iface)?.build().await,
         Err(e) => Err(e),
@@ -447,11 +485,14 @@ async fn serve(
                     }
                 });
             }
+            Some(json) = changes.recv() => {
+                if let Some(c) = &conn { dbus::emit_change_event(c, &json).await; }
+            }
             n = notes.recv() => match n {
                 Some(Notification::LevelChanged(level)) => {
                     if let Some(c) = &conn { dbus::emit_level(c, level.as_str()).await; }
                 }
-                Some(Notification::Events(json)) => {
+                Some(Notification::Events { json, .. }) => {
                     if let Some(c) = &conn { dbus::emit_events(c, &json).await; }
                 }
                 Some(Notification::UserState { .. }) => {}

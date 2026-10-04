@@ -2,6 +2,7 @@
 //! directory with `#[path]`, so there is one copy without an extra crate).
 
 pub mod calibration;
+pub mod control;
 pub mod defaults;
 pub mod engine_thread;
 pub mod logging;
