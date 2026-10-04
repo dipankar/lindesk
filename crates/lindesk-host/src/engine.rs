@@ -318,11 +318,19 @@ impl Engine {
     }
 
     /// Swap in a new config: overrides, safety caps, dry-run and telemetry settings apply
-    /// immediately and every target is reclassified. Plugin enable/priority changes apply
-    /// to plugins registered afterwards.
+    /// immediately and every target is reclassified. Built-in sensors, classifiers and
+    /// policies whose `[plugins.<name>] config` changed are re-initialised with it (profile
+    /// switches rely on this). Plugin enable/priority changes apply to plugins registered
+    /// afterwards.
     pub fn reload_config(&mut self, config: Config) -> Result<(), EngineError> {
         self.overrides = compile_overrides(&config)?;
         self.registry.set_plugin_config(&config);
+        for (name, r) in self.registry.reconfigure_builtins(&self.config, &config) {
+            match r {
+                Ok(()) => tracing::info!(plugin = %name, "re-initialised with its new config"),
+                Err(e) => tracing::warn!(plugin = %name, "re-initialising with the new config failed: {e}"),
+            }
+        }
         self.config = config;
         for st in self.targets.values_mut() {
             st.dirty = true;
@@ -391,6 +399,25 @@ impl Engine {
     /// What lindesk currently has applied (simulated in `dry_run`).
     pub fn applied(&self) -> &AppliedState {
         &self.applied
+    }
+
+    /// Replace the host capabilities (e.g. the power source changed). Policies see the new
+    /// caps in the next snapshot; plugins registered afterwards get them in `initialize`.
+    pub fn set_caps(&mut self, caps: HostCaps) {
+        self.registry.set_caps(caps.clone());
+        self.opts.caps = caps;
+    }
+
+    /// Latest system-wide PSI sample per resource (what policies saw on the last step).
+    pub fn system_pressure(&self) -> Vec<Sample> {
+        self.system_pressure.values().cloned().collect()
+    }
+
+    /// Latest PSI samples measured inside a known target's own cgroup, and that cgroup.
+    pub fn target_pressure(&self, target: &Target) -> Option<(String, Vec<Sample>)> {
+        let cg = self.targets.get(target)?.cgroup.clone()?;
+        let samples = self.cgroup_pressure.get(&cg).map(|m| m.values().cloned().collect()).unwrap_or_default();
+        Some((cg, samples))
     }
 
     /// The class of a known target.

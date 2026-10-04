@@ -11,3 +11,21 @@ authors.workspace = true
 [dependencies]
 lindesk-plugin-api.workspace = true
 lindesk-core.workspace = true
+lindesk-host.workspace = true
+lindesk-builtins.workspace = true
+lindesk-sys.workspace = true
+lindesk-ipc.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-journald.workspace = true
+tokio.workspace = true
+zbus.workspace = true
+rustix.workspace = true
+futures-util = { version = "0.3", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true

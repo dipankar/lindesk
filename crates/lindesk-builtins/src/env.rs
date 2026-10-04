@@ -7,6 +7,9 @@
 //!   (including `docker-*.scope`, in nested slices too), `user.slice` as a whole and
 //!   `machine.slice` children. Processes map to system units and to user units; the latter
 //!   are relayed to the owning user's session agent rather than actuated by the broker.
+//!   With a [`UserWatch`] ([`SysEnvironment::with_users`]) it also watches the user slices
+//!   of the selected users exactly like [`Mode::User`] does (the broker selects the users
+//!   whose session agent registered).
 //! * [`Mode::User`] (the `lindesk-session` agent) watches its own user manager's
 //!   `session.slice`, `app.slice`, `background.slice` and `lindesk-batch.slice` (when it
 //!   exists), plus every `.service`/`.scope` directly or nested under them, `init.scope`
@@ -15,9 +18,10 @@
 //! The watched set comes from one walk of the cgroup tree and is cached for about one tick
 //! ([`DEFAULT_CACHE_TTL`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use lindesk_core::cgroup_path;
@@ -51,9 +55,109 @@ pub fn user_manager_cgroup(uid: u32) -> String {
     format!("/user.slice/user-{uid}.slice/user@{uid}.service")
 }
 
+/// Which users' managers a [`Mode::System`] environment watches in addition to the system
+/// units: none (the default), a set of uids, or all users with a running user manager.
+///
+/// A cheap, cloneable handle: the daemon keeps one clone and updates it at runtime (for
+/// example when a session agent registers); the environment picks the change up on its next
+/// walk, bypassing the walk cache.
+#[derive(Clone, Debug, Default)]
+pub struct UserWatch(Arc<UserWatchInner>);
+
+#[derive(Debug, Default)]
+struct UserWatchInner {
+    sel: Mutex<UserSelection>,
+    generation: AtomicU64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct UserSelection {
+    all: bool,
+    uids: BTreeSet<u32>,
+}
+
+impl UserWatch {
+    /// Watch no users.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Watch these users.
+    pub fn with_uids(uids: impl IntoIterator<Item = u32>) -> Self {
+        let w = Self::default();
+        w.set(uids);
+        w
+    }
+
+    /// Watch every user that has a `user@UID.service` manager.
+    pub fn all_users() -> Self {
+        let w = Self::default();
+        w.set_all(true);
+        w
+    }
+
+    fn update(&self, f: impl FnOnce(&mut UserSelection)) -> bool {
+        let mut sel = lock(&self.0.sel);
+        let before = sel.clone();
+        f(&mut sel);
+        let changed = *sel != before;
+        if changed {
+            self.0.generation.fetch_add(1, Ordering::SeqCst);
+        }
+        changed
+    }
+
+    /// Watch (or stop watching) all users. Returns true if the selection changed.
+    pub fn set_all(&self, all: bool) -> bool {
+        self.update(|s| s.all = all)
+    }
+
+    /// Replace the explicit uid set. Returns true if the selection changed.
+    pub fn set(&self, uids: impl IntoIterator<Item = u32>) -> bool {
+        let uids: BTreeSet<u32> = uids.into_iter().collect();
+        self.update(|s| s.uids = uids)
+    }
+
+    /// Add one user. Returns true if it was not watched before.
+    pub fn add(&self, uid: u32) -> bool {
+        self.update(|s| {
+            s.uids.insert(uid);
+        })
+    }
+
+    /// Remove one user. Returns true if it was watched explicitly.
+    pub fn remove(&self, uid: u32) -> bool {
+        self.update(|s| {
+            s.uids.remove(&uid);
+        })
+    }
+
+    /// The explicitly selected uids.
+    pub fn uids(&self) -> Vec<u32> {
+        lock(&self.0.sel).uids.iter().copied().collect()
+    }
+
+    /// True when every user is watched.
+    pub fn is_all(&self) -> bool {
+        lock(&self.0.sel).all
+    }
+
+    /// True if `uid`'s units are watched.
+    pub fn includes(&self, uid: u32) -> bool {
+        let sel = lock(&self.0.sel);
+        sel.all || sel.uids.contains(&uid)
+    }
+
+    fn generation(&self) -> u64 {
+        self.0.generation.load(Ordering::SeqCst)
+    }
+}
+
 #[derive(Debug)]
 struct Walk {
     at: Instant,
+    /// [`UserWatch`] generation the walk was made with.
+    generation: u64,
     targets: Vec<WatchedTarget>,
 }
 
@@ -63,6 +167,7 @@ pub struct SysEnvironment {
     roots: Roots,
     mode: Mode,
     systemd: Option<Mutex<SystemdClient>>,
+    users: UserWatch,
     ttl: Duration,
     cache: Mutex<Option<Walk>>,
 }
@@ -74,7 +179,27 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 impl SysEnvironment {
     /// An environment over `roots` for `mode`, without systemd.
     pub fn new(roots: Roots, mode: Mode) -> Self {
-        SysEnvironment { roots, mode, systemd: None, ttl: DEFAULT_CACHE_TTL, cache: Mutex::new(None) }
+        SysEnvironment {
+            roots,
+            mode,
+            systemd: None,
+            users: UserWatch::new(),
+            ttl: DEFAULT_CACHE_TTL,
+            cache: Mutex::new(None),
+        }
+    }
+
+    /// [`Mode::System`] only: also watch the user slices (`session.slice`, `app.slice`,
+    /// `background.slice`, `lindesk-batch.slice`) and their units of the users selected by
+    /// `users`, like [`Mode::User`] does for its own user. Ignored in [`Mode::User`].
+    pub fn with_users(mut self, users: UserWatch) -> Self {
+        self.users = users;
+        self
+    }
+
+    /// The user selection handle (shared with whoever passed it to [`Self::with_users`]).
+    pub fn users(&self) -> &UserWatch {
+        &self.users
     }
 
     /// Use systemd (unit start times and main pids) to rank app-id matches. Without it the
@@ -169,6 +294,12 @@ impl SysEnvironment {
                 }
                 self.walk_units("/machine.slice", &Manager::System, &mut out);
                 slice(&mut out, Manager::System, "/", "lindesk-batch.slice");
+                for uid in self.uids().into_iter().filter(|u| self.users.includes(*u)) {
+                    let base = user_manager_cgroup(uid);
+                    for name in USER_SLICES {
+                        slice(&mut out, Manager::User(uid), &base, name);
+                    }
+                }
             }
         }
         out
@@ -337,13 +468,15 @@ impl Environment for SysEnvironment {
 
     fn watched_targets(&self) -> Vec<WatchedTarget> {
         let mut cache = lock(&self.cache);
+        let generation = self.users.generation();
         if let Some(w) = cache.as_ref()
             && w.at.elapsed() < self.ttl
+            && w.generation == generation
         {
             return w.targets.clone();
         }
         let targets = self.scan();
-        *cache = Some(Walk { at: Instant::now(), targets: targets.clone() });
+        *cache = Some(Walk { at: Instant::now(), generation, targets: targets.clone() });
         targets
     }
 
@@ -569,6 +702,48 @@ mod tests {
             assert!(n.contains(&want.to_string()), "missing {want} in {n:?}");
         }
         assert!(!n.iter().any(|x| x.starts_with("user/") || x.contains("system.slice") || x.contains("session-2")));
+    }
+
+    #[test]
+    fn system_mode_watches_selected_users() {
+        let (_d, f) = host();
+        let watch = UserWatch::new();
+        let e = env(&f, Mode::System).with_users(watch.clone()).with_cache_ttl(Duration::from_secs(60));
+        let n = names(&e.watched_targets());
+        assert!(!n.iter().any(|x| x.starts_with("user/")), "no users by default: {n:?}");
+
+        assert!(watch.add(1000));
+        assert!(!watch.add(1000), "already watched");
+        let n = names(&e.watched_targets());
+        for want in [
+            "system:sshd.service",
+            "user/1000:session.slice",
+            "user/1000:app.slice",
+            "user/1000:background.slice",
+            "user/1000:app-gnome-org.mozilla.firefox-1234.scope",
+            "user/1000:vte-spawn-abc.scope",
+            "user/1000:tracker-miner-fs-3.service",
+        ] {
+            assert!(n.contains(&want.to_string()), "missing {want} in {n:?} (cache must be bypassed)");
+        }
+        assert!(!n.iter().any(|x| x.contains("user/1001") || x.contains("init.scope")));
+
+        assert!(watch.set_all(true));
+        let n = names(&e.watched_targets());
+        assert!(n.contains(&"user/1001:app-gnome-org.mozilla.firefox-1.scope".to_string()), "{n:?}");
+        assert!(watch.includes(4242) && watch.is_all());
+
+        watch.set_all(false);
+        assert!(watch.remove(1000));
+        assert!(watch.uids().is_empty());
+        let n = names(&e.watched_targets());
+        assert!(!n.iter().any(|x| x.starts_with("user/")), "{n:?}");
+        assert_eq!(UserWatch::with_uids([3, 1]).uids(), vec![1, 3]);
+        assert!(UserWatch::all_users().includes(7));
+
+        // User mode ignores the selection.
+        let u = env(&f, Mode::User(1000)).with_users(UserWatch::all_users());
+        assert!(!names(&u.watched_targets()).iter().any(|x| x.contains("1001")));
     }
 
     #[test]

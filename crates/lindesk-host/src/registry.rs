@@ -227,8 +227,36 @@ impl Registry {
         &self.host
     }
 
+    pub(crate) fn set_caps(&mut self, caps: HostCaps) {
+        self.host.caps = caps;
+    }
+
     pub(crate) fn set_plugin_config(&mut self, config: &Config) {
         self.plugin_config = config.plugins.clone();
+    }
+
+    /// Re-initialise built-in sensors, classifiers and policies whose
+    /// `[plugins.<name>] config` differs between `old` and `new` (e.g. a profile switch).
+    /// Actuators, sinks and adapters keep their state. Returns the plugins re-initialised
+    /// and any init errors.
+    pub(crate) fn reconfigure_builtins(
+        &mut self,
+        old: &Config,
+        new: &Config,
+    ) -> Vec<(String, Result<(), PluginError>)> {
+        let changed = |name: &str| old.plugin(name).config != new.plugin(name).config;
+        let host = self.host.clone();
+        let mut out = Vec::new();
+        macro_rules! each {
+            ($($list:ident),*) => {$(
+                for s in self.$list.iter_mut().filter(|s| s.meta.is_builtin() && changed(&s.meta.name)) {
+                    let ctx = host.init_context(new.plugin(&s.meta.name).config);
+                    out.push((s.meta.name.clone(), s.plugin.init(&ctx)));
+                }
+            )*};
+        }
+        each!(sensors, classifiers, policies);
+        out
     }
 
     /// Names of all known plugins (including disabled ones).

@@ -6,6 +6,7 @@
 //! | `cgroup-v2` | [`cgroupv2::CgroupV2Actuator`] | `Target::Cgroup` | cgroup v2 attribute files (hosts without systemd) |
 //! | `cgroup-v1` | [`cgroupv1::CgroupV1Actuator`] | `Target::Cgroup` | closest cgroup v1 equivalents |
 //! | `process` | [`process::ProcessActuator`] | `Target::Process` | `setpriority`, `ioprio_set`, `sched_setattr` (uclamp) on every thread |
+//! | `relay` | [`relay::RelayActuator`] | `Target::Unit` of user managers (broker only) | records into a [`relay::RelayTable`]; the session agent applies |
 //!
 //! [`for_backend`] picks the set for the backend the probe chose.
 //!
@@ -21,6 +22,7 @@
 pub mod cgroupv1;
 pub mod cgroupv2;
 pub mod process;
+pub mod relay;
 pub mod systemd;
 
 use std::fmt;
@@ -33,6 +35,7 @@ use serde::{Deserialize, Serialize};
 pub use cgroupv1::CgroupV1Actuator;
 pub use cgroupv2::CgroupV2Actuator;
 pub use process::ProcessActuator;
+pub use relay::{RelayActuator, RelayTable};
 pub use systemd::SystemdActuator;
 
 /// Plugin name of [`systemd::SystemdActuator`].
@@ -43,6 +46,8 @@ pub const CGROUP_V2: &str = cgroupv2::NAME;
 pub const CGROUP_V1: &str = cgroupv1::NAME;
 /// Plugin name of [`process::ProcessActuator`].
 pub const PROCESS: &str = process::NAME;
+/// Plugin name of [`relay::RelayActuator`].
+pub const RELAY: &str = relay::NAME;
 
 /// Prefix of the [`PluginError::Failed`] message that marks a vanished target.
 pub const GONE: &str = "target gone";
