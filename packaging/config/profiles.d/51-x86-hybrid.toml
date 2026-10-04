@@ -1,0 +1,29 @@
+# lindesk profile: x86-hybrid
+#
+# For x86_64 CPUs with performance and efficiency cores (Intel Alder Lake and later, AMD
+# Zen 5 + Zen 5c). The scheduler's capacity-aware placement (with ITMT ranking on Intel)
+# favours P-cores for tasks with a high uclamp.min and keeps tasks with a low uclamp.max
+# on E-cores. lindesk does no cpuset pinning; it only moves the clamps.
+#
+# How strongly uclamp steers depends on the kernel (asymmetric-capacity support for
+# hybrid x86 arrived in the 6.x series); on older kernels the weights still apply and
+# the clamps just act as frequency hints.
+
+[profile]
+name = "x86-hybrid"
+description = "x86 hybrid CPUs: P-core boosts for the foreground, E-core caps for batch work via uclamp"
+
+[match]
+arch = ["x86_64"]
+hybrid = true
+# Same tier as arm-eas; below gaming, battery and hdd.
+priority = 30
+
+[config.plugins.threshold.config.values]
+# E-cores have roughly 50-65% of a P-core's capacity; a 40% floor during an epoch makes
+# the scheduler prefer a P-core for the focused app (default 30%).
+fg_epoch_uclamp_min = 40.0
+# At YELLOW, batch work is capped at 30% so it stays on E-cores (default 40%) ...
+yellow_batch_uclamp_max = 30.0
+# ... and background work at 50% (default 60%).
+yellow_background_uclamp_max = 50.0

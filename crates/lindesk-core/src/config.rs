@@ -41,11 +41,22 @@ pub struct General {
     pub plugin_dirs: Vec<PathBuf>,
     /// Start in observe-only mode: compute and record intents but never apply them.
     pub dry_run: bool,
+    /// Active profile (see [`crate::profile`]): `"auto"` picks one from the hardware, power
+    /// source and foreground app every tick; any other value pins that profile by name.
+    pub profile: String,
 }
+
+/// The value of [`General::profile`] that enables automatic selection.
+pub const PROFILE_AUTO: &str = "auto";
 
 impl Default for General {
     fn default() -> Self {
-        General { tick: Duration::from_millis(250), plugin_dirs: Vec::new(), dry_run: false }
+        General {
+            tick: Duration::from_millis(250),
+            plugin_dirs: Vec::new(),
+            dry_run: false,
+            profile: PROFILE_AUTO.to_string(),
+        }
     }
 }
 
@@ -258,6 +269,13 @@ mod tests {
         // round-trips
         let again = Config::from_toml(&c.to_toml()).unwrap();
         assert_eq!(again, c);
+    }
+
+    #[test]
+    fn profile_defaults_to_auto() {
+        assert_eq!(Config::default().general.profile, "auto");
+        let c = Config::from_toml("[general]\nprofile = \"gaming\"").unwrap();
+        assert_eq!(c.general.profile, "gaming");
     }
 
     #[test]

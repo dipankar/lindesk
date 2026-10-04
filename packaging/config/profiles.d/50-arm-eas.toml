@@ -1,0 +1,32 @@
+# lindesk profile: arm-eas
+#
+# For aarch64 machines with Energy Aware Scheduling (big.LITTLE / DynamIQ phones,
+# Chromebooks, SBCs, Snapdragon and Ampere laptops). Under EAS, uclamp is the steering
+# wheel: a task's clamped utilisation decides which cluster it fits on. So instead of
+# relying on weights, this profile raises the foreground's uclamp.min (it lands on big
+# cores) and lowers batch uclamp.max (it stays on little cores).
+#
+# Selected when arch = aarch64 and /proc/sys/kernel/sched_energy_aware is on. Battery wins
+# over this profile; to have both, create a profile that inherits "battery" and copies the
+# [config] below, with a [match] of power = "battery", arch and features, priority > 50.
+
+[profile]
+name = "arm-eas"
+description = "aarch64 with EAS: steer the foreground to big cores and batch work to little cores via uclamp"
+
+[match]
+arch = ["aarch64"]
+features = ["eas"]
+# Same tier as x86-hybrid (they can't both match); below gaming, battery and hdd.
+priority = 30
+
+[config.plugins.threshold.config.values]
+# Little cores typically have 25-45% of a big core's capacity. A 45% uclamp.min during an
+# epoch makes the focused app "too big" for them, so EAS places it on a big core
+# (default 30%, which may still fit a mid core). Capped by [safety] uclamp_min_max (50%).
+fg_epoch_uclamp_min = 45.0
+# At YELLOW, batch work is clamped to 25% so EAS keeps it on the little cluster (default
+# 40%, which can spill onto mid/big cores) ...
+yellow_batch_uclamp_max = 25.0
+# ... and background work to 40% (default 60%).
+yellow_background_uclamp_max = 40.0

@@ -1,0 +1,38 @@
+# lindesk profile: throughput
+#
+# For build servers and workstations that mostly run batch jobs while someone is logged
+# in: background and batch work yield less, and lindesk intervenes later. The desktop
+# still gets protection when it really stalls. Never auto-selected (no [match]):
+# `lindeskctl profile use throughput`.
+#
+# Batch units stay cpu.idle (that is how they are classified); this profile changes how
+# hard they are squeezed on top of that.
+
+[profile]
+name = "throughput"
+description = "Build servers: background yields less and intervention starts later"
+
+[config.plugins.threshold.config]
+# Later intervention: YELLOW when the foreground stalls 10% of the time (default 5%),
+# RED at 20% (default 10%) sustained for 3s (default 1s).
+foreground_yellow = 0.10
+foreground_red = 0.20
+red_after = "3s"
+# Memory: RED only at 30% "full" pressure (default 20%), memory.high on batch after 10s.
+memory_full_red = 0.30
+mem_red_after = "10s"
+# io.max AIMD backs off gently (×0.75 instead of ×0.5) and recovers every 500ms.
+aimd_decrease = 0.75
+aimd_interval = "500ms"
+# memory.high at 95% of a batch unit's usage (default 90%).
+memory_high_ratio = 0.95
+
+[config.plugins.threshold.config.values]
+# Background and batch keep more of the machine (defaults 50 / 10 / 20 / 1).
+background_weight = 80
+batch_io_weight = 50
+yellow_background_weight = 50
+yellow_batch_io_weight = 10
+# Gentler CPU caps at YELLOW (defaults 60% / 40%).
+yellow_background_uclamp_max = 80.0
+yellow_batch_uclamp_max = 70.0

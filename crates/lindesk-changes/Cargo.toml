@@ -1,0 +1,23 @@
+[package]
+name = "lindesk-changes"
+description = "Versioned, guardrailed, reversible changes to lindesk config and kernel tunables"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+lindesk-plugin-api.workspace = true
+lindesk-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+humantime.workspace = true
+rustix.workspace = true
+toml_edit = "0.25"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,35 @@
+# lindesk profile: battery
+#
+# Selected automatically while running on battery. Boosts cost energy (uclamp.min raises
+# CPU frequency), so they are shorter and smaller, and background work yields harder so
+# it does less while you are unplugged. Interactive feel is preserved by the weights,
+# which cost nothing.
+#
+# Several "auto" values already lean this way on battery (epoch 300ms, uclamp.min 15%,
+# background uclamp.max 40%); this profile goes further.
+
+[profile]
+name = "battery"
+description = "On battery: short, small boosts and harder background yielding to save energy"
+
+[match]
+power = "battery"
+# Above hdd, arm-eas and x86-hybrid (energy matters most when unplugged), below gaming
+# (a game you chose to play on battery still gets protected).
+priority = 50
+
+[config.plugins.threshold.config]
+# Short epochs: a boost lasts just long enough for the input to be handled.
+epoch = "250ms"
+
+[config.plugins.threshold.config.values]
+# A small uclamp.min keeps the frequency governor from ramping to turbo on every click.
+fg_epoch_uclamp_min = 10.0
+# Background work runs at a quarter of normal weight (default 50) ...
+background_weight = 25
+# ... and under pressure at weight 10, capped at 30% of a CPU's capacity (defaults
+# 20 / 40% on battery), so sync clients and indexers don't wake big cores.
+yellow_background_weight = 10
+yellow_background_uclamp_max = 30.0
+# Batch work (builds, upgrades) is capped at the [safety] uclamp_max_floor (20%) at YELLOW.
+yellow_batch_uclamp_max = 20.0

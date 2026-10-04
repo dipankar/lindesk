@@ -1,0 +1,37 @@
+# lindesk profile: hdd
+#
+# For machines where a managed disk (the one behind / or /home) is rotational. A seek
+# costs milliseconds, so a background writer stalls the desktop much sooner than on
+# flash, and the disk's bandwidth is small. This profile reacts to I/O pressure earlier
+# and throttles background I/O in smaller, slower steps.
+
+[profile]
+name = "hdd"
+description = "Rotational storage: earlier I/O intervention and smaller io.max steps"
+
+[match]
+storage = ["hdd"]
+# Below gaming and battery, above the CPU-specific profiles: on an HDD the disk is
+# almost always the bottleneck.
+priority = 40
+
+[config.plugins.threshold.config]
+# io.max AIMD (RED only). An HDD manages ~150MiB/s sequential and far less random, so:
+# a 4MiB/s floor and 4MiB/s additive steps (defaults scale from nominal bandwidth). Note
+# the floor actually written is never below [safety] io_bps_floor (8MiB/s by default);
+# lower that in lindesk.toml if you want background I/O squeezed further.
+aimd_floor = "4MiB"
+aimd_step = "4MiB"
+# Cut harder (×0.4 instead of ×0.5) but adjust every 2s instead of 1s: HDD queues take a
+# while to drain, so reacting every second overshoots.
+aimd_decrease = 0.4
+aimd_interval = "2s"
+
+[config.plugins.threshold.config.enter]
+# YELLOW at 12% smoothed I/O "some" pressure ("auto" uses 15% with an HDD, 20% otherwise).
+# cpu and memory stay "auto".
+io = 0.12
+
+[config.plugins.threshold.config.values]
+# Batch I/O yields more even when healthy (default io.weight 10).
+batch_io_weight = 5

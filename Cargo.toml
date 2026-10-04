@@ -22,6 +22,8 @@ lindesk-sys = { path = "crates/lindesk-sys", version = "0.1.0" }
 lindesk-store = { path = "crates/lindesk-store", version = "0.1.0" }
 lindesk-query = { path = "crates/lindesk-query", version = "0.1.0" }
 lindesk-ipc = { path = "crates/lindesk-ipc", version = "0.1.0" }
+lindesk-changes = { path = "crates/lindesk-changes", version = "0.1.0" }
+lindesk-mcp = { path = "crates/lindesk-mcp", version = "0.1.0" }
 
 # external
 anyhow = "1"
@@ -56,6 +58,7 @@ cosmic-protocols = { version = "0.2", default-features = false, features = ["cli
 tempfile = "3"
 sd-notify = "0.4"
 crossbeam-channel = "0.5"
+rmcp = { version = "3.5", default-features = false }
 
 [profile.release]
 lto = "thin"

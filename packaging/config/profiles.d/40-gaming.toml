@@ -1,0 +1,43 @@
+# lindesk profile: gaming
+#
+# Selected while a game has focus: Steam games (app id steam_app_<id>), gamescope
+# sessions, Wine/Proton windows (*.exe) and Lutris. Builds on latency and boosts the game
+# as hard as the [safety] caps allow; everything else yields hard while you play.
+# Alt-tabbing out switches back after the 10s dwell, so a quick look at a browser doesn't
+# drop the game's protection.
+
+[profile]
+name = "gaming"
+description = "Max foreground protection while a game is focused"
+inherits = "latency"
+
+[match]
+foreground_app_id = ["steam_app_*", "gamescope*", "*.exe", "lutris", "net.lutris.Lutris"]
+# The highest built-in priority: a game in focus wins over battery, hdd and CPU profiles.
+priority = 60
+
+[config.plugins.threshold.config]
+# A game is input-driven for its whole session; a 2s epoch keeps the boost on through
+# cutscenes and menus without gaps.
+epoch = "2s"
+# Escalate to RED quickly when the game stalls (latency: 500ms).
+red_after = "300ms"
+
+[config.plugins.threshold.config.values]
+# The strongest boosts lindesk allows: weight 1000 and uclamp.min 50% are the [safety]
+# maxima (cpu_weight_max, uclamp_min_max), so they are never clamped.
+fg_epoch_weight = 1000
+fg_epoch_uclamp_min = 50.0
+fg_weight = 500
+# Everything else yields hard.
+background_weight = 30
+yellow_background_weight = 5
+yellow_background_uclamp_max = 30.0
+yellow_batch_uclamp_max = 20.0
+
+# Treat gamescope (the nested compositor games run in) as interactive even when its
+# window isn't the one with focus, e.g. on a second monitor. Appended to the overrides in
+# lindesk.toml, not replacing them.
+[[config.override]]
+comm = "gamescope*"
+class = "interactive"

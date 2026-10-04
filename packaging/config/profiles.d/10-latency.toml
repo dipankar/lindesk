@@ -1,0 +1,36 @@
+# lindesk profile: latency
+#
+# For people who notice every dropped frame: audio work, drawing tablets, low-end
+# machines that are always a little busy. Intervenes earlier, keeps the focused app
+# boosted for longer and boosts it harder. Costs some background throughput and a little
+# energy. Manual only (no [match]): `lindeskctl profile use latency`.
+# gaming inherits from this profile.
+
+[profile]
+name = "latency"
+description = "Earlier intervention, longer interaction epochs, stronger foreground boosts"
+
+[config.plugins.threshold.config]
+# 1s instead of 500ms: one boost spans a typing burst or a scroll fling instead of
+# being re-opened by every event.
+epoch = "1s"
+# The system-wide enter thresholds stay "auto" on purpose: lowering them below the
+# hardware-scaled values makes small machines sit in YELLOW permanently.
+# Earlier intervention comes from watching the foreground itself instead:
+# YELLOW as soon as the focused app stalls 3% of the time (default 5%) ...
+foreground_yellow = 0.03
+# ... RED at 7% (default 10%) sustained for 500ms (default 1s).
+foreground_red = 0.07
+red_after = "500ms"
+# Stay protected for longer after the pressure goes away (default 5s).
+recover_after = "8s"
+
+[config.plugins.threshold.config.values]
+# Stronger boosts during an epoch (defaults 500 / 30%). uclamp.min is still capped by
+# [safety] uclamp_min_max (50% by default).
+fg_epoch_weight = 800
+fg_epoch_uclamp_min = 40.0
+# The focused app outside an epoch (default 200).
+fg_weight = 300
+# Background yields harder at YELLOW (default 20).
+yellow_background_weight = 10

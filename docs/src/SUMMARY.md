@@ -7,6 +7,9 @@
 - [doctor: what your system supports](guide/doctor.md)
 - [Everyday use](guide/usage.md)
 - [Configuration](guide/configuration.md)
+- [CPU profiles](guide/profiles.md)
+- [Versioned changes](guide/changes.md)
+- [MCP server for local agents](guide/mcp.md)
 - [Telemetry and DuckDB](guide/telemetry.md)
 - [Benchmarking](guide/bench.md)
 

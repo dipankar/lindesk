@@ -16,3 +16,6 @@ toml.workspace = true
 humantime.workspace = true
 bytesize.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

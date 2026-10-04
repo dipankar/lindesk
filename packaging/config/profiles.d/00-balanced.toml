@@ -1,0 +1,44 @@
+# lindesk profile: balanced (the default and the reference for every other profile)
+#
+# Profiles are overlays on lindesk.toml. They are read from the copies built into the
+# binary, then /usr/share/lindesk/profiles.d, /etc/lindesk/profiles.d and
+# $XDG_CONFIG_HOME/lindesk/profiles.d; a later file with the same [profile] name replaces
+# an earlier one. `lindeskctl profile list` shows what is installed and what matches now.
+#
+# Only one profile is active at a time. With `[general] profile = "auto"` (the default)
+# lindesk picks the highest-priority profile whose [match] holds, waiting at least 10s
+# between switches; `profile = "<name>"` pins one. balanced is what you get when nothing
+# else matches, so it has no [match] and changes nothing: it is lindesk.toml as shipped.
+#
+# Why the shipped defaults are a good fit for an ordinary desktop (all from the `threshold`
+# policy; "auto" values scale with the hardware `lindeskctl doctor` reports):
+#
+#   Doing nothing while healthy. Interventions start only when smoothed PSI says something
+#   is actually stalling: enter.cpu 0.30 (0.40 on ≤ 4 CPUs, where one runnable task already
+#   shows as pressure), enter.io 0.20 (0.15 with an HDD), enter.memory 0.10 (0.15 with
+#   zram/zswap, whose early stalls are cheap). Below these a busy machine is just busy.
+#
+#   Fast, cheap boosts for what you touch. A click or keypress opens a 500ms epoch (300ms
+#   on battery) with cpu/io weight 500 and uclamp.min 30% (15% on battery) for the focused
+#   app: long enough to cover a frame burst or a menu opening, short enough that an idle
+#   window doesn't hold a boost. Outside an epoch the foreground keeps weight 200.
+#
+#   Background work always yields a little and yields more under pressure. Background
+#   units run at weight 50 (20 plus uclamp.max 60% at YELLOW); batch units (builds,
+#   upgrades) are cpu.idle with io.weight 10 (1 plus uclamp.max 40% at YELLOW). Nothing is
+#   starved: weights are relative, so idle CPU still goes to whoever wants it.
+#
+#   Hysteresis everywhere. EWMA half-life 2s, exits at half the enter threshold, 3s/2s
+#   minimum dwell in YELLOW/RED and 5s of calm before stepping down: a single spike never
+#   flips settings back and forth.
+#
+#   RED is a last resort. Only when the foreground itself stalls (> 10% for 1s) or memory
+#   "full" pressure passes 20% does io.max AIMD throttle background I/O, with per-device
+#   floors from the disk's nominal bandwidth, and never below [safety] io_bps_floor.
+#
+# Copy this file to $XDG_CONFIG_HOME/lindesk/profiles.d/ and add a [config] section to
+# change the default for yourself; other profiles keep inheriting from lindesk.toml.
+
+[profile]
+name = "balanced"
+description = "The shipped defaults: no intervention while healthy, short boosts for the focused app, background work yields under pressure"
