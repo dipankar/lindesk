@@ -378,6 +378,7 @@ fn kind_checks(r: &mut Runner, p: &ExternalPlugin, kind: PluginKind, init: &Init
                         target: Target::Unit { manager: Manager::System, name: "background.slice".into() },
                         cgroup: Some("/background.slice".into()),
                     }],
+                    foreground: None,
                 };
                 let _: SensorOutput = typed(p, methods::SENSOR_POLL, &input)?;
                 Ok(())

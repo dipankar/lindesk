@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(r.error.unwrap().code, codes::INVALID_PARAMS);
         let r = h.request_raw("no.such.method", serde_json::Value::Null);
         assert_eq!(r.error.unwrap().code, codes::METHOD_NOT_FOUND);
-        assert_unsupported(h.poll(&SensorInput { now: 0, targets: vec![] }));
+        assert_unsupported(h.poll(&SensorInput { now: 0, targets: vec![], foreground: None }));
     }
 
     #[derive(serde::Serialize)]

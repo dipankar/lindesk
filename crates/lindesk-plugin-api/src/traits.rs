@@ -110,6 +110,10 @@ pub enum PluginError {
     /// The plugin is backing off after failures or has been disabled.
     #[error("unavailable: {0}")]
     Unavailable(String),
+    /// The target no longer exists (unit stopped, cgroup removed, process exited).
+    /// The host forgets it instead of retrying.
+    #[error("target gone: {0}")]
+    Gone(String),
     #[error("protocol error: {0}")]
     Protocol(String),
     #[error("i/o error: {0}")]
@@ -155,6 +159,9 @@ pub struct SensorInput {
     pub now: TimestampMs,
     #[serde(default)]
     pub targets: Vec<WatchedTarget>,
+    /// The current foreground target, if any (sensors may watch it more closely).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<Target>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]

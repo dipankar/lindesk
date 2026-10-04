@@ -47,6 +47,7 @@ pub mod codes {
     pub const INTERNAL: i64 = -32603;
     pub const FAILED: i64 = -32000;
     pub const UNSUPPORTED: i64 = -32001;
+    pub const GONE: i64 = -32002;
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
@@ -152,6 +153,7 @@ impl Response {
     pub fn from_plugin_error(id: u64, e: &PluginError) -> Self {
         let code = match e {
             PluginError::Unsupported(_) => codes::UNSUPPORTED,
+            PluginError::Gone(_) => codes::GONE,
             PluginError::Protocol(_) => codes::INVALID_PARAMS,
             _ => codes::FAILED,
         };
@@ -165,6 +167,7 @@ impl Response {
                 codes::UNSUPPORTED => PluginError::Unsupported(e.message),
                 codes::METHOD_NOT_FOUND => PluginError::Unsupported(e.message),
                 codes::FAILED => PluginError::Failed(e.message),
+                codes::GONE => PluginError::Gone(e.message),
                 _ => PluginError::Protocol(format!("{} ({})", e.message, e.code)),
             });
         }

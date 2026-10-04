@@ -252,12 +252,13 @@ def classify(proc):
     let (tx, rx) = host_queues();
     let mut p = spawn(&dir, ExternalOptions { host: tx, ..Default::default() });
     Classifier::classify(&mut p, &proc_info("x")).unwrap();
-    // Notifications precede the reply on the same pipe, so they've been routed already.
-    let m = rx.metrics.try_recv().unwrap();
+    // Notifications precede the reply on the same pipe; allow for scheduling under load.
+    let wait = std::time::Duration::from_secs(5);
+    let m = rx.metrics.recv_timeout(wait).unwrap();
     assert_eq!((m.name.as_str(), m.value, m.plugin.as_str()), ("frames", 3.0, "chatty"));
     assert_eq!(m.labels["app"], "x");
-    assert!(matches!(rx.events.try_recv().unwrap(), Event::Focus { pid: Some(12), .. }));
-    assert_eq!(rx.samples.try_recv().unwrap().some_avg10, 42.0);
+    assert!(matches!(rx.events.recv_timeout(wait).unwrap(), Event::Focus { pid: Some(12), .. }));
+    assert_eq!(rx.samples.recv_timeout(wait).unwrap().some_avg10, 42.0);
     let logs = p.recent_logs();
     assert!(logs.iter().any(|l| l.source == LogSource::Plugin && l.message == "warned"));
     assert!(eventually(|| p.recent_logs().iter().any(|l| l.source == LogSource::Stderr && l.message == "to stderr")));

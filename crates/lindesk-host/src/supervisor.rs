@@ -127,7 +127,9 @@ pub fn is_failure(e: &PluginError) -> Option<FailureKind> {
         PluginError::Timeout => Some(FailureKind::Timeout),
         PluginError::Protocol(_) => Some(FailureKind::Protocol),
         PluginError::Io(_) => Some(FailureKind::Crash),
-        PluginError::Failed(_) | PluginError::Unsupported(_) | PluginError::Unavailable(_) => None,
+        PluginError::Failed(_) | PluginError::Unsupported(_) | PluginError::Unavailable(_) | PluginError::Gone(_) => {
+            None
+        }
     }
 }
 

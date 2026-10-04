@@ -61,8 +61,8 @@ mod tests {
     fn polls_return_samples_with_intervals() {
         let mut h = Harness::new(Server::new({{Struct}}::default()).sensor());
         h.initialize().unwrap();
-        h.poll(&SensorInput { now: 1000, targets: vec![] }).unwrap();
-        let out = h.poll(&SensorInput { now: 2000, targets: vec![] }).unwrap();
+        h.poll(&SensorInput { now: 1000, targets: vec![], foreground: None }).unwrap();
+        let out = h.poll(&SensorInput { now: 2000, targets: vec![], foreground: None }).unwrap();
         // Empty on kernels without PSI.
         assert!(out.samples.iter().all(|s| s.interval_ms == 1000));
     }

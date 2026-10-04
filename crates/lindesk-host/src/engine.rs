@@ -207,11 +207,20 @@ struct Ctx {
     records: Vec<Record>,
     notes: Vec<String>,
     actions: Vec<ActionReport>,
+    /// Targets an actuator reported as gone; forgotten after actuation.
+    gone: Vec<Target>,
 }
 
 impl Ctx {
     fn new(now: TimestampMs) -> Self {
-        Ctx { now, host_events: Vec::new(), records: Vec::new(), notes: Vec::new(), actions: Vec::new() }
+        Ctx {
+            now,
+            host_events: Vec::new(),
+            records: Vec::new(),
+            notes: Vec::new(),
+            actions: Vec::new(),
+            gone: Vec::new(),
+        }
     }
 }
 
@@ -462,6 +471,9 @@ impl Engine {
         for action in self.applied.plan(&resolution.desired) {
             self.execute(action, "no longer requested by any policy", &mut cx);
         }
+        for t in std::mem::take(&mut cx.gone) {
+            self.forget_target(&t);
+        }
         timings.actuate_us = elapsed_us(t);
 
         // 7. Sinks.
@@ -533,7 +545,7 @@ impl Engine {
 
     fn poll_sensors(&mut self, cx: &mut Ctx) {
         let now = cx.now;
-        let input = SensorInput { now, targets: self.watched_inputs() };
+        let input = SensorInput { now, targets: self.watched_inputs(), foreground: self.foreground.clone() };
         let mut outputs = Vec::new();
         let mut errors = Vec::new();
         for slot in &mut self.registry.sensors {
@@ -866,6 +878,12 @@ impl Engine {
                         });
                         self.after_change(&target, now);
                     }
+                    Err(PluginError::Gone(_)) => {
+                        report.outcome = ActionOutcome::Failed { error: "target gone".into() };
+                        if !cx.gone.contains(&target) {
+                            cx.gone.push(target.clone());
+                        }
+                    }
                     Err(e) => {
                         report.outcome = ActionOutcome::Failed { error: e.to_string() };
                         let msg = format!("applying {setting} failed: {e}");
@@ -892,6 +910,8 @@ impl Engine {
                     report.actuator = Some(slot.meta.name.clone());
                     match slot.meta.guard(|| slot.plugin.reset(&target, &knob, original.as_ref())) {
                         Ok(()) => true,
+                        // Nothing left to restore.
+                        Err(PluginError::Gone(_)) => true,
                         Err(e) => {
                             let actuator = slot.meta.name.clone();
                             report.outcome = ActionOutcome::Failed { error: e.to_string() };

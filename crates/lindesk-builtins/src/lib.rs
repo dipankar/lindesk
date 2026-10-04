@@ -4,6 +4,7 @@
 pub mod actuators;
 pub mod adapters;
 pub mod classifier;
+pub mod env;
 pub mod policy;
 pub mod sensors;
 pub mod sinks;
