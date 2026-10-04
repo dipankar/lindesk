@@ -60,6 +60,10 @@ sd-notify = "0.4"
 crossbeam-channel = "0.5"
 rmcp = { version = "3.5", default-features = false }
 
+# Bundled DuckDB's C++ debug info makes a multi-GB static archive; nobody debugs it.
+[profile.dev.package.libduckdb-sys]
+debug = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 4

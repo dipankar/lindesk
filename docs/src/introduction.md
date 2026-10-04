@@ -42,7 +42,7 @@ adapters ─┐   (focus, input)
 sensors ──┼─► classifiers ─► policies ─► resolver + safety caps ─► actuators
           │   (PSI, usage)   (class)     (intents)  (one value per knob)  (cgroups, systemd)
           └──────────────────────── records ──────────────────────────► sinks
-                                                                (Parquet telemetry, Prometheus, …)
+                                                                (Vortex telemetry, Prometheus, …)
 ```
 
 1. **Adapters** report which app has focus and when you type or click (GNOME, KDE, COSMIC
@@ -56,7 +56,7 @@ sensors ──┼─► classifiers ─► policies ─► resolver + safety cap
    provenance for `lindeskctl explain`.
 6. **Actuators** apply the values as runtime-only changes, remember the originals, and
    restore them on exit or crash.
-7. **Sinks** receive everything for telemetry. The built-in one writes a Parquet lake you
+7. **Sinks** receive everything for telemetry. The built-in one writes a Vortex lake you
    can query with DuckDB.
 
 ## Do nothing while healthy

@@ -4,7 +4,7 @@
            ┌──────────── plugin host (same in lindeskd and lindesk-session) ────────────┐
  adapters ─┤ sensors → classifiers → policies → resolver+safety caps → actuators         │
  (focus,   │      ╲                                   │                                 │
-  input)   │       ╰──────────── events/samples ──────┴──────────→ sinks (parquet, …)   │
+  input)   │       ╰──────────── events/samples ──────┴──────────→ sinks (vortex, …)   │
            └────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -48,7 +48,7 @@ the config file of the same scope.
 | `lindesk-sys` | Probe, cgroupfs, procfs, PSI, syscalls; every function takes explicit roots. |
 | `lindesk-host` | Discovery, supervision, stdio transport, the deterministic `Engine`, conformance, scaffolding. |
 | `lindesk-builtins` | Built-in sensors, adapters, classifiers, policies, actuators and sinks. |
-| `lindesk-store` | Telemetry writer (arrow/parquet, no DuckDB). |
+| `lindesk-store` | Telemetry writer (arrow + Vortex files, no DuckDB). |
 | `lindesk-query` | Telemetry reader and maintainer (DuckDB). |
 | `lindesk-ipc` | D-Bus names, proxies, payloads and polkit helpers. |
 | `lindesk-plugin` | Rust SDK for external plugins. |

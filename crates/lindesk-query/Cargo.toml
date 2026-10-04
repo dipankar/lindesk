@@ -9,5 +9,18 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+lindesk-core.workspace = true
+lindesk-store.workspace = true
+duckdb = { workspace = true, features = ["parquet", "json", "appender-arrow"] }
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+chrono.workspace = true
+rustix.workspace = true
+parquet.workspace = true
+lindesk-plugin-api.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

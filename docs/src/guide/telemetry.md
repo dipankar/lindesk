@@ -1,7 +1,8 @@
 # Telemetry and DuckDB
 
 lindesk records PSI, per-unit usage, every decision with its reason, and plugin metrics into
-a Parquet lake that any DuckDB client can read. Window titles and command lines are never
+a [Vortex](https://vortex.dev) lake that any DuckDB client can read with the `vortex`
+extension. Window titles and command lines are never
 stored. The tables are described in [Telemetry schema](../reference/schema.md).
 
 | Lake | Where | Who can read it |
@@ -23,7 +24,12 @@ $ lindeskctl query --format parquet --out pressure.parquet "from pressure"
 $ lindeskctl query --system "select count(*) from events"
 ```
 
-Queries run in a sandboxed, in-memory DuckDB that can see only the lake. Only read-only
+Queries run in a sandboxed, in-memory DuckDB that can see only the lake. lindesk reads the
+`.vortex` files with DuckDB's `vortex` core extension, which it loads from (and the first
+time installs into) `duckdb-ext/` next to the lake; that needs network access once. Without
+it (offline, unsupported platform) the files are read by the Rust `vortex` crate instead:
+everything still works, only slower, except `data catalog`. `lindesk-data install-extension`
+installs it explicitly; `--backend native` forces the fallback. Only read-only
 statements are accepted (SELECT, WITH, FROM, VALUES, DESCRIBE, SHOW, SUMMARIZE).
 `--json` is the same as `--format json`.
 
@@ -38,18 +44,24 @@ $ lindeskctl query "describe units"
 
 ```console
 $ lindeskctl data catalog                     # (re)generate catalog.duckdb: views only
-$ duckdb -readonly ~/.local/state/lindesk/catalog.duckdb
+$ duckdb -readonly ~/.local/state/lindesk/catalog.duckdb -c "INSTALL vortex; LOAD vortex; FROM pressure LIMIT 5"
 $ lindeskctl data shell                       # the same, if the duckdb CLI is installed
 ```
 
-The catalog contains only views over the Parquet globs, so it never goes stale as files
-are added, and notebooks or BI tools can open it read-only.
+The catalog contains only views over the `read_vortex` globs, so it never goes stale as files
+are added, and notebooks or BI tools can open it read-only. DuckDB does not autoload the
+`vortex` extension for a view, so every client session starts with `INSTALL vortex; LOAD
+vortex;` (`lindesk-data catalog` prints this; `FROM lindesk_info` shows it too).
+
+Lakes written by lindesk before the switch to Vortex contain `.parquet` files. The views read
+both formats, and the next `compact` converts every remaining Parquet partition to Vortex
+(`data stats` reports how many legacy files remain).
 
 ## Maintenance
 
 `lindesk-compact.timer` (system and user) runs `lindesk-data maintain` hourly: it merges
-each sealed hour's small files, refreshes the 1-minute and 1-hour rollups, and applies
-retention. The same operations, by hand:
+each sealed hour's small files, converts any legacy Parquet partitions, refreshes the
+1-minute and 1-hour rollups, and applies retention. The same operations, by hand:
 
 ```console
 $ lindeskctl data stats        # size, files, rows and time range per table

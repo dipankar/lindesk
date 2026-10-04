@@ -1,10 +1,13 @@
 # Telemetry schema
 
-lindesk records telemetry into a hive-partitioned Parquet lake:
-`<root>/<table>/date=YYYY-MM-DD/hour=HH/part-<ulid>.parquet` (rollups are partitioned by
-day only). Files are immutable; compaction swaps whole partitions atomically. Every table
-starts with `schema_version INTEGER` and `ts TIMESTAMP WITH TIME ZONE` (UTC, millisecond
-precision); readers use `union_by_name`, so new columns can be added without rewriting.
+lindesk records telemetry into a hive-partitioned [Vortex](https://vortex.dev) lake:
+`<root>/<table>/date=YYYY-MM-DD/hour=HH/part-<ulid>.vortex` (rollups are partitioned by
+day only), with `<root>/_format.json` naming the format and the `vortex` crate version.
+Files are immutable; compaction swaps whole partitions atomically. Every table starts with
+`schema_version INTEGER` and `ts TIMESTAMP WITH TIME ZONE` (UTC, microsecond precision).
+All files of a table share exactly one schema (DuckDB's `read_vortex` has no
+`union_by_name`), so a schema change is migrated by compaction rather than mixed. Vortex has
+no MAP type: `labels` columns hold a JSON object, queried as `labels->>'host'`.
 
 The definitions live in `lindesk-store/src/schema.rs`; ask the lake itself with
 `lindeskctl query "describe units"`.
@@ -54,7 +57,7 @@ The definitions live in `lindesk-store/src/schema.rs`; ask the lake itself with
 
 ## `metrics`
 
-`plugin`, `name`, `value DOUBLE`, `labels MAP(VARCHAR, VARCHAR)`: whatever plugins report
+`plugin`, `name`, `value DOUBLE`, `labels VARCHAR` (a JSON object; `labels->>'key'`): whatever plugins report
 (`lp.metric(...)`, D-Bus `ReportMetric`).
 
 ## Benchmarks: `bench_runs`, `bench_samples`

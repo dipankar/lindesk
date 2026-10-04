@@ -6,7 +6,7 @@ Under heavy background load (compiles, big copies, indexers, package upgrades) a
 
 Two product requirements shape the design:
 1. **Plugin-based.** Every stage of the pipeline is an extension point: sensing, desktop adapters, classification, policy, actuation and sinks. Third parties can extend it in any language, and the built-ins use the same API. Adoption depends on the size of that surface and how good the developer experience is.
-2. **Telemetry you can query with DuckDB.** Samples and events are stored as a partitioned Parquet lake with proper compaction, rollups, retention, targeted deletion and access control.
+2. **Telemetry you can query with DuckDB.** Samples and events are stored as a partitioned Vortex lake with proper compaction, rollups, retention, targeted deletion and access control.
 
 Greenfield: `/home/dipankar/Github/lindesk` is empty and not yet a git repo.
 
@@ -25,7 +25,7 @@ Greenfield: `/home/dipankar/Github/lindesk` is empty and not yet a git repo.
   - .deb, .rpm, an AUR PKGBUILD and `install.sh`.
   - Plugins, and DuckDB-accessible telemetry.
 - My defaults, each easy to change:
-  - Rust 1.95 with zbus 5, tokio, clap, serde/toml, schemars, tracing, rustix, x11rb, wayland-client, arrow/parquet and duckdb.
+  - Rust 1.95 with zbus 5, tokio, clap, serde/toml, schemars, tracing, rustix, x11rb, wayland-client, arrow, vortex and duckdb.
   - License MIT OR Apache-2.0.
   - D-Bus names `org.lindesk.Broker1` and `org.lindesk.QoS1`.
 
@@ -35,7 +35,7 @@ Greenfield: `/home/dipankar/Github/lindesk` is empty and not yet a git repo.
            ┌──────────── plugin host (same in lindeskd and lindesk-session) ────────────┐
  adapters ─┤ sensors → classifiers → policies → resolver+safety caps → actuators         │
  (focus,   │      ╲                                   │                                 │
-  input)   │       ╰──────────── events/samples ──────┴──────────→ sinks (parquet, …)   │
+  input)   │       ╰──────────── events/samples ──────┴──────────→ sinks (vortex, …)   │
            └────────────────────────────────────────────────────────────────────────────┘
  built-ins: in-process Rust trait impls   external: out-of-process JSON-RPC over stdio
 
@@ -118,13 +118,13 @@ Every applied value carries provenance (plugin + reason), which is what `lindesk
   - An mdBook docs site: concepts, plugin guide, protocol reference, cookbook.
 - **Example plugins:** `python/steam-games` (classifier), `rust/on-battery` (policy modifier), `python/prometheus-exporter` (sink), `shell/notify-on-red` (sink → notify-send).
 
-## Telemetry store (Parquet lake, accessed through DuckDB)
+## Telemetry store (Vortex lake, accessed through DuckDB)
 
 **Layout (hive-partitioned, immutable files).**
 - System data goes in `/var/lib/lindesk/telemetry/` (0750 root:lindesk) and holds global PSI, levels, and system.slice actions.
 - Per-user data goes in `~/.local/state/lindesk/telemetry/` (0700) and holds the user's apps, focus and actions.
 
-That split makes privacy a property of the layout. Window titles and cmdline arguments are never stored. Files are named `<table>/date=YYYY-MM-DD/hour=HH/part-<ulid>.parquet`.
+That split makes privacy a property of the layout. Window titles and cmdline arguments are never stored. Files are named `<table>/date=YYYY-MM-DD/hour=HH/part-<ulid>.vortex` ([Vortex](https://vortex.dev), written with the pinned `vortex` crate and named in `<root>/_format.json`). Lakes from before the switch hold `.parquet` files, which views keep reading and compaction converts.
 
 **Tables.**
 - `pressure` (ts, scope, resource, some/full avg10, stall deltas in µs)
@@ -134,13 +134,13 @@ That split makes privacy a property of the layout. Window titles and cmdline arg
 - `bench_runs` and `bench_samples`
 - rollups `pressure_1m/_1h` and `units_1m/_1h`
 
-**Write path.** It lives in daemon-side `lindesk-store` and uses arrow-rs/parquet only; the daemons never link DuckDB.
+**Write path.** It lives in daemon-side `lindesk-store` and uses arrow-rs and the `vortex` crate only; the daemons never link DuckDB. Sinks only enqueue; a low-priority writer thread does the I/O.
 - Default sampling is 1 s. Data goes into an in-memory Arrow buffer, which is flushed every 60 s to a new file in the current hour partition (write to `.tmp`, fsync, rename).
 - On shutdown the buffer is flushed. If the daemon crashes, at most one flush interval is lost.
 
 **Compaction and retention.** `lindesk-data` is a oneshot binary that links duckdb (bundled). It runs from `lindesk-compact.timer`, both as a system timer and as a user timer.
 - It only touches *sealed* partitions, meaning older than the current hour, under a lock file.
-- **Compact:** merge an hour's small files into one ZSTD Parquet file sorted by (unit, ts), then aggregate into the 1m and 1h rollups.
+- **Compact:** merge an hour's small files into one Vortex file sorted by (unit, ts), written by the same Rust writer as the daemons so every file of a table has one schema, then aggregate into the 1m and 1h rollups.
 - **Swap:** write a staging dir, then `renameat2(RENAME_EXCHANGE)` it with the partition. Readers see either old or new, never duplicates. `query` retries once on the rare "file vanished" race.
 - **Retention:** defaults are raw 7d, 1m 90d, 1h 1y, plus a `max_size` cap (default 2 GiB) that drops the oldest partitions first. Expiring a whole partition is a cheap directory delete.
 
@@ -151,10 +151,10 @@ That split makes privacy a property of the layout. Window titles and cmdline arg
 
 **Access.**
 - `lindeskctl query "<SQL>" [--format table|csv|json|parquet] [--system]` uses embedded DuckDB, read-only.
-- `lindeskctl data catalog` (re)generates `catalog.duckdb`, which contains only `VIEW`s over the Parquet globs (`read_parquet(..., hive_partitioning=true, union_by_name=true)`). Users can then run `duckdb -readonly ~/.local/state/lindesk/catalog.duckdb` from any DuckDB client, notebook or BI tool.
+- `lindeskctl data catalog` (re)generates `catalog.duckdb`, which contains only `VIEW`s over the Vortex globs (`read_vortex(..., hive_partitioning=true)`, the DuckDB `vortex` core extension). Users can then run `duckdb -readonly ~/.local/state/lindesk/catalog.duckdb` from any DuckDB client, notebook or BI tool after `INSTALL vortex; LOAD vortex;`. Without the extension, lindesk reads the files with the Rust `vortex` crate (offline fallback).
 - `lindeskctl data shell` opens the duckdb CLI with the catalog attached, if the CLI is installed.
 - `lindeskctl data stats` reports size per table and partition and the retention status.
-- Schema versioning: a `schema_version` column plus `union_by_name` lets old and new files coexist.
+- Schema versioning: a `schema_version` column; `read_vortex` needs one schema per table, so schema changes are migrated by compaction.
 - `simulate`, `bench compare` and `watch` all read through the same query layer.
 
 Config:
@@ -224,9 +224,9 @@ crates/
   lindesk-core/         pure: classes, Settings, Intent, resolver, SafetyCaps, sim clock, config
   lindesk-host/         plugin discovery, manifests, supervision, routing, transports
   lindesk-builtins/     psi, cgroup-stat, rules, threshold, systemd/v2raw/v1/proc actuators,
-                        x11 + cosmic adapters, parquet sink
+                        x11 + cosmic adapters, telemetry sink
   lindesk-sys/          probe, cgroupfs, PSI, syscalls (ioprio, sched_setattr), blockdev, iocost
-  lindesk-store/        Arrow schemas, buffered Parquet writer, partition layout (no DuckDB)
+  lindesk-store/        Arrow schemas, buffered Vortex writer, partition layout (no DuckDB)
   lindesk-query/        DuckDB: query, catalog, compact, rollup, retention, delete
   lindesk-ipc/          zbus interfaces + polkit helper
   lindeskd/  lindesk-session/  lindeskctl/  lindesk-data/  lindesk-bench/

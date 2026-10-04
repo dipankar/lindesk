@@ -12,3 +12,19 @@ authors.workspace = true
 lindesk-plugin-api.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+chrono.workspace = true
+humantime.workspace = true
+rustix.workspace = true
+# Vortex 0.87 is built on arrow 59, so the writer uses arrow 59 too (the workspace pins 60
+# for other crates). Pinned exactly: the on-disk format version is recorded in _format.json.
+vortex = { version = "=0.87.0", default-features = false, features = ["files", "zstd"] }
+arrow-array = { version = "59.2", features = ["ffi"] }
+arrow-schema = "59.2"
+arrow-cast = "59.2"
+futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
+
+[dev-dependencies]
+tempfile.workspace = true

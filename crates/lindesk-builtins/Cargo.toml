@@ -10,13 +10,27 @@ authors.workspace = true
 
 [features]
 default = ["x11", "cosmic"]
-x11 = []
-cosmic = []
+x11 = ["dep:x11rb"]
+cosmic = ["dep:wayland-client", "dep:wayland-protocols", "dep:cosmic-protocols"]
 
 [dependencies]
 lindesk-plugin-api.workspace = true
 lindesk-core.workspace = true
+lindesk-store.workspace = true
+lindesk-sys.workspace = true
+lindesk-host.workspace = true
+zbus = { workspace = true, features = ["tokio", "blocking-api"] }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 tracing.workspace = true
+globset.workspace = true
+x11rb = { workspace = true, optional = true, features = ["xinput", "xtest"] }
+wayland-client = { workspace = true, optional = true }
+wayland-protocols = { workspace = true, optional = true }
+cosmic-protocols = { workspace = true, optional = true }
+rustix.workspace = true
+
+[dev-dependencies]
+lindesk-sys = { workspace = true, features = ["fixtures"] }
+tempfile.workspace = true

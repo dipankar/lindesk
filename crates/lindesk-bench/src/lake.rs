@@ -174,16 +174,16 @@ mod tests {
         let root = t.path().join("telemetry");
         let msg = store(&sample_results(), Some(&root)).unwrap();
         assert!(msg.contains("rows"), "{msg}");
-        let has_parquet = |table: &str| {
+        let has_files = |table: &str| {
             fn walk(d: &Path) -> bool {
                 std::fs::read_dir(d).into_iter().flatten().flatten().any(|e| {
                     let p = e.path();
-                    if p.is_dir() { walk(&p) } else { p.extension().is_some_and(|x| x == "parquet") }
+                    if p.is_dir() { walk(&p) } else { p.extension().is_some_and(|x| x == "vortex") }
                 })
             }
             walk(&root.join(table))
         };
-        assert!(has_parquet("bench_runs"));
-        assert!(has_parquet("bench_samples"));
+        assert!(has_files("bench_runs"));
+        assert!(has_files("bench_samples"));
     }
 }
