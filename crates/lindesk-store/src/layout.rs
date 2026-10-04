@@ -371,18 +371,20 @@ impl LakeLock {
         file_mode: u32,
         timeout: Duration,
     ) -> io::Result<Option<LakeLock>> {
-        if let Some(l) = Self::try_acquire(root, mode, file_mode)? {
-            return Ok(Some(l));
-        }
-        let root = root.to_path_buf();
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        std::thread::Builder::new().name("lindesk-lake-lock".into()).spawn(move || {
-            // If the receiver gave up, the send fails and the lock is dropped (released).
-            let _ = tx.send(Self::acquire(&root, mode, file_mode));
-        })?;
-        match rx.recv_timeout(timeout) {
-            Ok(r) => r.map(Some),
-            Err(_) => Ok(None),
+        // Poll with backoff rather than parking a blocking flock() on a helper thread: an
+        // abandoned waiter would grab the lock after we gave up and starve the next caller.
+        let deadline = std::time::Instant::now() + timeout;
+        let mut pause = Duration::from_millis(2);
+        loop {
+            if let Some(l) = Self::try_acquire(root, mode, file_mode)? {
+                return Ok(Some(l));
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(pause.min(deadline - now));
+            pause = (pause * 2).min(Duration::from_millis(50));
         }
     }
 }

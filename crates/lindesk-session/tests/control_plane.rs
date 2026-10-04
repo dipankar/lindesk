@@ -188,11 +188,18 @@ async fn user_scope_control_plane() {
         .map(|p| p["name"].as_str().unwrap())
         .collect();
     assert_eq!(active, ["battery"]);
+    // The notice is emitted by the engine thread on its next step, after the reply.
+    let mut seen = false;
+    for _ in 0..50 {
+        let events = parse(&qos.recent_events(500).await.unwrap());
+        if events.as_array().unwrap().iter().any(|e| e["name"] == "profile.changed" && e["data"]["to"] == "battery") {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(seen, "profile.changed notice in the events");
     let events = parse(&qos.recent_events(500).await.unwrap());
-    assert!(
-        events.as_array().unwrap().iter().any(|e| e["name"] == "profile.changed" && e["data"]["to"] == "battery"),
-        "profile.changed notice in the events"
-    );
     assert!(events.as_array().unwrap().iter().any(|e| e["name"] == "change.applied"));
     // Back to auto, then unwind both so the file is the original again.
     let auto = parse(&qos.set_profile("auto").await.unwrap())["id"].as_u64().unwrap();

@@ -263,14 +263,29 @@ mod tests {
     #[test]
     fn ioprio_and_uclamp_on_every_thread() {
         // Our own process has several threads (the test harness).
-        let _workers: Vec<_> =
-            (0..2).map(|_| std::thread::spawn(|| std::thread::sleep(std::time::Duration::from_millis(300)))).collect();
+        // Other tests in this process may change their own threads' ioprio concurrently (the
+        // telemetry writer lowers itself to idle), so only check the threads we control.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _workers: Vec<_> = (0..2)
+            .map(|_| {
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    tx.send(rustix::thread::gettid().as_raw_nonzero().get()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(300))
+                })
+            })
+            .collect();
+        let mut ours: Vec<i32> = rx.iter().take(2).collect();
+        ours.push(rustix::thread::gettid().as_raw_nonzero().get());
         let pid = std::process::id() as i32;
         let t = Target::Process { pid };
         let mut a = ProcessActuator::new();
         let original = a.read(&t, &Knob::IoPrio).unwrap();
         a.apply(&t, &Setting::IoPrio { class: IoPrioClass::BestEffort, level: 7 }).unwrap();
         for tid in procfs::threads(std::path::Path::new("/proc"), pid).unwrap() {
+            if !ours.contains(&tid) {
+                continue;
+            }
             // Threads may exit meanwhile.
             if let Ok(p) = syscalls::ioprio_get(tid) {
                 assert_eq!(p, IoPrio::BestEffort(7), "tid {tid}");
