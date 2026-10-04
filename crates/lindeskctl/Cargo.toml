@@ -14,6 +14,7 @@ lindesk-core.workspace = true
 lindesk-host.workspace = true
 lindesk-sys.workspace = true
 lindesk-ipc.workspace = true
+lindesk-changes.workspace = true
 lindesk-query.workspace = true
 lindesk-store.workspace = true
 # Only the threshold policy is needed (simulate's baseline); skip the desktop adapters.

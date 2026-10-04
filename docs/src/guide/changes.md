@@ -14,27 +14,57 @@ client, or a local AI agent through the MCP server. A changeset is:
 * and, for agents, **temporary until confirmed**: a dead-man ttl auto-reverts it.
 
 ```console
-$ lindeskctl change plan sysctl vm.swappiness=10 --set plugins.threshold.config.epoch=800ms
-risk: medium
---- a/etc/lindesk/lindesk.toml
-+++ b/etc/lindesk/lindesk.toml
-@@ -92,7 +92,7 @@
- # auto [500ms]: 300ms on battery, 500ms on AC.
--epoch = "auto"
-+epoch = "800ms"
+$ lindeskctl changes plan --sysctl vm.swappiness=10 --sysctl vm.page-cluster=0
+plan  ● MEDIUM risk · system scope · 2 ops
+  #  OP      TARGET           RISK    CHANGE
+  0  sysctl  vm.swappiness    medium  60 → 10
+  1  sysctl  vm.page-cluster  medium  3 → 0
 --- a/proc/sys/vm/swappiness
 +++ b/proc/sys/vm/swappiness
-@@ sysctl vm.swappiness = 10 @@
 -60
 +10
-$ sudo lindeskctl change apply ... --ttl 10m -m "less swapping"
-changeset 7 applied (auto-reverts at 14:32 unless confirmed)
-$ lindeskctl change confirm 7
-$ lindeskctl change list
-$ lindeskctl change revert 7
-$ lindeskctl change revert-to 4         # undo everything after version 4
-$ lindeskctl change diff 4 7            # config file between two versions
+…
+$ lindeskctl changes apply --set plugins.threshold.config.epoch=400ms --ttl 10m -m "shorter epochs"
+plan  ● LOW risk · user scope · 1 op
+  …
+Apply this change (auto-reverts in 10m00s unless confirmed)? [y/N] y
+✓ change #7 applied (user scope, low risk)
+  auto-reverts in 10m00s unless `lindeskctl changes confirm 7`
+  undo: lindeskctl changes revert 7
+$ lindeskctl changes confirm 7
+$ lindeskctl changes list
+ID  WHEN    BY               SCOPE   RISK    STATUS       TTL     DESCRIPTION
+#8  2m ago  mcp:claude-code  system  medium  ◐ applied    7m41s   less swapping
+#7  5m ago  cli              user    low     ✓ confirmed  -       shorter epochs
+#3  1d ago  daemon:dead-man  system  medium  ↺ expired    -       lower page-cluster
+$ lindeskctl changes show 8
+$ lindeskctl changes revert --system 8
+$ lindeskctl changes revert-to 4        # undo everything after version 4
+$ lindeskctl changes diff 4 7           # the changesets in between and the config diff
 ```
+
+`lindeskctl change …` works too. Shortcuts build the ops for you:
+
+| Flag | Op |
+|---|---|
+| `--set KEY=VALUE` | `config_set` (value parsed as TOML when it can be: `true`, `5`, `0.5`; else a string such as `400ms`) |
+| `--unset KEY` | `config_unset` |
+| `--profile NAME` | `profile_use` (or `lindeskctl profile use NAME`) |
+| `--class UNIT=CLASS` | `class_override` |
+| `--sysctl KEY=VALUE` | `sysctl` |
+| `--scheduler DEVICE=SCHED` | `io_scheduler` (`nvme0n1=mq-deadline` or `259:0=bfq`) |
+| `--zswap on\|off`, `--zswap-compressor`, `--zswap-max-pool` | `zswap` |
+| `--epp PREF`, `--governor GOV` | `cpu_epp`, `cpu_governor` |
+| `--persist` | also persist sysctl/scheduler ops across reboots |
+
+Or pass a JSON file of ops (`lindeskctl changes plan ops.json`, or `-` for stdin). Config
+edits go to your config through lindesk-session; `--system` edits `/etc/lindesk/lindesk.toml`
+through lindeskd. Kernel tunables always go to lindeskd. `apply` asks for confirmation on a
+terminal (`--yes` skips it; without a terminal `--yes` is required). High-risk changes (I/O
+scheduler, cpufreq) get `--ttl 10m` unless you pass `--ttl` yourself (`--ttl 0`: keep it).
+`changes list` shows both scopes; system changes are numbered separately, so `show`,
+`confirm` and `revert` take `--system` for them (the hints lindeskctl prints include it).
+
 
 ## Ops
 

@@ -8,6 +8,7 @@
 - [Everyday use](guide/usage.md)
 - [Configuration](guide/configuration.md)
 - [CPU profiles](guide/profiles.md)
+- [Hardware awareness, latency map and swap](guide/hardware.md)
 - [Versioned changes](guide/changes.md)
 - [MCP server for local agents](guide/mcp.md)
 - [Telemetry and DuckDB](guide/telemetry.md)

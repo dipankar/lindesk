@@ -3,7 +3,7 @@
 set -e
 
 SYSTEM_UNITS="lindeskd.service lindesk-compact.timer"
-USER_UNITS="lindesk-session.service lindesk-compact.timer"
+USER_UNITS="lindesk-session.service lindesk-compact.timer lindesk-mcp.socket lindesk-mcp.service"
 
 case "$1" in
 remove)

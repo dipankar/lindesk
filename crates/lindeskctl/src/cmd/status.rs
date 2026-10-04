@@ -144,6 +144,9 @@ pub fn render(
     if let Some(m) = &env.mode {
         meta.push(m.clone());
     }
+    if let Some(p) = &env.profile {
+        meta.push(format!("profile {}", p.short()));
+    }
     if let Some(u) = env.uptime {
         meta.push(format!("up {}", duration_ms(u.as_millis() as i64)));
     }
@@ -154,7 +157,18 @@ pub fn render(
     if st.dry_run {
         line.push_str(&format!("{}{}", ui.dim(" · "), ui.yellow("DRY RUN: nothing is applied")));
     }
-    s.push_str(&format!("  {line}\n\n"));
+    s.push_str(&format!("  {line}\n"));
+    let now = if st.now > 0 { st.now } else { lindesk_core::clock::now_ms() };
+    for p in &env.pending {
+        s.push_str(&format!(
+            "  {} {}{}  {}\n",
+            ui.yellow("↺"),
+            ui.yellow(p.countdown(now)),
+            if p.description.is_empty() { String::new() } else { format!(" — {}", p.description) },
+            ui.dim(format!("keep it: {}", p.confirm_hint()))
+        ));
+    }
+    s.push('\n');
     if let Some(psi) = psi {
         s.push_str(&psi_section(ui, psi));
         s.push('\n');
@@ -260,16 +274,31 @@ pub fn render(
     s
 }
 
+/// Daemons whose pending changes a view of `source` shows: the session agent's and the
+/// broker's (system changes affect everyone).
+pub fn pending_sources(source: Daemon) -> Vec<Daemon> {
+    match source {
+        Daemon::Session => vec![Daemon::Session, Daemon::Broker],
+        Daemon::Broker => vec![Daemon::Broker],
+    }
+}
+
 pub fn status(ui: &Ui) -> Result<()> {
     match fetch(ui.system) {
         Ok(f) => {
+            let pending = crate::cmd::changes::pending(&pending_sources(f.source));
             if ui.json {
-                return ui.print_json(&f.raw);
+                let mut raw = f.raw.clone();
+                if let Some(o) = raw.as_object_mut() {
+                    o.insert("pending_changes".into(), serde_json::to_value(&pending)?);
+                }
+                return ui.print_json(&raw);
             }
             match &f.status {
                 Some(st) => {
                     let psi = live::read_psi(Path::new("/proc"));
                     let mut env = f.envelope.clone();
+                    env.pending = pending;
                     if env.hardware.is_none() {
                         env.hardware = Some(live::local_hardware());
                     }
@@ -334,6 +363,9 @@ pub fn bare(ui: &Ui) -> Result<()> {
             s.push_str(&format!("{} {} {}\n", badge(ui, st.level), ui.dim("—"), ui.bold(live::summary(&st))));
             let mut meta = vec![source.name().to_string()];
             meta.extend(envelope.mode.clone());
+            if let Some(p) = &envelope.profile {
+                meta.push(format!("profile {}", p.short()));
+            }
             let hw = envelope.hardware.clone().unwrap_or_else(live::local_hardware);
             meta.push(ui::hardware_compact(&hw));
             if st.dry_run {
@@ -348,6 +380,14 @@ pub fn bare(ui: &Ui) -> Result<()> {
             }
             for r in envelope.requirements.iter().take(1) {
                 s.push_str(&format!("  {}\n", ui.dim(format!("⚠ {r}"))));
+            }
+            let now = lindesk_core::clock::now_ms();
+            for p in crate::cmd::changes::pending(&pending_sources(source)).iter().take(2) {
+                s.push_str(&format!(
+                    "  {} {}\n",
+                    ui.yellow(format!("↺ {}", p.countdown(now))),
+                    ui.dim(format!("keep it: {}", p.confirm_hint()))
+                ));
             }
         }
         Ok(Fetched { source, .. }) => {
@@ -487,10 +527,23 @@ pub mod tests {
             epoch: Some(true),
             hardware: Some(lindesk_plugin_api::Hardware { cpus: 32, mem_total: 62 << 30, ..Default::default() }),
             requirements: vec!["PSI: per-cgroup PSI disabled".into()],
+            profile: Some(crate::cmd::profile::ProfileState {
+                active: "battery".into(),
+                setting: Some("auto".into()),
+                pinned: false,
+                reason: "battery power".into(),
+            }),
+            pending: vec![crate::cmd::changes::Pending {
+                id: 7,
+                scope: lindesk_changes::Scope::User,
+                ttl_until: st.now + 8 * 60_000 + 30_000,
+                description: "shorter epochs".into(),
+            }],
             ..Default::default()
         };
         let s = render(&Ui::plain(), Daemon::Session, &st, &env, None, true);
-        assert!(s.contains("lindesk-session · connected · 32×CPU · 62 GiB"), "{s}");
+        assert!(s.contains("lindesk-session · connected · profile auto→battery · 32×CPU · 62 GiB"), "{s}");
+        assert!(s.contains("↺ change #7 reverts in 8m — shorter epochs  keep it: lindeskctl changes confirm 7"), "{s}");
         assert!(s.contains("⚡ interaction epoch"), "{s}");
         assert!(s.contains("⚠ PSI: per-cgroup PSI disabled"), "{s}");
         assert!(s.starts_with("● YELLOW — protecting firefox; 1 workload yielding"), "{s}");

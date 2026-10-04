@@ -31,6 +31,22 @@ with this app"* to those knobs. lindesk is that control plane.
    floor. Critical processes (compositor, audio) can be boosted but never throttled. Every
    change is runtime-only and reverted on exit or crash.
 
+## Profiles & hardware awareness
+
+Great defaults out of the box: lindesk detects the CPU (x86_64/aarch64, hybrid P/E or
+big.LITTLE cores, EAS, cpufreq/EPP), RAM and swap, each disk's kind, the power source and
+virtualization, and scales its thresholds to them. A **profile** (an overlay on the
+config) is picked automatically: `battery` when unplugged, `gaming` while a game has focus,
+`hdd` on spinning disks, `x86-hybrid` / `arm-eas` on hybrid CPUs, else `balanced`.
+
+```bash
+lindeskctl profile list        # which profile is active, which match, and why
+lindeskctl profile use gaming  # pin one (a versioned change; `use auto` to undo)
+lindeskctl hardware            # what lindesk detected and how it adapts
+lindeskctl calibrate           # measure the latency map: P vs E speed, wakeup p99, disk 4K p99
+lindeskctl swap                # zram/zswap/swappiness analysis with ready-to-run fixes
+```
+
 ## Everything is a plugin
 
 ```text
@@ -66,13 +82,35 @@ There are SDKs for [Rust](crates/lindesk-plugin) and [Python](sdk/python), and
 ## Telemetry you can query with DuckDB
 
 Pressure, per-unit usage, every decision and its reason are written to a hive-partitioned
-Parquet lake. The lake is compacted hourly, rolled up into 1m and 1h tables, and pruned by
-retention. Data can be deleted on demand.
+[Vortex](https://vortex.dev) lake, read through DuckDB's `vortex` extension (with a pure-Rust
+fallback when it is unavailable). The lake is compacted hourly, rolled up into 1m and 1h
+tables, and pruned by retention. Data can be deleted on demand.
 
 ```bash
 lindeskctl query "select resource, avg(some_avg10) from pressure group by 1"
 lindeskctl data delete --where "app_id = 'org.mozilla.firefox'"
-duckdb -readonly ~/.local/state/lindesk/catalog.duckdb   # any DuckDB client works
+duckdb -readonly ~/.local/state/lindesk/catalog.duckdb -c "INSTALL vortex; LOAD vortex; FROM lindesk_tables"
+```
+
+## For AI agents (MCP)
+
+`lindesk-mcp` lets a local agent assess why your desktop stutters and fix it, safely:
+
+```bash
+claude mcp add lindesk -- lindesk-mcp      # Claude Code; others: lindeskctl mcp config --client cursor
+```
+
+* **Read-only by default**: status, doctor, hardware, latency map, swap analysis, telemetry
+  SQL, ranked recommendations.
+* **Every change is guardrailed**: allow-listed sysctls with ranges, safety caps can only
+  tighten, rate limits, polkit for system scope. lindesk-mcp itself has no privileges.
+* **Versioned and auto-reverting**: each change records the previous values and reverts
+  itself after 10 minutes unless confirmed. You see and undo everything:
+
+```bash
+lindeskctl changes list                    # who changed what, when; ttl left
+lindeskctl changes revert 7                # undo (or: changes confirm 7 to keep it)
+lindeskctl changes apply --sysctl vm.swappiness=10 --ttl 10m -m "less swapping"   # same, by hand
 ```
 
 ## Quick start
@@ -89,6 +127,7 @@ lindeskctl               # what lindesk is doing right now
 lindeskctl watch         # live dashboard: level, PSI, protected and yielding work, events
 lindeskctl run --batch make -j32
 lindeskctl explain firefox
+lindeskctl calibrate     # optional: measure this machine's latency baseline (≈15 s)
 ```
 
 ## Components
@@ -97,10 +136,12 @@ lindeskctl explain firefox
 |---|---|
 | `lindeskd` | privileged broker (system service): probe, PSI, policy, system units, iocost |
 | `lindesk-session` | per-user agent: foreground tracking, user units, user plugins |
-| `lindeskctl` | CLI: doctor, status/watch/events, explain, run/set/restore, plugin tooling, simulate, query/data, config, bench |
+| `lindeskctl` | CLI: doctor, status/watch/events, explain, run/set/restore, profile, changes, hardware/swap/calibrate, mcp, plugin tooling, simulate, query/data, config, bench |
 | `lindesk-data` | telemetry maintenance (timer) |
+| `lindesk-mcp` | MCP server for local AI agents (stdio; optional user socket unit) |
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the contracts between them.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the contracts between them and
+[docs/CONTROL-PLANE.md](docs/CONTROL-PLANE.md) for profiles, changes and MCP.
 
 ## License
 

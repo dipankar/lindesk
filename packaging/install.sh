@@ -24,7 +24,7 @@
 #
 # Environment:
 #   LINDESK_BIN_DIR   directory holding prebuilt lindeskd, lindesk-session, lindeskctl,
-#                     lindesk-data and lindesk-bench (implies --no-build)
+#                     lindesk-data, lindesk-bench and lindesk-mcp (implies --no-build)
 #   CARGO_TARGET_DIR  honoured when locating/building binaries (default: <repo>/target)
 #   CARGO             cargo executable (default: cargo from PATH)
 #   RUSTC             rustc executable for the version check (default: next to cargo)
@@ -39,9 +39,11 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 PKG="$ROOT/packaging"
 
-BINARIES=(lindeskd lindesk-session lindeskctl lindesk-data lindesk-bench)
+BINARIES=(lindeskd lindesk-session lindeskctl lindesk-data lindesk-bench lindesk-mcp)
 SYSTEM_UNITS=(lindeskd.service lindesk-compact.service lindesk-compact.timer)
-USER_UNITS=(lindesk-session.service lindesk-compact.service lindesk-compact.timer)
+# lindesk-mcp.{service,socket} are installed but not enabled: stdio clients need no unit, and
+# the HTTP endpoint is opt-in (systemctl --user enable --now lindesk-mcp.socket).
+USER_UNITS=(lindesk-session.service lindesk-compact.service lindesk-compact.timer lindesk-mcp.service lindesk-mcp.socket)
 ENABLE_SYSTEM=(lindeskd.service lindesk-compact.timer)
 ENABLE_USER=(lindesk-session.service lindesk-compact.timer)
 GNOME_UUID="lindesk@lindesk.org"
@@ -617,6 +619,11 @@ do_install() {
 	for f in "$PKG"/config/rules.d/*.toml; do
 		put 0644 "$f" "$pkgdatadir/rules.d/${f##*/}"
 	done
+	# profiles: the shipped ones (also built into the binaries); admins override in /etc
+	put_dir "$confdir/profiles.d"
+	for f in "$PKG"/config/profiles.d/*.toml; do
+		put 0644 "$f" "$pkgdatadir/profiles.d/${f##*/}"
+	done
 	put_dir "$pkglibdir/plugins"
 
 	# desktop integration
@@ -878,6 +885,10 @@ What now:
   lindeskctl              what lindesk is doing right now
   lindeskctl watch        the same, live
   lindeskctl doctor       what this machine supports, and what to fix
+  lindeskctl calibrate    measure this machine's latency baseline (≈15 s, when idle)
+
+  AI agents (MCP): claude mcp add lindesk -- lindesk-mcp
+    (optional HTTP endpoint: systemctl --user enable --now lindesk-mcp.socket)
 
   GNOME: lindesk-session enables its Shell extension on first start. If it stays off:
            gnome-extensions enable $GNOME_UUID   (on Wayland, log out and back in first)

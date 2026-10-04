@@ -6,10 +6,10 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 use lindesk_core::config::Config;
-use lindesk_query::{DeleteRequest, Format, Lake, QueryError};
+use lindesk_query::{CATALOG_HINT, DeleteRequest, Format, Lake, QueryError};
 use serde_json::json;
 
-use crate::cli::{DataCmd, QueryArgs, QueryFormat};
+use crate::cli::{BackendArg, DataCmd, QueryArgs, QueryFormat};
 use crate::cmd::doctor::tilde;
 use crate::paths;
 use crate::ui::{Table, Ui, bytes, confirm, out};
@@ -18,8 +18,13 @@ fn config(ui: &Ui) -> Option<Config> {
     paths::load_config(&paths::config_path(ui.system)).ok()
 }
 
-/// The lake for the scope (or an explicit directory).
+/// The lake for the scope (or an explicit directory), read with the default backend.
 pub fn open_lake(ui: &Ui, explicit: Option<&Path>) -> Result<Lake> {
+    open_lake_with(ui, explicit, BackendArg::Auto)
+}
+
+/// [`open_lake`] with a backend choice (`--backend`).
+pub fn open_lake_with(ui: &Ui, explicit: Option<&Path>, backend: BackendArg) -> Result<Lake> {
     let root = paths::lake_root(explicit, ui.system, config(ui).as_ref());
     if ui.system && root.exists() && std::fs::read_dir(&root).is_err() {
         bail!(
@@ -27,7 +32,7 @@ pub fn open_lake(ui: &Ui, explicit: Option<&Path>) -> Result<Lake> {
             root.display()
         );
     }
-    Ok(Lake::open(&root)?)
+    Ok(Lake::open(&root)?.with_backend(backend.into()))
 }
 
 fn query_error(e: QueryError, lake: &Lake) -> anyhow::Error {
@@ -52,7 +57,7 @@ fn query_error(e: QueryError, lake: &Lake) -> anyhow::Error {
 }
 
 pub fn query(ui: &Ui, a: &QueryArgs) -> Result<()> {
-    let lake = open_lake(ui, a.lake.as_deref())?;
+    let lake = open_lake_with(ui, a.lake.as_deref(), a.backend)?;
     let fmt = if ui.json && a.format == QueryFormat::Table { QueryFormat::Json } else { a.format };
     let format = match fmt {
         QueryFormat::Table => Format::Table,
@@ -150,6 +155,13 @@ fn print_stats(ui: &Ui, s: &lindesk_query::LakeStats) {
         ui.dim(format!("{} rows, {}", s.rows, bytes(s.bytes)))
     );
     o.push_str(&t.render(ui));
+    let legacy: usize = s.tables.iter().map(|x| x.legacy_files).sum();
+    if legacy > 0 {
+        o.push_str(&ui.yellow(format!(
+            "\n{legacy} legacy parquet file{} (converted on next compact: lindeskctl data compact)",
+            if legacy == 1 { "" } else { "s" }
+        )));
+    }
     out(&o);
 }
 
@@ -186,18 +198,26 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
     match cmd {
         DataCmd::Catalog(l) => {
             require_write(ui, "regenerating the system catalog")?;
-            let lake = open_lake(ui, l.lake.as_deref())?;
-            let p = lake.catalog()?;
+            let lake = open_lake_with(ui, l.lake.as_deref(), l.backend)?;
+            let p = lake.catalog().map_err(|e| {
+                anyhow!("{e}\n  The catalog needs the DuckDB vortex extension: lindeskctl data install-extension")
+            })?;
             if ui.json {
-                return ui.print_json(&json!({"catalog": p}));
+                return ui.print_json(&json!({"catalog": p, "client_setup": CATALOG_HINT}));
             }
             ui.info(format!("{} wrote {}", ui.ok_mark(), tilde(&p)));
-            ui.info(ui.dim(format!("open it from any DuckDB client: duckdb -readonly {}", p.display())));
+            ui.info(ui.dim(format!(
+                "open it from any DuckDB client: duckdb -readonly {} -c \"{CATALOG_HINT} FROM lindesk_tables\"",
+                p.display()
+            )));
+            ui.info(
+                ui.dim(format!("(run `{CATALOG_HINT}` first in every DuckDB session; DuckDB doesn't autoload it)")),
+            );
             Ok(())
         }
         DataCmd::Compact(l) => {
             require_write(ui, "compacting the system lake")?;
-            let lake = open_lake(ui, l.lake.as_deref())?;
+            let lake = open_lake_with(ui, l.lake.as_deref(), l.backend)?;
             must_exist(&lake)?;
             let r = lake.compact(now())?;
             if ui.json {
@@ -217,7 +237,7 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
         }
         DataCmd::Prune(l) => {
             require_write(ui, "pruning the system lake")?;
-            let lake = open_lake(ui, l.lake.as_deref())?;
+            let lake = open_lake_with(ui, l.lake.as_deref(), l.backend)?;
             must_exist(&lake)?;
             let retention = config(ui).unwrap_or_default().telemetry.retention;
             let r = lake.prune(&retention, now())?;
@@ -237,7 +257,7 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
             Ok(())
         }
         DataCmd::Stats(l) => {
-            let lake = open_lake(ui, l.lake.as_deref())?;
+            let lake = open_lake_with(ui, l.lake.as_deref(), l.backend)?;
             let s = lake.stats()?;
             if ui.json {
                 return ui.print_json(&s);
@@ -245,11 +265,27 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
             print_stats(ui, &s);
             Ok(())
         }
+        DataCmd::InstallExtension(l) => {
+            require_write(ui, "installing the DuckDB vortex extension for the system lake")?;
+            let lake = open_lake_with(ui, l.lake.as_deref(), BackendArg::Extension)?;
+            lake.install_extension().map_err(|e| {
+                anyhow!("{e}\n  It downloads once from DuckDB's extension repository; without it lindesk uses its built-in Vortex reader.")
+            })?;
+            if ui.json {
+                return ui.print_json(&json!({"installed": true, "dir": lake.extension_dir()}));
+            }
+            out(&format!(
+                "{} DuckDB vortex extension installed in {} (queries and the catalog work offline now)",
+                ui.ok_mark(),
+                tilde(lake.extension_dir())
+            ));
+            Ok(())
+        }
         DataCmd::Delete { predicate, since, until, tables, dry_run, yes, lake: l } => {
             if !dry_run {
                 require_write(ui, "deleting from the system lake")?;
             }
-            let lake = open_lake(ui, l.lake.as_deref())?;
+            let lake = open_lake_with(ui, l.lake.as_deref(), l.backend)?;
             must_exist(&lake)?;
             let n = now();
             let mut req = DeleteRequest {
@@ -294,7 +330,7 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
         }
         DataCmd::Purge { yes, lake: l } => {
             require_write(ui, "purging the system lake")?;
-            let lake = open_lake(ui, l.lake.as_deref())?;
+            let lake = open_lake_with(ui, l.lake.as_deref(), l.backend)?;
             if !lake.root().is_dir() {
                 out("no telemetry to purge");
                 return Ok(());
@@ -311,12 +347,12 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
             out(&format!("{} removed {} files ({})", ui.ok_mark(), r.files, bytes(r.bytes)));
             Ok(())
         }
-        DataCmd::Shell(l) => shell(ui, l.lake.as_deref()),
+        DataCmd::Shell(l) => shell(ui, l.lake.as_deref(), l.backend),
     }
 }
 
-fn shell(ui: &Ui, explicit: Option<&Path>) -> Result<()> {
-    let lake = open_lake(ui, explicit)?;
+fn shell(ui: &Ui, explicit: Option<&Path>, backend: BackendArg) -> Result<()> {
+    let lake = open_lake_with(ui, explicit, backend)?;
     let Some(duckdb) = paths::which("duckdb") else {
         bail!(
             "the duckdb CLI isn't installed. Get it from https://duckdb.org/docs/installation (one static binary; e.g. `curl https://install.duckdb.org | sh`),\n  or query without it: lindeskctl query \"select …\""
@@ -332,10 +368,14 @@ fn shell(ui: &Ui, explicit: Option<&Path>) -> Result<()> {
             )
         })?;
     }
-    ui.info(
-        ui.dim(format!("opening {} read-only; tables are views over the lake (.tables lists them)", tilde(&catalog))),
-    );
-    let err = Command::new(duckdb).arg("-readonly").arg(&catalog).exec();
+    ui.info(ui.dim(format!(
+        "opening {} read-only; tables are views over the Vortex lake (.tables lists them)",
+        tilde(&catalog)
+    )));
+    // DuckDB doesn't autoload the extension the views need.
+    let ext_dir = lake.extension_dir().to_string_lossy().replace('\'', "''");
+    let init = format!("SET extension_directory = '{ext_dir}'; {CATALOG_HINT}");
+    let err = Command::new(duckdb).arg("-readonly").arg("-cmd").arg(init).arg(&catalog).exec();
     Err(anyhow!("running duckdb: {err}"))
 }
 

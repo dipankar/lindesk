@@ -73,11 +73,17 @@ pub enum Reach {
 
 /// Connect to the bus a daemon lives on.
 pub fn connect(d: Daemon) -> Result<Connection> {
+    connect_with(d, TIMEOUT)
+}
+
+/// [`connect`] with a method-call timeout (mutating calls may wait for polkit; calibration
+/// takes ≈15 s).
+pub fn connect_with(d: Daemon, timeout: Duration) -> Result<Connection> {
     let builder = match d {
         Daemon::Session => zbus::blocking::connection::Builder::session(),
         Daemon::Broker => zbus::blocking::connection::Builder::system(),
     };
-    builder.and_then(|b| b.method_timeout(TIMEOUT).build()).map_err(|e| match d {
+    builder.and_then(|b| b.method_timeout(timeout).build()).map_err(|e| match d {
         Daemon::Session => anyhow!(
             "can't connect to the D-Bus session bus ({e}).\n  lindesk-session lives on the session bus of a desktop login; \
              over ssh, run in the desktop's session or use --system."
@@ -111,7 +117,12 @@ fn first_line(s: &str) -> String {
 
 /// A connection to a running daemon (or an actionable error).
 pub fn running(d: Daemon) -> Result<Connection> {
-    let conn = connect(d)?;
+    running_with(d, TIMEOUT)
+}
+
+/// [`running`] with a method-call timeout.
+pub fn running_with(d: Daemon, timeout: Duration) -> Result<Connection> {
+    let conn = connect_with(d, timeout)?;
     match owned(&conn, d) {
         Ok(true) => Ok(conn),
         Ok(false) => Err(d.not_running()),
@@ -140,7 +151,9 @@ pub fn call_error(d: Daemon, method: &str, e: zbus::Error) -> anyhow::Error {
                 d.name(),
                 env!("CARGO_PKG_VERSION")
             ),
-            "org.freedesktop.DBus.Error.AccessDenied" | "org.freedesktop.DBus.Error.AuthFailed" => {
+            "org.freedesktop.DBus.Error.AccessDenied"
+            | "org.freedesktop.DBus.Error.AuthFailed"
+            | "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired" => {
                 anyhow!(
                     "{} refused {method}: not authorized ({msg}). Polkit decides; try again from an active desktop session or with sudo.",
                     d.name()
@@ -153,6 +166,14 @@ pub fn call_error(d: Daemon, method: &str, e: zbus::Error) -> anyhow::Error {
                     if d == Daemon::Session { "--user " } else { "" },
                     d.name()
                 )
+            }
+            n if n == "org.freedesktop.DBus.Error.InvalidArgs"
+                || n.ends_with(".Rejected")
+                || n.ends_with(".LimitsExceeded")
+                || msg.starts_with("rejected") =>
+            {
+                let m = msg.strip_prefix("rejected:").map(str::trim).unwrap_or(&msg);
+                anyhow!("{} refused it (guardrails): {m}", d.name())
             }
             _ => anyhow!("{} {method} failed: {msg}", d.name()),
         };
@@ -191,4 +212,97 @@ pub fn set_class(d: Daemon, pid: i32, class: &str) -> Result<()> {
 pub fn broker_reload() -> Result<()> {
     let conn = running(Daemon::Broker)?;
     broker_proxy(&conn)?.reload().map_err(|e| call_error(Daemon::Broker, "Reload", e))
+}
+
+// ---------------------------------------------------------------- control plane (CONTROL-PLANE.md §5)
+
+/// Mutating calls may wait for a polkit dialog.
+pub const MUTATE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Calibration takes ≈15 s plus polkit interaction.
+pub const CALIBRATE_TIMEOUT: Duration = Duration::from_secs(240);
+
+/// Call `member` on whichever daemon `d` is, through its proxy.
+pub fn call<T>(
+    d: Daemon,
+    member: &str,
+    timeout: Duration,
+    session: impl FnOnce(&QoSProxyBlocking<'_>) -> zbus::Result<T>,
+    broker: impl FnOnce(&BrokerProxyBlocking<'_>) -> zbus::Result<T>,
+) -> Result<T> {
+    let conn = running_with(d, timeout)?;
+    match d {
+        Daemon::Session => session(&session_proxy(&conn)?).map_err(|e| call_error(d, member, e)),
+        Daemon::Broker => broker(&broker_proxy(&conn)?).map_err(|e| call_error(d, member, e)),
+    }
+}
+
+pub fn plan_change(d: Daemon, ops_json: &str) -> Result<String> {
+    call(d, "PlanChange", TIMEOUT, |p| p.plan_change(ops_json), |p| p.plan_change(ops_json))
+}
+
+pub fn apply_change(d: Daemon, ops_json: &str, description: &str, ttl_secs: u32) -> Result<String> {
+    call(
+        d,
+        "ApplyChange",
+        MUTATE_TIMEOUT,
+        |p| p.apply_change(ops_json, description, ttl_secs),
+        |p| p.apply_change(ops_json, description, ttl_secs),
+    )
+}
+
+pub fn confirm_change(d: Daemon, id: u64) -> Result<()> {
+    call(d, "ConfirmChange", MUTATE_TIMEOUT, |p| p.confirm_change(id), |p| p.confirm_change(id))
+}
+
+pub fn revert_change(d: Daemon, id: u64) -> Result<String> {
+    call(d, "RevertChange", MUTATE_TIMEOUT, |p| p.revert_change(id), |p| p.revert_change(id))
+}
+
+pub fn list_changes(d: Daemon, limit: u32) -> Result<String> {
+    call(d, "ListChanges", TIMEOUT, |p| p.list_changes(limit), |p| p.list_changes(limit))
+}
+
+pub fn get_change(d: Daemon, id: u64) -> Result<String> {
+    call(d, "GetChange", TIMEOUT, |p| p.get_change(id), |p| p.get_change(id))
+}
+
+pub fn list_profiles(d: Daemon) -> Result<String> {
+    call(d, "ListProfiles", TIMEOUT, |p| p.list_profiles(), |p| p.list_profiles())
+}
+
+pub fn set_profile(d: Daemon, name: &str) -> Result<String> {
+    call(d, "SetProfile", MUTATE_TIMEOUT, |p| p.set_profile(name), |p| p.set_profile(name))
+}
+
+pub fn get_hardware(d: Daemon) -> Result<String> {
+    call(d, "GetHardware", TIMEOUT, |p| p.get_hardware(), |p| p.get_hardware())
+}
+
+pub fn swap_report(d: Daemon) -> Result<String> {
+    call(d, "SwapReport", TIMEOUT, |p| p.swap_report(), |p| p.swap_report())
+}
+
+/// Broker calibration: `CalibrateWith(options)`, falling back to `Calibrate()` on brokers
+/// that don't have it. Returns the `LatencyMap` JSON.
+pub fn calibrate(options_json: &str) -> Result<String> {
+    let d = Daemon::Broker;
+    let conn = running_with(d, CALIBRATE_TIMEOUT)?;
+    let p = broker_proxy(&conn)?;
+    match p.calibrate_with(options_json) {
+        Err(zbus::Error::MethodError(name, _, _)) if name.as_str() == "org.freedesktop.DBus.Error.UnknownMethod" => {
+            p.calibrate().map_err(|e| call_error(d, "Calibrate", e))
+        }
+        other => other.map_err(|e| call_error(d, "CalibrateWith", e)),
+    }
+}
+
+/// Is this error "the daemon isn't running" (as opposed to a refusal or a failure)?
+pub fn is_not_running(e: &anyhow::Error) -> bool {
+    let s = e.to_string();
+    s.contains("isn't running on the") || s.contains("can't connect to the D-Bus")
+}
+
+/// Is this error "the daemon doesn't implement this member" (older daemon)?
+pub fn is_unsupported(e: &anyhow::Error) -> bool {
+    e.to_string().contains("doesn't implement")
 }

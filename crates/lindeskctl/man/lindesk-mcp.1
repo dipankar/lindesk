@@ -1,0 +1,162 @@
+.TH LINDESK\-MCP 1 "2026" "lindesk 0.1.0" "User Commands"
+.SH NAME
+lindesk\-mcp \- MCP server that lets local AI agents assess and tune lindesk safely
+.SH SYNOPSIS
+.B lindesk\-mcp
+.RB [ \-\-stdio ]
+.RB [ \-\-log\-level
+.IR FILTER ]
+.br
+.B lindesk\-mcp
+.B \-\-listen
+.I ADDR
+.RB [ \-\-log\-level
+.IR FILTER ]
+.br
+.B lindesk\-mcp config
+.RB [ \-\-client
+.IR CLIENT ]
+.RB [ \-\-listen
+.IR ADDR ]
+.SH DESCRIPTION
+.B lindesk\-mcp
+is a Model Context Protocol server. A local AI agent (Claude Code, Claude Desktop,
+Cursor, ...) uses it to look at the machine (status, hardware, latency map, swap,
+telemetry), explain slowdowns, and apply fixes that are
+.BR guardrailed ,
+.B versioned
+and
+.BR revertible .
+.PP
+.B lindesk\-mcp
+holds no privileges. Read-only tools probe the machine and query the telemetry lake
+directly; every change goes over D-Bus to
+.BR lindesk\-session (1)
+(user scope) or
+.BR lindeskd (8)
+(system scope, polkit
+.IR org.lindesk.manage ),
+which validate it, record the previous values, version it and arm a dead-man switch:
+a change made through MCP auto-reverts after its ttl (10 minutes by default) unless the
+agent confirms it. When no daemon runs, read-only tools still work and mutating tools
+return an error that says how to start one.
+.PP
+By default it speaks MCP over stdio, so most clients start it on demand and no service is
+needed:
+.PP
+.RS
+.B claude mcp add lindesk \-\- lindesk\-mcp
+.RE
+.SH OPTIONS
+.TP
+.B \-\-stdio
+Serve MCP over standard input and output (the default). Logs go to stderr only.
+.TP
+.BI \-\-listen " ADDR"
+Serve MCP streamable HTTP (endpoint
+.IR /mcp )
+instead.
+.I ADDR
+is
+.BI unix: PATH
+(a socket created mode 0600 in a 0700 directory; no token) or a loopback
+.IB IP : PORT
+such as
+.IR 127.0.0.1:7457 .
+TCP requires
+.B Authorization: Bearer
+with the token generated into
+.I $XDG_RUNTIME_DIR/lindesk/mcp.token
+(mode 0600); non-loopback addresses and requests with a browser
+.B Origin
+header are refused. Also read from
+.BR LINDESK_MCP_LISTEN .
+When started by
+.I lindesk\-mcp.socket
+the listening socket is inherited (socket activation).
+.TP
+.BI \-\-log\-level " FILTER"
+Log filter, e.g.
+.B info
+or
+.BR lindesk_mcp=debug .
+Default:
+.BR $RUST_LOG ,
+else
+.B warn
+(stdio) or
+.B info
+(HTTP).
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.SH COMMANDS
+.TP
+.B config \fR[\fB\-\-client\fR claude\-code|claude\-desktop|cursor|generic] [\fB\-\-listen\fR \fIADDR\fR]
+Print the snippet that registers lindesk\-mcp with an MCP client: the
+.B claude mcp add
+command, or the JSON for the client's configuration file. With
+.BR \-\-listen ,
+describe a running HTTP endpoint instead of the stdio command. Also available as
+.BR "lindeskctl mcp config" .
+.SH TOOLS
+Read-only:
+.BR status ,
+.BR doctor ,
+.BR hardware ,
+.BR latency_map ,
+.BR swap_analysis ,
+.BR explain ,
+.B query
+(one read-only SQL statement over the telemetry lake),
+.BR list_plugins ,
+.BR list_profiles ,
+.BR list_changes ,
+.BR get_change ,
+.BR recent_events ,
+.B recommendations
+and the dry run
+.BR plan_change .
+Mutating (through the daemons):
+.BR apply_change ,
+.BR confirm_change ,
+.BR revert_change ,
+.B set_profile
+and
+.BR calibrate .
+The prompt
+.B assess\-responsiveness
+walks an agent through assessment, a plan, a ttl'd change, observation and confirm or
+revert.
+.SH FILES
+.TP
+.I /usr/lib/systemd/user/lindesk\-mcp.socket
+Optional user socket unit for a running HTTP endpoint at
+.IR $XDG_RUNTIME_DIR/lindesk/mcp.sock .
+Not enabled by default; enable it with
+.BR "systemctl \-\-user enable \-\-now lindesk\-mcp.socket" .
+.TP
+.I /usr/lib/systemd/user/lindesk\-mcp.service
+The service the socket activates.
+.TP
+.I $XDG_RUNTIME_DIR/lindesk/mcp.token
+Bearer token for loopback TCP.
+.SH EXIT STATUS
+0 on a clean shutdown, 1 on an error (which is printed on stderr).
+.SH EXAMPLES
+.nf
+claude mcp add lindesk \-\- lindesk\-mcp
+lindesk\-mcp config \-\-client claude\-desktop
+systemctl \-\-user enable \-\-now lindesk\-mcp.socket
+lindesk\-mcp \-\-listen 127.0.0.1:7457
+lindeskctl mcp status
+.fi
+.SH SEE ALSO
+.BR lindeskctl (1),
+.BR lindeskctl\-mcp (1),
+.BR lindeskctl\-changes (1),
+.BR lindesk\-session (1),
+.BR lindeskd (8)

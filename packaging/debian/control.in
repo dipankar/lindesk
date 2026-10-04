@@ -18,4 +18,5 @@ Description: macOS-style QoS for the Linux desktop
  .
  This package contains the root broker (lindeskd), the per-user session agent
  (lindesk-session), the lindeskctl CLI, telemetry maintenance (lindesk-data),
- the benchmark tool, the GNOME Shell extension and the KWin script.
+ the benchmark tool, the MCP server for local AI agents (lindesk-mcp), the
+ GNOME Shell extension and the KWin script.

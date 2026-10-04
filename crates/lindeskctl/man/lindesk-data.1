@@ -8,10 +8,14 @@ lindesk\-data \- maintain and query the lindesk telemetry lake
 .RB [ \-\-config
 .IR FILE ]
 .RB [ \-\-json ]
+.RB [ \-\-backend
+.BR auto | extension | native ]
+.RB [ \-\-extension\-dir
+.IR DIR ]
 .I COMMAND
 .SH DESCRIPTION
 lindesk records pressure, per-unit usage, events and metrics into a hive-partitioned
-Parquet lake.
+Vortex lake.
 .B lindesk\-data
 compacts sealed hour partitions, maintains the 1-minute and 1-hour rollups, applies
 retention and regenerates
@@ -40,6 +44,17 @@ and
 .B catalog
 Regenerate
 .IR catalog.duckdb .
+Needs the DuckDB
+.B vortex
+extension; clients must run
+.B "INSTALL vortex; LOAD vortex;"
+before using its views (DuckDB does not autoload it).
+.TP
+.B install\-extension
+Install the DuckDB
+.B vortex
+extension into the extension directory (needs network once), so queries and the catalog
+work offline afterwards.
 .TP
 .B stats
 Partitions, files, rows and bytes per table.
@@ -74,6 +89,19 @@ as root, else the user's).
 .TP
 .B \-\-json
 Print reports as JSON.
+.TP
+.BR \-\-backend " auto|extension|native"
+How
+.I .vortex
+files are read: the DuckDB
+.B vortex
+extension, the built-in Rust reader (offline; slower, memory-bound), or
+.B auto
+(the extension when it loads, else the built-in reader; the default).
+.TP
+.BI \-\-extension\-dir " DIR"
+DuckDB extension directory (default
+.IR <root>/../duckdb\-ext ).
 .SH SEE ALSO
 .BR lindeskctl (1),
 .BR lindeskd (8),

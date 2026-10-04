@@ -30,6 +30,7 @@ pub const DAEMON_PAGES: &[(&str, &str)] = &[
     ("lindeskd.8", include_str!("../../man/lindeskd.8")),
     ("lindesk-session.1", include_str!("../../man/lindesk-session.1")),
     ("lindesk-data.1", include_str!("../../man/lindesk-data.1")),
+    ("lindesk-mcp.1", include_str!("../../man/lindesk-mcp.1")),
 ];
 
 fn render(cmd: &clap::Command) -> Result<Vec<u8>> {
@@ -129,6 +130,9 @@ mod tests {
             let s = String::from_utf8(buf).unwrap();
             assert!(s.contains("lindeskctl"), "{shell:?}");
             assert!(s.contains("simulate") && s.contains("plugin"), "{shell:?}");
+            for sub in ["profile", "changes", "calibrate", "hardware", "swap", "mcp", "revert-to", "sysctl"] {
+                assert!(s.contains(sub), "{shell:?} completion lacks {sub}");
+            }
         }
     }
 
@@ -146,6 +150,17 @@ mod tests {
             "lindeskd.8",
             "lindesk-session.1",
             "lindesk-data.1",
+            "lindesk-mcp.1",
+            "lindeskctl-profile.1",
+            "lindeskctl-profile-use.1",
+            "lindeskctl-changes.1",
+            "lindeskctl-changes-apply.1",
+            "lindeskctl-changes-revert-to.1",
+            "lindeskctl-calibrate.1",
+            "lindeskctl-hardware.1",
+            "lindeskctl-swap.1",
+            "lindeskctl-mcp.1",
+            "lindeskctl-mcp-config.1",
         ] {
             assert!(names.contains(&n.to_string()), "missing {n}: {names:?}");
         }

@@ -22,7 +22,7 @@ EXPECTED="$SCRIPT_DIR/expected-files.txt"
 make_stubs() {
 	local dir=$1 b
 	mkdir -p "$dir"
-	for b in lindeskd lindesk-session lindesk-data lindesk-bench; do
+	for b in lindeskd lindesk-session lindesk-data lindesk-bench lindesk-mcp; do
 		printf '#!/bin/sh\n# stub %s\nexit 0\n' "$b" >"$dir/$b"
 	done
 	cat >"$dir/lindeskctl" <<'EOF'
@@ -31,7 +31,8 @@ make_stubs() {
 case "$1" in
 completions) echo "# lindeskctl $2 completion (stub)" ;;
 man) mkdir -p "$2" && printf '.TH LINDESKCTL 1\n' >"$2/lindeskctl.1" &&
-	printf '.TH LINDESKD 8\n' >"$2/lindeskd.8" ;;
+	printf '.TH LINDESKD 8\n' >"$2/lindeskd.8" &&
+	printf '.TH LINDESK-MCP 1\n' >"$2/lindesk-mcp.1" ;;
 esac
 exit 0
 EOF

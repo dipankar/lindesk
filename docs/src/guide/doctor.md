@@ -43,7 +43,7 @@ Telemetry                22.0 KiB in ~/.local/state/lindesk/telemetry
 → next step: install lindesk: sudo apt install ./lindesk_*.deb (or dnf/AUR), or ./packaging/install.sh  (lindesk-session is not installed, so nothing is protected yet)
 ```
 
-`doctor` has four parts:
+`doctor` has five parts:
 
 1. **Requirements**: a one-line summary of the hard requirements of `lindeskd`,
    `lindesk-session` and `lindeskctl` (details: `lindeskctl doctor --preflight`), and the
@@ -64,13 +64,20 @@ Telemetry                22.0 KiB in ~/.local/state/lindesk/telemetry
    bus) are running, whether the GNOME extension or KWin script is installed and enabled
    (COSMIC and X11 adapters are built in), whether your config is valid, and how much
    telemetry is stored.
-4. **The verdict**: either `✓ lindesk is protecting your desktop (FULL)` or the single
+4. **Control plane**: the active [profile](profiles.md) and why it was chosen (or which one
+   lindesk would pick when no daemon runs), [changes](changes.md) still waiting for
+   confirmation with their countdown (`change #7 reverts in 8m`), whether the
+   [latency map](hardware.md#the-latency-map) is calibrated (and how old or noisy it is),
+   and whether the [MCP server](mcp.md) is installed and its optional user socket enabled.
+   These lines are informational: they never make `doctor` exit 1.
+5. **The verdict**: either `✓ lindesk is protecting your desktop (FULL)` or the single
    most important next step.
 
 Every warning carries a remedy after `→`. The exit status is 0 when nothing needs
 action and 1 when something does, so `lindeskctl doctor -q && echo ok` works in scripts.
 `lindeskctl doctor --json` has the same content as structured data (`level`, `reasons`,
-`findings`, `probe`, `services`, `telemetry`, `requirements`, `needs_action`).
+`findings`, `probe`, `services`, `control_plane`, `telemetry`, `requirements`,
+`needs_action`).
 
 ## Preflight
 

@@ -38,6 +38,12 @@ fn help_lists_commands_with_examples() {
         "data",
         "completions",
         "man",
+        "profile",
+        "changes",
+        "calibrate",
+        "hardware",
+        "swap",
+        "mcp",
     ] {
         assert!(s.contains(c), "--help lacks {c}:\n{s}");
     }
@@ -222,4 +228,98 @@ fn config_check_and_plugin_enable_round_trip() {
     std::fs::write(cfg.join("lindesk.toml"), "[generl]\n").unwrap();
     let o = ctl(&["config", "check"], &env);
     assert_eq!(o.status.code(), Some(1));
+}
+
+/// No daemon: both buses point at sockets that don't exist, so everything is local.
+fn no_daemon(d: &Path) -> Vec<(&'static str, std::path::PathBuf)> {
+    let bogus = d.join("no-bus");
+    vec![
+        ("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", bogus.display()).into()),
+        ("DBUS_SYSTEM_BUS_ADDRESS", format!("unix:path={}", bogus.display()).into()),
+        ("XDG_CONFIG_HOME", d.join("config")),
+        ("XDG_STATE_HOME", d.join("state")),
+    ]
+}
+
+fn ctl_env(args: &[&str], env: &[(&'static str, std::path::PathBuf)]) -> Output {
+    let pairs: Vec<(&str, &Path)> = env.iter().map(|(k, v)| (*k, v.as_path())).collect();
+    ctl(args, &pairs)
+}
+
+#[test]
+fn profile_list_json_works_without_a_daemon() {
+    let d = tempfile::tempdir().unwrap();
+    let o = ctl_env(&["profile", "list", "--json"], &no_daemon(d.path()));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).expect("valid JSON");
+    assert_eq!(v["source"], "local");
+    assert_eq!(v["configured"], "auto", "defaults out of the box");
+    let profiles = v["profiles"].as_array().unwrap();
+    let names: Vec<&str> = profiles.iter().filter_map(|p| p["name"].as_str()).collect();
+    for n in ["balanced", "latency", "battery", "throughput", "gaming", "arm-eas", "x86-hybrid", "hdd"] {
+        assert!(names.contains(&n), "missing built-in profile {n}: {names:?}");
+    }
+    let active: Vec<&serde_json::Value> = profiles.iter().filter(|p| p["active"] == true).collect();
+    assert_eq!(active.len(), 1, "exactly one active profile");
+    assert_eq!(active[0]["name"], v["active"]);
+    assert!(v["reason"].as_str().is_some_and(|r| !r.is_empty()));
+    // The human form names the active profile.
+    let o = ctl_env(&["profile", "list"], &no_daemon(d.path()));
+    assert!(o.status.success());
+    assert!(stdout(&o).contains("active: "), "{}", stdout(&o));
+    assert!(stderr(&o).contains("isn't running"), "says it evaluated locally: {}", stderr(&o));
+}
+
+#[test]
+fn hardware_json_works_without_a_daemon() {
+    let d = tempfile::tempdir().unwrap();
+    let o = ctl_env(&["hardware", "--json"], &no_daemon(d.path()));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let hw: lindesk_plugin_api::Hardware = serde_json::from_slice(&o.stdout).expect("Hardware JSON");
+    assert!(hw.cpus > 0 && hw.mem_total > 0, "{hw:?}");
+    assert!(!hw.arch.is_empty());
+    let o = ctl_env(&["hardware"], &no_daemon(d.path()));
+    assert!(o.status.success());
+    let s = stdout(&o);
+    assert!(s.contains("CPU") && s.contains("memory") && s.contains("Latency map"), "{s}");
+}
+
+#[test]
+fn changes_without_a_daemon_fail_friendly() {
+    let d = tempfile::tempdir().unwrap();
+    let env = no_daemon(d.path());
+    let o = ctl_env(&["changes", "plan", "--set", "plugins.threshold.config.epoch=400ms"], &env);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let e = stderr(&o);
+    assert!(e.starts_with("error: can't plan this change"), "{e}");
+    assert!(e.contains("lindesk-session"), "{e}");
+    assert!(e.contains("has to be running"), "{e}");
+    // No ops is a usage error.
+    let o = ctl_env(&["changes", "plan"], &env);
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    // History reads the (empty) store.
+    let o = ctl_env(&["changes", "list", "--json"], &env);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&o.stdout).unwrap(), serde_json::json!([]));
+    let o = ctl_env(&["profile", "use", "gaming"], &env);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("can't switch profiles"), "{}", stderr(&o));
+    let o = ctl_env(&["profile", "use", "gamng"], &env);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(stderr(&o).contains("Did you mean 'gaming'?"), "{}", stderr(&o));
+}
+
+#[test]
+fn swap_and_mcp_status_json() {
+    let d = tempfile::tempdir().unwrap();
+    let env = no_daemon(d.path());
+    let o = ctl_env(&["swap", "--json"], &env);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert!(v["mem_total"].as_u64().unwrap() > 0 && v["findings"].is_array(), "{v}");
+    let o = ctl_env(&["mcp", "status", "--json"], &env);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["session_daemon"], false);
+    assert!(v.get("stdio_ready").is_some());
 }

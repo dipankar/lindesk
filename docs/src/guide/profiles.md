@@ -8,19 +8,31 @@ sensible one on any machine.
 
 ```console
 $ lindeskctl profile list
-  NAME         PRIO  MATCHES  DESCRIPTION
-* battery        50  yes      On battery: short, small boosts and harder background yielding
-  x86-hybrid     30  yes      x86 hybrid CPUs: P-core boosts for the foreground, E-core caps
-  gaming         60  no       Max foreground protection while a game is focused
-  hdd            40  no       Rotational storage: earlier I/O intervention
-  arm-eas        30  no       aarch64 with EAS: steer via uclamp
-  balanced        -  -        The shipped defaults
-  latency         -  -        Earlier intervention, longer epochs, stronger boosts
-  throughput      -  -        Build servers: background yields less
-active: battery (battery power)
+NAME        ACTIVE  MATCHES  PRIO  DESCRIPTION                                                          WHY
+x86-hybrid  ●       yes        30  x86 hybrid CPUs: P-core boosts for the foreground, E-core caps …     x86_64 hybrid CPU
+gaming              no         60  Max foreground protection while a game is focused (inherits latency)
+battery             no         50  On battery: short, small boosts and harder background yielding …
+hdd                 no         40  Rotational storage: earlier I/O intervention and smaller io.max steps
+arm-eas             no         30  aarch64 with EAS: steer the foreground to big cores and batch …
+balanced            manual      -  The shipped defaults: no intervention while healthy, …
+latency             manual      -  Earlier intervention, longer interaction epochs, stronger foreground boosts
+throughput          manual      -  Build servers: background yields less and intervention starts later
+
+active: x86-hybrid — x86_64 hybrid CPU
+profile = "auto": the best match wins (highest PRIO); pin one: lindeskctl profile use NAME
+this machine: AC power; x86_64 Intel hybrid, 24 CPUs; NVMe
+$ lindeskctl profile show gaming    # its [match], the effective [config] overlay, and the
+                                    # threshold values it resolves to here (● = changed)
 $ lindeskctl profile use gaming     # pin one (a versioned change, see "Changes")
+✓ profile gaming pinned — change #12
+  undo: lindeskctl changes revert 12 · or: lindeskctl profile use auto
 $ lindeskctl profile use auto       # back to automatic selection
+$ lindeskctl profile current        # the active profile and why
 ```
+
+Without a running daemon, `profile list`, `show` and `current` evaluate the profiles locally
+and say what lindesk *would* pick; `use` needs the daemon, because switching is a versioned
+change. `status` and `watch` show the active profile in their header.
 
 ## How selection works
 

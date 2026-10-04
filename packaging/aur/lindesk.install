@@ -55,6 +55,8 @@ post_install() {
     GNOME: lindesk-session enables its Shell extension on first start; if it stays off:
            gnome-extensions enable lindesk@lindesk.org
     KDE:   enable "lindesk" in System Settings > Window Management > KWin Scripts
+    AI agents (MCP): claude mcp add lindesk -- lindesk-mcp
+           optional HTTP endpoint: systemctl --user enable --now lindesk-mcp.socket
 MSG
 }
 
@@ -70,6 +72,7 @@ pre_remove() {
     systemctl disable --now lindesk-compact.timer lindeskd.service >/dev/null 2>&1 || true
   fi
   systemctl --global disable lindesk-session.service lindesk-compact.timer >/dev/null 2>&1 || true
+  systemctl --global disable lindesk-mcp.socket lindesk-mcp.service >/dev/null 2>&1 || true
   # Undo every runtime change (lindeskd.service's ExecStopPost does this too).
   /usr/bin/lindeskd --restore >/dev/null 2>&1 || echo "==> lindesk: warning: lindeskd --restore failed"
 }

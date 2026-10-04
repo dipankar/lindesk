@@ -16,6 +16,12 @@ Examples:
   lindeskctl events -f                      stream level changes and actions as they happen
   lindeskctl run --batch make -j32          run a build that yields to the desktop
   lindeskctl explain firefox                why a process has the settings it has
+  lindeskctl profile list                   which profile is active, and why
+  lindeskctl hardware                       what lindesk detected (CPU types, disks, latency map)
+  lindeskctl swap                           swap analysis with ready-to-apply fixes
+  lindeskctl changes apply --sysctl vm.swappiness=10 --ttl 10m
+                                            a guardrailed, versioned, auto-reverting change
+  lindeskctl mcp                            connect a local AI agent (claude mcp add lindesk -- lindesk-mcp)
   lindeskctl plugin new --kind classifier --lang python steam-games
   lindeskctl simulate --policy ./my-policy --from -1h
   lindeskctl query \"select resource, avg(some_avg10) from pressure group by 1\"
@@ -152,8 +158,30 @@ pub enum QueryFormat {
     Table,
     Csv,
     Json,
-    /// ZSTD Parquet file; needs --out.
+    /// Export as a ZSTD Parquet file (for other tools); needs --out.
     Parquet,
+}
+
+/// How the telemetry lake's Vortex files are read.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BackendArg {
+    /// The DuckDB vortex extension when it loads, else the built-in reader.
+    #[default]
+    Auto,
+    /// Always the DuckDB vortex extension (fails if it can't be loaded).
+    Extension,
+    /// Always the built-in reader (offline; slower, memory-bound).
+    Native,
+}
+
+impl From<BackendArg> for lindesk_query::BackendChoice {
+    fn from(b: BackendArg) -> Self {
+        match b {
+            BackendArg::Auto => lindesk_query::BackendChoice::Auto,
+            BackendArg::Extension => lindesk_query::BackendChoice::Extension,
+            BackendArg::Native => lindesk_query::BackendChoice::Native,
+        }
+    }
 }
 
 /// Parse "1s", "250ms", "2m".
@@ -324,7 +352,7 @@ pub enum Cmd {
     )]
     Query(QueryArgs),
 
-    /// Maintain the telemetry lake: catalog, compact, prune, stats, delete, purge, shell.
+    /// Maintain the telemetry lake: catalog, compact, prune, stats, delete, purge, shell, install-extension.
     #[command(subcommand)]
     Data(DataCmd),
 
@@ -344,6 +372,77 @@ pub enum Cmd {
     #[command(subcommand)]
     Config(ConfigCmd),
 
+    /// List, inspect and pick CPU profiles (auto-selected overlays on the config).
+    #[command(subcommand)]
+    Profile(ProfileCmd),
+
+    /// Versioned, guardrailed changes: plan, apply, confirm, revert, history.
+    #[command(subcommand, visible_alias = "change")]
+    Changes(ChangesCmd),
+
+    /// Measure this machine's latency baseline: CPU wakeup, memory, disks, swap.
+    #[command(
+        long_about = "Measure the latency map lindesk scales its defaults with: per-CPU timer-wakeup \
+                      latency and relative speed (P vs E cores), memory load latency and bandwidth, \
+                      4 KiB random-read latency and sequential bandwidth of each managed disk, and \
+                      swap page-in cost. Takes about 15 s (--quick: about 3 s); keep the machine \
+                      idle.\n\n\
+                      With lindeskd running, the broker measures and stores the system map \
+                      (/var/lib/lindesk/calibration.json; polkit may ask for authentication). \
+                      Without it, lindeskctl measures as your user and saves \
+                      ~/.local/state/lindesk/calibration.json, which lindesk-session uses.\n\n\
+                      A busy machine (PSI above 10%) is refused unless --force, which marks the \
+                      map NOISY and skips the disks while I/O pressure is high.",
+        after_help = "Examples:\n  lindeskctl calibrate\n  lindeskctl calibrate --quick --force\n  lindeskctl calibrate --json | jq .map.memory"
+    )]
+    Calibrate {
+        /// About 3 s instead of 15 s: fewer samples, smaller buffers.
+        #[arg(long)]
+        quick: bool,
+        /// Run even when the machine is busy (results are marked NOISY).
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Show the full hardware profile lindesk adapts to, with the latency map.
+    #[command(
+        long_about = "Show what lindesk detected and adapts to: CPU architecture, vendor, topology \
+                      (hybrid P/E or big.LITTLE cores, SMT), cpufreq driver/governor/EPP, EAS and \
+                      ITMT, NUMA; memory and swap; each managed disk with its kind and I/O \
+                      scheduler; power source and chassis; virtualization; and the calibrated \
+                      latency map when there is one. Asks the daemon (GetHardware), else probes \
+                      locally.",
+        after_help = "Examples:\n  lindeskctl hardware\n  lindeskctl hardware --json | jq .features"
+    )]
+    Hardware,
+
+    /// Analyze swap (zram, zswap, vm.* tunables, MGLRU) and propose fixes.
+    #[command(
+        long_about = "Inspect swap devices and what backs them, zswap, the reclaim sysctls \
+                      (swappiness, page-cluster, watermark_scale_factor, ...), MGLRU, swap-in/out \
+                      rates and the units with the most swapped-out memory. Every finding that \
+                      lindesk can fix comes with a ready-to-run `lindeskctl changes apply` \
+                      command (guardrailed, versioned, revertible).",
+        after_help = "Examples:\n  lindeskctl swap\n  lindeskctl swap --json | jq '.findings[].proposed_ops'"
+    )]
+    Swap,
+
+    /// The MCP server for local AI agents: status, client config, serve.
+    #[command(
+        long_about = "lindesk-mcp lets a local AI agent (Claude Code, Claude Desktop, Cursor, ...) \
+                      assess this machine and apply guardrailed, versioned, auto-reverting \
+                      changes. Without a subcommand: `status`.\n\n\
+                      Most clients start it over stdio and need no service: \
+                      `claude mcp add lindesk -- lindesk-mcp`. For clients that connect to a \
+                      running endpoint, enable the user socket: \
+                      `systemctl --user enable --now lindesk-mcp.socket`.",
+        after_help = "Examples:\n  lindeskctl mcp\n  lindeskctl mcp config --client claude-desktop\n  lindeskctl mcp serve --listen 127.0.0.1:7457"
+    )]
+    Mcp {
+        #[command(subcommand)]
+        cmd: Option<McpCmd>,
+    },
+
     /// Print a shell completion script.
     #[command(
         long_about = "Print a completion script for SHELL to stdout.",
@@ -357,8 +456,8 @@ pub enum Cmd {
     /// Write man pages for lindeskctl and the daemons into a directory.
     #[command(
         long_about = "Write lindeskctl.1, one page per subcommand (lindeskctl-plugin.1, \
-                      lindeskctl-plugin-new.1, ...), and lindeskd.8, lindesk-session.1 and \
-                      lindesk-data.1 into DIR.",
+                      lindeskctl-plugin-new.1, ...), and lindeskd.8, lindesk-session.1, \
+                      lindesk-data.1 and lindesk-mcp.1 into DIR.",
         after_help = "Example:\n  lindeskctl man /tmp/man && man -l /tmp/man/lindeskctl.1"
     )]
     Man {
@@ -571,6 +670,9 @@ pub struct QueryArgs {
     /// Lake directory (default: from the config).
     #[arg(long, env = "LINDESK_TELEMETRY_DIR", value_name = "DIR")]
     pub lake: Option<PathBuf>,
+    /// How to read the lake's Vortex files.
+    #[arg(long, value_enum, default_value_t = BackendArg::Auto, env = "LINDESK_QUERY_BACKEND")]
+    pub backend: BackendArg,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -578,13 +680,19 @@ pub struct LakeArg {
     /// Lake directory (default: telemetry.dir from the config, else the standard location).
     #[arg(long, env = "LINDESK_TELEMETRY_DIR", value_name = "DIR")]
     pub lake: Option<PathBuf>,
+    /// How to read the lake's Vortex files.
+    #[arg(long, value_enum, default_value_t = BackendArg::Auto, env = "LINDESK_QUERY_BACKEND")]
+    pub backend: BackendArg,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum DataCmd {
     /// (Re)generate catalog.duckdb, a views-only database any DuckDB client can open.
     #[command(
-        after_help = "Example:\n  lindeskctl data catalog && duckdb -readonly ~/.local/state/lindesk/catalog.duckdb"
+        long_about = "Regenerate catalog.duckdb: one view per table over the lake's Vortex files. \
+                      Needs the DuckDB vortex extension (lindeskctl data install-extension); DuckDB \
+                      clients must run `INSTALL vortex; LOAD vortex;` before using the views.",
+        after_help = "Example:\n  lindeskctl data catalog && duckdb -readonly ~/.local/state/lindesk/catalog.duckdb -c \"INSTALL vortex; LOAD vortex; FROM lindesk_tables\""
     )]
     Catalog(LakeArg),
     /// Merge sealed hour partitions and refresh the 1m/1h rollups.
@@ -633,6 +741,14 @@ pub enum DataCmd {
     },
     /// Open the duckdb CLI on the catalog, read-only.
     Shell(LakeArg),
+    /// Pre-install the DuckDB vortex extension (needs network once) for offline use.
+    #[command(
+        long_about = "Download the DuckDB `vortex` extension into lindesk's extension directory \
+                      (next to the lake) so queries and the catalog use it without network access \
+                      later. Without it lindesk falls back to its built-in Vortex reader.",
+        after_help = "Examples:\n  lindeskctl data install-extension\n  sudo lindeskctl data install-extension --system"
+    )]
+    InstallExtension(LakeArg),
 }
 
 #[derive(Subcommand, Debug)]
@@ -661,6 +777,241 @@ pub enum ConfigCmd {
     Init,
     /// Print the path of the config file in use.
     Path,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProfileCmd {
+    /// Every profile, which is active, and which match this machine now.
+    #[command(
+        long_about = "List the shipped and installed profiles: which one is active (●), which \
+                      match this machine right now and why, their auto-selection priority and \
+                      description. Asks the daemon; without one, evaluates the profiles locally \
+                      and shows what lindesk would pick.",
+        after_help = "Examples:\n  lindeskctl profile list\n  lindeskctl profile list --json | jq '.profiles[] | select(.matches_now)'"
+    )]
+    List,
+    /// A profile's overlay and the threshold values it resolves to on this machine.
+    #[command(
+        after_help = "Examples:\n  lindeskctl profile show gaming\n  lindeskctl profile show battery --json | jq .threshold.why"
+    )]
+    Show {
+        /// Profile name.
+        name: String,
+    },
+    /// Pin a profile, or `auto` to let lindesk choose (a versioned change).
+    #[command(
+        long_about = "Set `[general] profile` through a versioned change (SetProfile), so it shows \
+                      up in `lindeskctl changes list` and can be reverted. `auto` returns to \
+                      automatic selection.",
+        after_help = "Examples:\n  lindeskctl profile use gaming\n  lindeskctl profile use auto\n  lindeskctl profile use --system battery"
+    )]
+    Use {
+        /// A profile name, or `auto`.
+        name: String,
+    },
+    /// The active profile and why it was chosen.
+    #[command(after_help = "Examples:\n  lindeskctl profile current\n  lindeskctl profile current --json")]
+    Current,
+}
+
+/// Parse a ttl: `10m`, `1h`, or `0` for none.
+pub fn parse_ttl(s: &str) -> Result<Duration, String> {
+    let s = s.trim();
+    if s == "0" || s.eq_ignore_ascii_case("none") || s.eq_ignore_ascii_case("off") {
+        return Ok(Duration::ZERO);
+    }
+    let d = humantime::parse_duration(s).map_err(|e| format!("{e} (examples: 10m, 1h, 0 for none)"))?;
+    if d > Duration::from_secs(24 * 3600) {
+        return Err("at most 24h".into());
+    }
+    Ok(d)
+}
+
+/// `key=value` for the ops shortcuts.
+pub fn parse_kv(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((k, v)) if !k.trim().is_empty() => Ok((k.trim().to_string(), v.trim().to_string())),
+        _ => Err(format!("expected KEY=VALUE, got '{s}'")),
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnOff {
+    On,
+    Off,
+}
+
+/// The ops of a changeset: a JSON file (or `-` for stdin) and/or shortcut flags.
+#[derive(Args, Debug, Clone, Default)]
+pub struct OpsArgs {
+    /// A JSON file of ops (`[{"op": "sysctl", ...}]` or an envelope), or `-` for stdin.
+    #[arg(value_name = "OPS.json|-")]
+    pub file: Option<String>,
+    /// Set a config key: `plugins.threshold.config.epoch=400ms` (user config; /etc with --system).
+    #[arg(long = "set", value_name = "KEY=VALUE", value_parser = parse_kv)]
+    pub set: Vec<(String, String)>,
+    /// Remove a config key (back to its default).
+    #[arg(long = "unset", value_name = "KEY")]
+    pub unset: Vec<String>,
+    /// Set an allow-listed sysctl: `vm.swappiness=10` (system scope).
+    #[arg(long = "sysctl", value_name = "KEY=VALUE", value_parser = parse_kv)]
+    pub sysctl: Vec<(String, String)>,
+    /// Set a disk's I/O scheduler: `nvme0n1=mq-deadline` or `259:0=bfq` (system scope).
+    #[arg(long = "scheduler", value_name = "DEVICE=SCHED", value_parser = parse_kv)]
+    pub scheduler: Vec<(String, String)>,
+    /// Pin a profile (or `auto`).
+    #[arg(long = "profile", value_name = "NAME")]
+    pub profile: Option<String>,
+    /// Pin a class on units matching a glob: `app-*steam*.scope=interactive`.
+    #[arg(long = "class", value_name = "UNIT=CLASS", value_parser = parse_kv)]
+    pub class: Vec<(String, String)>,
+    /// Turn zswap on or off (system scope).
+    #[arg(long, value_enum, value_name = "on|off")]
+    pub zswap: Option<OnOff>,
+    /// zswap compressor (lz4, zstd, ...).
+    #[arg(long, value_name = "ALG")]
+    pub zswap_compressor: Option<String>,
+    /// zswap pool size, % of RAM (1-50).
+    #[arg(long, value_name = "PCT")]
+    pub zswap_max_pool: Option<u8>,
+    /// cpufreq energy_performance_preference for every CPU (high risk).
+    #[arg(long, value_name = "PREF")]
+    pub epp: Option<String>,
+    /// cpufreq governor for every CPU (high risk).
+    #[arg(long, value_name = "GOV")]
+    pub governor: Option<String>,
+    /// Also persist sysctl/scheduler ops across reboots (/etc/sysctl.d, a udev rule).
+    #[arg(long)]
+    pub persist: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ChangesCmd {
+    /// The change history: id, when, who, scope, risk, status, ttl left, description.
+    #[command(
+        after_help = "Examples:\n  lindeskctl changes list\n  lindeskctl changes list --system -n 50\n  lindeskctl changes list --json | jq '.[] | select(.status == \"applied\")'"
+    )]
+    List {
+        /// How many changesets (newest first).
+        #[arg(long, short = 'n', default_value_t = 20)]
+        limit: u32,
+    },
+    /// One changeset: its ops with the values before and after.
+    #[command(after_help = "Examples:\n  lindeskctl changes show 7\n  lindeskctl changes show 7 --json")]
+    Show { id: u64 },
+    /// What changed between two versions: their ops and the config file diff.
+    #[command(
+        after_help = "Examples:\n  lindeskctl changes diff 4 7\n  lindeskctl changes diff 4   # up to the latest"
+    )]
+    Diff {
+        a: u64,
+        /// Default: the latest version.
+        b: Option<u64>,
+    },
+    /// Dry run: risk, a diff of the values, and any guardrail rejections. Nothing changes.
+    #[command(
+        long_about = "Validate a changeset with the daemon's guardrails and show what it would do: \
+                      the risk (low: lindesk's config; medium: sysctl/zswap; high: I/O \
+                      scheduler, cpufreq), each value before → after, the config diff, and the \
+                      rejections, if any. Nothing is applied. System-scope ops (sysctl, \
+                      scheduler, zswap, cpufreq) go to lindeskd automatically.",
+        after_help = "Examples:\n  lindeskctl changes plan --set plugins.threshold.config.epoch=400ms\n  lindeskctl changes plan --sysctl vm.swappiness=10 --sysctl vm.page-cluster=0\n  lindeskctl changes plan ops.json\n  echo '[{\"op\":\"cpu_epp\",\"preference\":\"balance_performance\"}]' | lindeskctl changes plan -"
+    )]
+    Plan(OpsArgs),
+    /// Plan, confirm, then apply a versioned changeset (optionally auto-reverting).
+    #[command(
+        long_about = "Plan the changeset, show it, ask for confirmation on a terminal (--yes skips \
+                      it; without a terminal --yes is required), then apply it. The previous \
+                      values are recorded, so `lindeskctl changes revert ID` undoes it.\n\n\
+                      --ttl arms a dead-man switch: the change auto-reverts after that long \
+                      unless you run `lindeskctl changes confirm ID`. High-risk changes \
+                      (I/O scheduler, cpufreq) get --ttl 10m by default; pass --ttl 0 to make \
+                      them permanent right away.",
+        after_help = "Examples:\n  lindeskctl changes apply --set plugins.threshold.config.epoch=400ms --ttl 10m -m \"shorter epochs\"\n  lindeskctl changes apply --sysctl vm.swappiness=10 -m \"less swapping\"\n  lindeskctl changes apply --scheduler nvme0n1=mq-deadline --ttl 30m\n  lindeskctl changes apply ops.json --yes"
+    )]
+    Apply {
+        #[command(flatten)]
+        ops: OpsArgs,
+        /// Auto-revert after this long unless confirmed (`10m`, `1h`; `0` = never).
+        #[arg(long, value_parser = parse_ttl, value_name = "DURATION")]
+        ttl: Option<Duration>,
+        /// What the change is for (recorded in the history).
+        #[arg(long = "message", short = 'm', value_name = "TEXT")]
+        message: Option<String>,
+        /// Don't ask for confirmation.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Keep an applied change: cancels its auto-revert.
+    #[command(after_help = "Example:\n  lindeskctl changes confirm 7")]
+    Confirm { id: u64 },
+    /// Undo a change (recorded as a new changeset; history is append-only).
+    #[command(after_help = "Examples:\n  lindeskctl changes revert 7\n  lindeskctl changes revert --system 3")]
+    Revert { id: u64 },
+    /// Undo every change made after a version, newest first.
+    #[command(
+        long_about = "Revert every changeset after VERSION that is still in effect, newest first, \
+                      which returns lindesk's config and the tunables it changed to how they were \
+                      at that version. Asks for confirmation on a terminal unless --yes.",
+        after_help = "Examples:\n  lindeskctl changes revert-to 4\n  lindeskctl changes revert-to 0 --yes   # undo everything"
+    )]
+    RevertTo {
+        /// Keep this version; undo everything after it.
+        #[arg(value_name = "VERSION")]
+        to: u64,
+        /// Don't ask for confirmation.
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+/// MCP clients `lindesk-mcp config` knows.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum McpClient {
+    #[default]
+    ClaudeCode,
+    ClaudeDesktop,
+    Cursor,
+    Generic,
+}
+
+impl McpClient {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            McpClient::ClaudeCode => "claude-code",
+            McpClient::ClaudeDesktop => "claude-desktop",
+            McpClient::Cursor => "cursor",
+            McpClient::Generic => "generic",
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum McpCmd {
+    /// Run lindesk-mcp (stdio by default; --listen for streamable HTTP).
+    #[command(
+        disable_help_flag = true,
+        after_help = "Examples:\n  lindeskctl mcp serve\n  lindeskctl mcp serve --listen unix:$XDG_RUNTIME_DIR/lindesk/mcp.sock"
+    )]
+    Serve {
+        /// Arguments for lindesk-mcp.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "ARGS")]
+        args: Vec<OsString>,
+    },
+    /// Print the snippet that registers lindesk-mcp with an MCP client.
+    #[command(
+        after_help = "Examples:\n  lindeskctl mcp config\n  lindeskctl mcp config --client claude-desktop\n  lindeskctl mcp config --client cursor --listen 127.0.0.1:7457"
+    )]
+    Config {
+        /// The MCP client.
+        #[arg(long, value_enum, default_value_t = McpClient::ClaudeCode)]
+        client: McpClient,
+        /// Describe a running HTTP endpoint (e.g. 127.0.0.1:7457) instead of stdio.
+        #[arg(long, value_name = "ADDR")]
+        listen: Option<String>,
+    },
+    /// Is lindesk-mcp installed, is the user socket active, and how to connect a client.
+    Status,
 }
 
 #[cfg(test)]
@@ -763,5 +1114,96 @@ mod tests {
         let c = parse(&["query", "select 1", "--format", "csv"]).unwrap();
         assert!(matches!(c.cmd, Some(Cmd::Query(QueryArgs { format: QueryFormat::Csv, .. }))));
         assert!(parse(&["data", "purge"]).is_ok());
+        let c = parse(&["query", "select 1", "--backend", "native"]).unwrap();
+        assert!(matches!(c.cmd, Some(Cmd::Query(QueryArgs { backend: BackendArg::Native, .. }))));
+        let c = parse(&["data", "stats", "--backend", "extension"]).unwrap();
+        assert!(matches!(c.cmd, Some(Cmd::Data(DataCmd::Stats(LakeArg { backend: BackendArg::Extension, .. })))));
+        assert!(matches!(
+            parse(&["data", "install-extension"]).unwrap().cmd,
+            Some(Cmd::Data(DataCmd::InstallExtension(_)))
+        ));
+        assert!(parse(&["data", "stats", "--backend", "magic"]).is_err());
+    }
+
+    #[test]
+    fn profile_subcommands() {
+        assert!(matches!(parse(&["profile", "list"]).unwrap().cmd, Some(Cmd::Profile(ProfileCmd::List))));
+        let c = parse(&["profile", "use", "auto", "--system"]).unwrap();
+        assert!(matches!(c.cmd, Some(Cmd::Profile(ProfileCmd::Use { ref name })) if name == "auto") && c.global.system);
+        assert!(matches!(
+            parse(&["profile", "show", "gaming"]).unwrap().cmd,
+            Some(Cmd::Profile(ProfileCmd::Show { .. }))
+        ));
+        assert!(matches!(
+            parse(&["profile", "current", "--json"]).unwrap().cmd,
+            Some(Cmd::Profile(ProfileCmd::Current))
+        ));
+        assert!(parse(&["profile", "use"]).is_err(), "name required");
+    }
+
+    #[test]
+    fn changes_shortcuts() {
+        let c = parse(&[
+            "changes",
+            "apply",
+            "--set",
+            "plugins.threshold.config.epoch=400ms",
+            "--ttl",
+            "10m",
+            "-m",
+            "shorter epochs",
+        ])
+        .unwrap();
+        let Some(Cmd::Changes(ChangesCmd::Apply { ops, ttl, message, yes })) = c.cmd else { panic!() };
+        assert_eq!(ops.set, vec![("plugins.threshold.config.epoch".to_string(), "400ms".to_string())]);
+        assert_eq!(ttl, Some(Duration::from_secs(600)));
+        assert_eq!(message.as_deref(), Some("shorter epochs"));
+        assert!(!yes);
+        let c =
+            parse(&["change", "plan", "--sysctl", "vm.swappiness=10", "--scheduler", "nvme0n1=mq-deadline"]).unwrap();
+        let Some(Cmd::Changes(ChangesCmd::Plan(ops))) = c.cmd else { panic!() };
+        assert_eq!(ops.sysctl[0], ("vm.swappiness".into(), "10".into()));
+        assert_eq!(ops.scheduler[0], ("nvme0n1".into(), "mq-deadline".into()));
+        let c = parse(&["changes", "plan", "-"]).unwrap();
+        assert!(matches!(c.cmd, Some(Cmd::Changes(ChangesCmd::Plan(OpsArgs { file: Some(ref f), .. }))) if f == "-"));
+        let c = parse(&["changes", "apply", "ops.json", "--ttl", "0", "-y"]).unwrap();
+        assert!(matches!(c.cmd, Some(Cmd::Changes(ChangesCmd::Apply { ttl: Some(d), yes: true, .. })) if d.is_zero()));
+        assert!(parse(&["changes", "apply", "--sysctl", "vm.swappiness"]).is_err(), "KEY=VALUE");
+        assert!(parse(&["changes", "apply", "--ttl", "48h", "--sysctl", "a=b"]).is_err(), "ttl capped");
+        assert!(matches!(
+            parse(&["changes", "list", "-n", "5"]).unwrap().cmd,
+            Some(Cmd::Changes(ChangesCmd::List { limit: 5 }))
+        ));
+        assert!(matches!(
+            parse(&["changes", "diff", "4"]).unwrap().cmd,
+            Some(Cmd::Changes(ChangesCmd::Diff { a: 4, b: None }))
+        ));
+        assert!(matches!(
+            parse(&["changes", "revert-to", "3", "--yes"]).unwrap().cmd,
+            Some(Cmd::Changes(ChangesCmd::RevertTo { to: 3, yes: true }))
+        ));
+        assert!(matches!(
+            parse(&["changes", "confirm", "7"]).unwrap().cmd,
+            Some(Cmd::Changes(ChangesCmd::Confirm { id: 7 }))
+        ));
+        assert!(parse(&["changes", "confirm", "seven"]).is_err());
+    }
+
+    #[test]
+    fn hardware_calibrate_swap_mcp() {
+        assert!(matches!(
+            parse(&["calibrate", "--quick", "--force"]).unwrap().cmd,
+            Some(Cmd::Calibrate { quick: true, force: true })
+        ));
+        assert!(matches!(parse(&["hardware", "--json"]).unwrap().cmd, Some(Cmd::Hardware)));
+        assert!(matches!(parse(&["swap"]).unwrap().cmd, Some(Cmd::Swap)));
+        assert!(matches!(parse(&["mcp"]).unwrap().cmd, Some(Cmd::Mcp { cmd: None })));
+        let c = parse(&["mcp", "config", "--client", "claude-desktop"]).unwrap();
+        assert!(matches!(c.cmd, Some(Cmd::Mcp { cmd: Some(McpCmd::Config { client: McpClient::ClaudeDesktop, .. }) })));
+        let c = parse(&["mcp", "serve", "--listen", "127.0.0.1:7457"]).unwrap();
+        let Some(Cmd::Mcp { cmd: Some(McpCmd::Serve { args }) }) = c.cmd else { panic!() };
+        assert_eq!(args, vec![OsString::from("--listen"), OsString::from("127.0.0.1:7457")]);
+        assert!(matches!(parse(&["mcp", "status"]).unwrap().cmd, Some(Cmd::Mcp { cmd: Some(McpCmd::Status) })));
+        assert!(parse(&["mcp", "config", "--client", "emacs"]).is_err());
     }
 }

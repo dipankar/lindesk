@@ -252,6 +252,87 @@ fn render(ui: &Ui, fs: &[Finding]) -> String {
     s
 }
 
+// --------------------------------------------------------------------------- control plane
+
+/// Profiles, pending changes, calibration and the MCP endpoint.
+pub fn control_plane_findings(system: bool) -> (Vec<Finding>, serde_json::Value) {
+    use crate::cmd::{changes, hw, mcp, profile};
+    let mut v = Vec::new();
+    let now = lindesk_core::clock::now_ms();
+    // Profile: the daemon's choice, else what it would pick.
+    let fetched = crate::cmd::status::fetch(system).ok();
+    let st = fetched.as_ref().and_then(|f| profile::ProfileState::from_status(&f.raw));
+    let prof = match &st {
+        Some(p) => {
+            let why = if p.reason.is_empty() { String::new() } else { format!(" ({})", p.reason) };
+            finding(Severity::Ok, "Profile", format!("{}{why}", p.short()), None)
+        }
+        None => {
+            let lv = profile::local_view(system);
+            let a = lv.active.clone().unwrap_or_default();
+            let why = lv.reason.clone().map(|r| format!(" ({r})")).unwrap_or_default();
+            finding(
+                Severity::Info,
+                "Profile",
+                format!("would be {a}{why}; no daemon applies it"),
+                Some("see all: lindeskctl profile list".into()),
+            )
+        }
+    };
+    v.push(prof);
+    // Changes waiting for confirmation.
+    let sources = fetched
+        .as_ref()
+        .map(|f| crate::cmd::status::pending_sources(f.source))
+        .unwrap_or_else(|| if system { vec![Daemon::Broker] } else { vec![Daemon::Session, Daemon::Broker] });
+    let pending = changes::pending(&sources);
+    v.push(match pending.first() {
+        None => finding(Severity::Ok, "Pending changes", "none (nothing will auto-revert)", None),
+        Some(p) => finding(
+            Severity::Info,
+            "Pending changes",
+            format!(
+                "{} unconfirmed: {}{}",
+                pending.len(),
+                p.countdown(now),
+                if pending.len() > 1 { ", …" } else { "" }
+            ),
+            Some(format!("keep: {} · list: lindeskctl changes list", p.confirm_hint())),
+        ),
+    });
+    // Calibration.
+    let cal = hw::saved_calibration(system);
+    v.push(match &cal {
+        None => finding(
+            Severity::Info,
+            "Calibration",
+            "not measured: nominal latencies are used",
+            Some("lindeskctl calibrate (≈15 s, when idle)".into()),
+        ),
+        Some((m, p)) => {
+            let age_days = (now - m.measured_at) / 86_400_000;
+            let mut status = format!("measured {} ({})", changes::ago(m.measured_at, now), tilde(p));
+            if m.noisy {
+                status.push_str(", NOISY");
+            }
+            if m.noisy || age_days > 90 {
+                finding(Severity::Info, "Calibration", status, Some("re-run when idle: lindeskctl calibrate".into()))
+            } else {
+                finding(Severity::Ok, "Calibration", status, None)
+            }
+        }
+    });
+    let mst = mcp::probe();
+    v.push(mcp::finding(&mst));
+    let info = json!({
+        "profile": st,
+        "pending_changes": pending,
+        "calibration": hw::calibration_summary(),
+        "mcp": mst,
+    });
+    (v, info)
+}
+
 // --------------------------------------------------------------------------- requirements
 
 /// The user a root installer acts for (`SUDO_UID`), else our own uid.
@@ -385,10 +466,12 @@ pub fn run(ui: &Ui) -> Result<()> {
     let probe = lindesk_sys::probe(&Roots::host(), &Env::from_process());
     let reports = requirement_reports(&probe);
     let (services, telemetry) = service_findings(&probe);
+    let (control, control_info) = control_plane_findings(ui.system);
     let needs_action = findings(&probe).iter().chain(services.iter()).any(|f| f.severity >= Severity::Warn);
     if ui.json {
         let mut v: serde_json::Value = serde_json::from_str(&render_json(&probe))?;
         v["services"] = serde_json::to_value(&services)?;
+        v["control_plane"] = json!({"findings": control, "details": control_info});
         v["telemetry"] = telemetry;
         v["needs_action"] = json!(needs_action);
         v["requirements"] = serde_json::to_value(&reports)?;
@@ -403,6 +486,9 @@ pub fn run(ui: &Ui) -> Result<()> {
         s.push_str(&ui.bold("lindesk services\n"));
         s.push_str(&render(ui, &services));
         s.push('\n');
+        s.push_str(&ui.bold("Control plane\n"));
+        s.push_str(&render(ui, &control));
+        s.push('\n');
         s.push_str(&verdict(ui, &probe, &reports, &services));
         crate::ui::out(&s);
     }
@@ -411,6 +497,9 @@ pub fn run(ui: &Ui) -> Result<()> {
 
 /// `profile auto→balanced` from a status envelope, when the daemon reports one.
 fn profile_of(raw: &serde_json::Value) -> Option<String> {
+    if let Some(st) = raw.pointer("/daemon/profile").and_then(|_| crate::cmd::profile::ProfileState::from_status(raw)) {
+        return Some(st.short());
+    }
     let p = raw.get("profile")?;
     if let Some(s) = p.as_str() {
         return Some(s.to_string());
@@ -524,6 +613,11 @@ mod tests {
             Some("auto→balanced")
         );
         assert_eq!(profile_of(&json!({})), None);
+        assert_eq!(
+            profile_of(&json!({"daemon": {"profile": {"active": "battery", "setting": "auto", "pinned": false, "reason": "battery power"}}}))
+                .as_deref(),
+            Some("auto→battery")
+        );
     }
 
     #[test]

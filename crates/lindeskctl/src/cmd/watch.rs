@@ -72,6 +72,10 @@ pub struct App {
     pub requirements: Vec<String>,
     /// First-run guidance (one line, shown once per login session).
     pub hint: Option<String>,
+    /// The active profile (from the status envelope).
+    pub profile: Option<crate::cmd::profile::ProfileState>,
+    /// Changes that auto-revert unless confirmed.
+    pub pending: Vec<crate::cmd::changes::Pending>,
 }
 
 impl App {
@@ -103,6 +107,8 @@ impl App {
             hardware: None,
             requirements: Vec::new(),
             hint: None,
+            profile: None,
+            pending: Vec::new(),
         }
     }
 
@@ -160,6 +166,10 @@ impl App {
             self.hardware = env.hardware.clone();
         }
         self.requirements = env.requirements.clone();
+        self.profile = env.profile.clone();
+        if snap.source.is_none() {
+            self.pending.clear();
+        }
         if let Some(st) = &snap.status {
             self.update_rates(&st.plugins);
         }
@@ -365,6 +375,27 @@ fn header(f: &mut Frame, area: Rect, app: &App, th: &Theme) {
         l2.push(Span::styled("   ⏸ PAUSED (p resumes)", th.fg(Color::Yellow).patch(th.bold())));
     }
     lines.push(Line::from(l2));
+    // Third line (when there is room): the control plane, profile and pending changes.
+    if area.height >= 3 {
+        let mut l3: Vec<Span> = vec![Span::raw(" ")];
+        if let Some(p) = &app.profile {
+            l3.push(Span::styled("profile ", th.dim()));
+            l3.push(Span::styled(p.short(), th.fg(Color::Cyan).patch(th.bold())));
+            if !p.reason.is_empty() {
+                l3.push(Span::styled(format!("  ({})", p.reason), th.dim()));
+            }
+        }
+        if let Some(p) = app.pending.first() {
+            let more =
+                if app.pending.len() > 1 { format!(" (+{} more)", app.pending.len() - 1) } else { String::new() };
+            l3.push(Span::styled(
+                format!("   ↺ {}{more}", p.countdown(app.now_ms)),
+                th.fg(Color::Yellow).patch(th.bold()),
+            ));
+            l3.push(Span::styled(format!("  keep: {}", p.confirm_hint()), th.dim()));
+        }
+        lines.push(Line::from(l3));
+    }
     let clock = Paragraph::new(Line::from(Span::styled(
         ui::clock(app.now_ms).get(..8).unwrap_or_default().to_string(),
         th.dim(),
@@ -678,7 +709,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     let tall = area.height >= 24;
     let footer = tall && (app.hint.is_some() || !app.requirements.is_empty());
-    let mut constraints = vec![Constraint::Length(2), Constraint::Length(5), Constraint::Min(4)];
+    let control = tall && (app.profile.is_some() || !app.pending.is_empty());
+    let mut constraints =
+        vec![Constraint::Length(if control { 3 } else { 2 }), Constraint::Length(5), Constraint::Min(4)];
     if tall {
         constraints.push(Constraint::Length(1));
     }
@@ -794,12 +827,37 @@ struct FgCache {
     target: Option<Target>,
     dir: Option<PathBuf>,
     local_requirements: Option<Vec<String>>,
+    /// When pending changes were last listed.
+    pending_at: Option<Instant>,
 }
+
+impl FgCache {
+    fn new() -> FgCache {
+        FgCache { target: None, dir: None, local_requirements: None, pending_at: None }
+    }
+}
+
+/// Re-list pending changes every few seconds, and right away after a `change.*` event.
+fn refresh_pending(app: &mut App, fg: &mut FgCache, events: &[Value]) {
+    let Some(src) = app.source else { return };
+    let changed =
+        events.iter().any(|e| e.get("name").and_then(Value::as_str).is_some_and(|n| n.starts_with("change.")));
+    if changed || fg.pending_at.is_none_or(|t| t.elapsed() >= PENDING_EVERY) {
+        app.pending = crate::cmd::changes::pending(&crate::cmd::status::pending_sources(src));
+        fg.pending_at = Some(Instant::now());
+    }
+    let now = app.now_ms;
+    app.pending.retain(|p| p.ttl_until > now - 1_000);
+}
+
+const PENDING_EVERY: Duration = Duration::from_secs(3);
 
 fn tick(app: &mut App, client: &mut Client, fg: &mut FgCache) {
     let snap = client.poll(200);
     let daemon_stall = !snap.envelope.fg_stall.is_empty();
+    let events = snap.events.clone();
     app.apply(snap, Some(client));
+    refresh_pending(app, fg, &events);
     if app.hardware.is_none() {
         app.hardware = Some(live::local_hardware());
     }
@@ -868,7 +926,7 @@ fn tui(ui: &Ui, interval: Duration) -> Result<()> {
         let mut app = App::new(ui.color, interval);
         app.hint = crate::hints::once().map(|h| h.text);
         let mut client = Client::new(ui.system);
-        let mut fg = FgCache { target: None, dir: None, local_requirements: None };
+        let mut fg = FgCache::new();
         tick(&mut app, &mut client, &mut fg);
         let mut next = Instant::now() + interval;
         loop {
@@ -947,6 +1005,12 @@ pub fn plain_line(ui: &Ui, app: &App) -> String {
                 let y: Vec<String> = st.yielding.iter().map(|y| y.to_string()).collect();
                 s.push_str(&format!("yielding {}", ui.yellow(y.join(", "))));
             }
+            if let Some(p) = &app.profile {
+                s.push_str(&ui.dim(format!("  profile {}", p.short())));
+            }
+            if let Some(p) = app.pending.first() {
+                s.push_str(&format!("  {}", ui.yellow(format!("↺ {}", p.countdown(app.now_ms)))));
+            }
             s.push_str(&ui.dim(format!("  [{}]", src.name())));
             s
         }
@@ -963,7 +1027,7 @@ fn plain(ui: &Ui, interval: Duration, count: Option<u64>) -> Result<()> {
     }
     let mut app = App::new(ui.color, interval);
     let mut client = Client::new(ui.system);
-    let mut fg = FgCache { target: None, dir: None, local_requirements: None };
+    let mut fg = FgCache::new();
     let mut n = 0u64;
     let mut first = true;
     while !STOP.load(Ordering::SeqCst) {
@@ -973,6 +1037,7 @@ fn plain(ui: &Ui, interval: Duration, count: Option<u64>) -> Result<()> {
         let new_events = snap.events.clone();
         let raw = snap.raw.clone();
         app.apply(snap, Some(&client));
+        refresh_pending(&mut app, &mut fg, &new_events);
         app.psi.push(&live::read_psi(Path::new("/proc")));
         let target = app.status.as_ref().and_then(|s| s.foreground.as_ref()).map(|f| f.target.clone());
         if target != fg.target {
@@ -999,6 +1064,8 @@ fn plain(ui: &Ui, interval: Duration, count: Option<u64>) -> Result<()> {
                 "level": app.status.as_ref().map(|s| s.level),
                 "psi": psi,
                 "status": raw,
+                "profile": app.profile,
+                "pending_changes": app.pending,
                 "events": new_events,
             }))?);
         } else {
@@ -1104,6 +1171,18 @@ mod tests {
             ..Default::default()
         });
         app.requirements = vec!["io.weight: inert → enable iocost (io.iocost = \"auto\")".into()];
+        app.profile = Some(crate::cmd::profile::ProfileState {
+            active: "gaming".into(),
+            setting: Some("auto".into()),
+            pinned: false,
+            reason: "steam_app_570 focused".into(),
+        });
+        app.pending = vec![crate::cmd::changes::Pending {
+            id: 7,
+            scope: lindesk_changes::Scope::User,
+            ttl_until: st.now + 8 * 60_000 + 10_000,
+            description: "shorter epochs".into(),
+        }];
         app.push_events(&[
             json!({"kind": "focus", "ts": st.now - 40_000, "app_id": "org.mozilla.firefox", "source": "gnome"}),
             json!({"kind": "level", "ts": st.now - 30_000, "from": "green", "to": "yellow", "policy": "threshold"}),
@@ -1111,6 +1190,8 @@ mod tests {
                    "target": {"type": "unit", "manager": {"kind": "user", "uid": 1000}, "name": "lindesk-run-cargo-77.scope"},
                    "setting": {"knob": "io_weight", "value": 1},
                    "provenance": {"plugin": "threshold", "reason": "YELLOW: io pressure 31% > 20%; batch yields", "priority": 0}}),
+            json!({"kind": "notice", "ts": st.now - 6_000, "name": "change.applied", "source": "changes", "message": "",
+                   "data": {"id": 7, "description": "shorter epochs", "ttl_until": st.now + 490_000}}),
             json!({"kind": "plugin_error", "ts": st.now - 5_000, "plugin": "steam-games", "message": "classifier.classify timed out"}),
         ]);
         app.status = Some(st);
@@ -1162,6 +1243,10 @@ mod tests {
             "level GREEN → YELLOW",
             "apply  io.weight 1 on lindesk-run-cargo-77.scope",
             "plugin steam-games: classifier.classify timed out",
+            "profile auto→gaming",
+            "↺ change #7 reverts in 8m",
+            "keep: lindeskctl changes confirm 7",
+            "✎ change #7 applied: shorter epochs",
             "● threshold",
             "◐ steam-games",
             "q quit",
@@ -1210,6 +1295,7 @@ mod tests {
         let l = plain_line(&Ui::plain(), &app);
         assert!(l.contains("● YELLOW  fg firefox ⚡"), "{l}");
         assert!(l.contains("io 3") && l.contains("yielding rustc -12% CPU -31% IO"), "{l}");
+        assert!(l.contains("profile auto→gaming") && l.contains("↺ change #7 reverts in 8m"), "{l}");
         let off = App::new(false, Duration::from_secs(1));
         assert!(plain_line(&Ui::plain(), &off).contains("○ lindesk not running"));
         assert_eq!(sparkline(&VecDeque::from(vec![0.0, 5.0, 10.0]), 5), "   ▅█");

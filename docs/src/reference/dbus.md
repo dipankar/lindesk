@@ -42,6 +42,39 @@ Callers are identified by their bus credentials; polkit decides.
 | signal `UserState(uid, json)` | `us` | `SessionState`: the settings one user's session agent should apply |
 | signal `Events(json)` | `s` | Broadcast: the events of one broker step, as a JSON array. |
 
+## Control plane (both services)
+
+Both interfaces also carry the control plane
+([CONTROL-PLANE.md §5](https://github.com/dipankar/lindesk/blob/main/docs/CONTROL-PLANE.md)):
+on `org.lindesk.QoS1` it acts on the **user** scope (your `~/.config/lindesk/lindesk.toml`),
+on `org.lindesk.Broker1` on the **system** scope (`/etc/lindesk/lindesk.toml` and kernel
+tunables; mutating members need polkit `org.lindesk.manage` and may show an authentication
+dialog). `lindeskctl profile|changes|hardware|swap|calibrate` and `lindesk-mcp` are clients.
+
+| Member | Signature | What it does |
+|---|---|---|
+| `PlanChange(ops_json)` | `s` → `s` | Plan JSON: risk, values before → after, diff, rejections. No side effects. |
+| `ApplyChange(ops_json, description, ttl_secs)` | `ssu` → `s` | Validate, apply and version; ChangeSet JSON. `ttl_secs = 0`: no auto-revert. |
+| `ConfirmChange(id)` | `t` → | Keep an applied change (cancels its auto-revert). |
+| `RevertChange(id)` | `t` → `s` | Undo it as a new changeset; ChangeSet JSON. |
+| `ListChanges(limit)` | `u` → `s` | JSON array of changesets, newest first. |
+| `GetChange(id)` | `t` → `s` | One changeset. |
+| `ListProfiles()` | → `s` | Profiles with `active`, `matches_now`, `priority`, `reason`. |
+| `SetProfile(name)` | `s` → `s` | A `profile_use` changeset (`"auto"` allowed). |
+| `GetHardware()` | → `s` | `Hardware` JSON including the latency map. |
+| `SwapReport()` | → `s` | Swap analysis with findings and proposed ops. |
+| `Calibrate()` / `CalibrateWith(options_json)` | → `s` / `s` → `s` | Broker only: measure the latency map (`{"quick": true}`). |
+| signal `ChangeEvent(json)` | `s` | A changeset transition (applied, confirmed, reverted, expired, failed). |
+
+`ops_json` is `{"origin": "cli", "client": "lindeskctl", "ops": [ … ]}` (a bare array of
+ops is accepted too); the daemons record it with the caller's uid as the author. Guardrail
+refusals are errors whose message starts with `rejected`. See [Changes](../guide/changes.md)
+for the ops and the guardrails.
+
+The status envelope's `daemon.profile` is `{"active", "setting", "pinned", "reason"}`;
+changes and profile switches also appear as `notice` events (`change.*`,
+`profile.changed`).
+
 `RecentEvents` and `Events` are newer than the rest of the API. `lindeskctl watch` and
 `lindeskctl events` detect daemons without them and fall back to inferring events from
 consecutive `Status` replies (or, for `events` without `--follow`, from the telemetry lake).

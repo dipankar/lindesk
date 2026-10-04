@@ -45,6 +45,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::Data(d) => cmd::data::data(&ui, d),
         Cmd::Bench { args } => cmd::tools::bench(args),
         Cmd::Config(c) => cmd::config::run(&ui, c),
+        Cmd::Profile(p) => cmd::profile::run(&ui, p),
+        Cmd::Changes(c) => cmd::changes::run(&ui, c),
+        Cmd::Calibrate { quick, force } => cmd::hw::calibrate_cmd(&ui, *quick, *force),
+        Cmd::Hardware => cmd::hw::hardware_cmd(&ui),
+        Cmd::Swap => cmd::hw::swap_cmd(&ui),
+        Cmd::Mcp { cmd: sub } => cmd::mcp::run(&ui, sub.as_ref()),
         Cmd::Completions { shell } => {
             cmd::tools::completions(*shell, &mut std::io::stdout());
             Ok(())

@@ -18,11 +18,21 @@ apply fixes that are **guardrailed, versioned and revertible**.
 # Claude Code (stdio; started on demand)
 claude mcp add lindesk -- lindesk-mcp
 
-# Print the snippet for other clients
+# Print the snippet for other clients (or: lindeskctl mcp config --client …)
 lindesk-mcp config --client claude-desktop   # JSON for ~/.config/Claude/claude_desktop_config.json
 lindesk-mcp config --client cursor           # JSON for ~/.cursor/mcp.json
 lindesk-mcp config --client generic
+
+# Is it installed, is the optional socket running, are the daemons up?
+lindeskctl mcp status
 ```
+
+The stdio mode needs no service: the client starts `lindesk-mcp` when it needs it. The
+packages install `lindesk-mcp.service` and `lindesk-mcp.socket` as **user** units but do not
+enable them; enable the socket only for clients that connect to a running endpoint (see
+below). Everything an agent changes shows up in `lindeskctl changes list` with its client
+name (`mcp:claude-code`), and `lindeskctl doctor` lists changes still waiting for
+confirmation.
 
 Then ask the agent something like *"my desktop lags while I compile, can you look?"*, or
 use the `assess-responsiveness` prompt (`/mcp__lindesk__assess-responsiveness` in Claude
@@ -100,6 +110,7 @@ For clients that connect to a running endpoint instead of spawning a process:
 
 ```sh
 systemctl --user enable --now lindesk-mcp.socket     # unix socket $XDG_RUNTIME_DIR/lindesk/mcp.sock (0600)
+lindeskctl mcp serve --listen 127.0.0.1:7457         # same as lindesk-mcp --listen …
 lindesk-mcp --listen 127.0.0.1:7457                  # loopback TCP, bearer token required
 lindesk-mcp config --client claude-code --listen 127.0.0.1:7457
 ```

@@ -43,7 +43,34 @@ Scripts). COSMIC and X11 need nothing extra: their adapters are built into
 $ lindeskctl doctor       # what the machine supports, and whether every piece is running
 $ lindeskctl status       # what lindesk is doing right now
 $ lindeskctl watch        # the same, live
+$ lindeskctl profile list # which profile was picked for this machine, and why
 ```
+
+Optional, once the machine is idle: `lindeskctl calibrate` measures its latency baseline
+(≈15 s) so lindesk scales I/O throttles to the real disk instead of nominal values (see
+[Hardware awareness](hardware.md)).
+
+## AI agents
+
+The packages install `lindesk-mcp`, an MCP server for local agents. Claude Code starts it
+over stdio, no service needed:
+
+```console
+$ claude mcp add lindesk -- lindesk-mcp
+$ lindeskctl mcp config --client claude-desktop   # or cursor, generic
+```
+
+For clients that connect to a running endpoint, enable the (not enabled by default) user
+socket: `systemctl --user enable --now lindesk-mcp.socket`. See [MCP](mcp.md).
+
+## What gets installed
+
+Besides the binaries (`lindeskd`, `lindesk-session`, `lindeskctl`, `lindesk-data`,
+`lindesk-bench`, `lindesk-mcp`) and their units: the shipped profiles in
+`/usr/share/lindesk/profiles.d/` (yours go in `/etc/lindesk/profiles.d/` or
+`~/.config/lindesk/profiles.d/`), the change history in `/var/lib/lindesk/changes/`
+(created by systemd-tmpfiles), man pages for every command (`man lindeskctl-changes`,
+`man lindesk-mcp`) and shell completions.
 
 ## Shell completions by hand
 

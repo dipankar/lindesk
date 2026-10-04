@@ -4,10 +4,12 @@
 # skipped by --no-manifest, which packages use. Regenerate: check-layout.sh --update
 644 /etc/lindesk/lindesk.toml
 755 /etc/lindesk/plugins/
+755 /etc/lindesk/profiles.d/
 755 /etc/lindesk/rules.d/
 644 /etc/xdg/autostart/lindesk-session.desktop
 755 /usr/bin/lindesk-bench
 755 /usr/bin/lindesk-data
+755 /usr/bin/lindesk-mcp
 755 /usr/bin/lindesk-session
 755 /usr/bin/lindeskctl
 755 /usr/bin/lindeskd
@@ -19,6 +21,8 @@
 644 /usr/lib/systemd/user-preset/80-lindesk.preset
 644 /usr/lib/systemd/user/lindesk-compact.service
 644 /usr/lib/systemd/user/lindesk-compact.timer
+644 /usr/lib/systemd/user/lindesk-mcp.service
+644 /usr/lib/systemd/user/lindesk-mcp.socket
 644 /usr/lib/systemd/user/lindesk-session.service
 644 /usr/lib/sysusers.d/lindesk.conf
 644 /usr/lib/tmpfiles.d/lindesk.conf
@@ -36,10 +40,19 @@
 644 /usr/share/kwin/scripts/lindesk/metadata.json
 644 /usr/share/licenses/lindesk/LICENSE-APACHE
 644 /usr/share/licenses/lindesk/LICENSE-MIT
+644 /usr/share/lindesk/profiles.d/00-balanced.toml
+644 /usr/share/lindesk/profiles.d/10-latency.toml
+644 /usr/share/lindesk/profiles.d/20-battery.toml
+644 /usr/share/lindesk/profiles.d/30-throughput.toml
+644 /usr/share/lindesk/profiles.d/40-gaming.toml
+644 /usr/share/lindesk/profiles.d/50-arm-eas.toml
+644 /usr/share/lindesk/profiles.d/51-x86-hybrid.toml
+644 /usr/share/lindesk/profiles.d/60-hdd.toml
 644 /usr/share/lindesk/rules.d/00-slices.toml
 644 /usr/share/lindesk/rules.d/10-critical.toml
 644 /usr/share/lindesk/rules.d/50-background.toml
 644 /usr/share/lindesk/rules.d/60-batch.toml
+644 /usr/share/man/man1/lindesk-mcp.1.gz
 644 /usr/share/man/man1/lindeskctl.1.gz
 644 /usr/share/man/man8/lindeskd.8.gz
 644 /usr/share/polkit-1/actions/org.lindesk.policy

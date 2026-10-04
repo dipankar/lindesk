@@ -39,7 +39,8 @@ reverting every change on exit.
 
 This package contains the root broker (lindeskd), the per-user session agent
 (lindesk-session), the lindeskctl CLI, telemetry maintenance (lindesk-data),
-the benchmark tool, the GNOME Shell extension and the KWin script.
+the benchmark tool, the MCP server for local AI agents (lindesk-mcp), the
+GNOME Shell extension and the KWin script.
 
 %prep
 %autosetup -n %{name}-%{version}
@@ -47,7 +48,7 @@ the benchmark tool, the GNOME Shell extension and the KWin script.
 %build
 %if %{undefined lindesk_bin_dir}
 cargo build --release --locked \
-    -p lindeskd -p lindesk-session -p lindeskctl -p lindesk-data -p lindesk-bench
+    -p lindeskd -p lindesk-session -p lindeskctl -p lindesk-data -p lindesk-bench -p lindesk-mcp
 %endif
 
 %install
@@ -64,7 +65,7 @@ export LINDESK_BIN_DIR=%{lindesk_bin_dir}
 %{_bindir}/systemd-sysusers %{_sysusersdir}/lindesk.conf >/dev/null 2>&1 || :
 %tmpfiles_create %{_tmpfilesdir}/lindesk.conf
 %systemd_post lindeskd.service lindesk-compact.timer
-%systemd_user_post lindesk-session.service lindesk-compact.timer
+%systemd_user_post lindesk-session.service lindesk-compact.timer lindesk-mcp.socket
 # Requirement check: never fails the transaction. On a hard failure (exit 1) lindeskd is
 # installed and enabled by the preset, but not started.
 lindesk_rc=0
@@ -116,12 +117,13 @@ elif [ "$1" -eq 1 ] && [ -d /run/systemd/system ]; then
     echo "lindesk: GNOME: lindesk-session enables its Shell extension on first start; if it stays off:"
     echo "lindesk:   gnome-extensions enable lindesk@lindesk.org   (on Wayland, log out and back in first)"
     echo "lindesk: KDE: enable 'lindesk' in System Settings > Window Management > KWin Scripts"
+    echo "lindesk: AI agents (MCP): claude mcp add lindesk -- lindesk-mcp"
 fi
 :
 
 %preun
 %systemd_preun lindeskd.service lindesk-compact.timer
-%systemd_user_preun lindesk-session.service lindesk-compact.timer
+%systemd_user_preun lindesk-session.service lindesk-compact.timer lindesk-mcp.socket lindesk-mcp.service
 if [ $1 -eq 0 ]; then
     # Undo every runtime change (the unit's ExecStopPost does this too under systemd).
     %{_bindir}/lindeskd --restore >/dev/null 2>&1 || :
@@ -130,7 +132,7 @@ fi
 %postun
 %systemd_postun_with_restart lindeskd.service
 %systemd_postun lindesk-compact.timer
-%systemd_user_postun lindesk-session.service lindesk-compact.timer
+%systemd_user_postun lindesk-session.service lindesk-compact.timer lindesk-mcp.socket lindesk-mcp.service
 
 %files -f %{name}-generated.files
 %license %{_datadir}/licenses/%{name}/LICENSE-MIT
@@ -142,12 +144,15 @@ fi
 %{_bindir}/lindeskctl
 %{_bindir}/lindesk-data
 %{_bindir}/lindesk-bench
+%{_bindir}/lindesk-mcp
 %{_unitdir}/lindeskd.service
 %{_unitdir}/lindesk-compact.service
 %{_unitdir}/lindesk-compact.timer
 %{_userunitdir}/lindesk-session.service
 %{_userunitdir}/lindesk-compact.service
 %{_userunitdir}/lindesk-compact.timer
+%{_userunitdir}/lindesk-mcp.service
+%{_userunitdir}/lindesk-mcp.socket
 %{_presetdir}/80-lindesk.preset
 %{_userpresetdir}/80-lindesk.preset
 %{_sysusersdir}/lindesk.conf
@@ -160,6 +165,7 @@ fi
 %config(noreplace) %{_sysconfdir}/lindesk/lindesk.toml
 %dir %{_sysconfdir}/lindesk/rules.d
 %dir %{_sysconfdir}/lindesk/plugins
+%dir %{_sysconfdir}/lindesk/profiles.d
 %config(noreplace) %{_sysconfdir}/xdg/autostart/lindesk-session.desktop
 %{_datadir}/lindesk
 %dir %{_prefix}/lib/lindesk

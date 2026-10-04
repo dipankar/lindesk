@@ -110,6 +110,7 @@ configure | abort-upgrade | abort-deconfigure | abort-remove)
 		echo "lindesk: GNOME: lindesk-session enables its Shell extension on first start; if it stays off:"
 		echo "lindesk:   gnome-extensions enable lindesk@lindesk.org   (on Wayland, log out and back in first)"
 		echo "lindesk: KDE: enable 'lindesk' in System Settings > Window Management > KWin Scripts"
+		echo "lindesk: AI agents (MCP): claude mcp add lindesk -- lindesk-mcp"
 	fi
 	;;
 esac

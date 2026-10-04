@@ -109,14 +109,9 @@ pub fn describe_notice(name: &str, source: &str, message: &str, data: &Value) ->
             Some(to) => (format!("⚙ profile → {to}{}", paren(why.filter(|w| !w.contains(&to)))), 1),
             None => (format!("⚙ {message}"), 1),
         },
-        "change.applied" => match id {
-            Some(id) => (format!("✎ change #{id} applied{}", paren(why)), 1),
-            None => (format!("✎ {message}"), 1),
-        },
-        "change.reverted" => match id {
-            Some(id) => (format!("↺ change #{id} reverted{}", paren(why)), 1),
-            None => (format!("↺ {message}"), 1),
-        },
+        "change.applied" | "change.confirmed" | "change.reverted" | "change.expired" | "change.failed" => {
+            describe_change(name, message, data, id)
+        }
         "calibration.done" => (format!("◎ calibrated: {message}"), 0),
         "hardware.power" => {
             let on_battery =
@@ -127,6 +122,55 @@ pub fn describe_notice(name: &str, source: &str, message: &str, data: &Value) ->
         _ => {
             let src = if source.is_empty() { String::new() } else { format!(" [{source}]") };
             (format!("• {name}: {message}{src}"), 0)
+        }
+    }
+}
+
+/// `change.*` notices; `data` is the changeset (for `change.reverted`, the new reverting one).
+fn describe_change(name: &str, message: &str, data: &Value, id: Option<String>) -> (String, u8) {
+    let desc = data
+        .get("description")
+        .and_then(Value::as_str)
+        .filter(|d| !d.is_empty() && !d.starts_with("revert "))
+        .map(|d| format!(": {d}"))
+        .unwrap_or_default();
+    let Some(id) = id else {
+        let mark = match name {
+            "change.failed" => "✗",
+            "change.confirmed" => "✓",
+            "change.applied" => "✎",
+            _ => "↺",
+        };
+        let sev = match name {
+            "change.failed" => 2,
+            "change.confirmed" => 0,
+            _ => 1,
+        };
+        return (format!("{mark} {message}"), sev);
+    };
+    match name {
+        "change.applied" => {
+            let ttl = if data.get("ttl_until").is_some_and(|t| !t.is_null()) {
+                " (auto-reverts unless confirmed)"
+            } else {
+                ""
+            };
+            (format!("✎ change #{id} applied{desc}{ttl}"), 1)
+        }
+        "change.confirmed" => (format!("✓ change #{id} confirmed{desc}"), 0),
+        "change.expired" => (format!("↺ change #{id} expired: auto-reverted, it wasn't confirmed{desc}"), 1),
+        "change.failed" => {
+            let err = data.get("error").and_then(Value::as_str).map(|e| format!(" ({e})")).unwrap_or_default();
+            (format!("✗ change #{id} failed{desc}{err}"), 2)
+        }
+        _ => {
+            if let Some(v) = data.get("revert_to").filter(|v| !v.is_null()) {
+                return (format!("↺ back to version {v} (change #{id})"), 1);
+            }
+            match data.get("reverts").filter(|v| !v.is_null()) {
+                Some(t) => (format!("↺ change #{t} reverted (as #{id})"), 1),
+                None => (format!("↺ change #{id} reverted{desc}"), 1),
+            }
         }
     }
 }
@@ -242,6 +286,10 @@ pub struct Envelope {
     pub hardware: Option<lindesk_plugin_api::Hardware>,
     /// Requirement warnings, one line each.
     pub requirements: Vec<String>,
+    /// The active profile (`daemon.profile`).
+    pub profile: Option<crate::cmd::profile::ProfileState>,
+    /// Changes that auto-revert unless confirmed (filled by the caller from `ListChanges`).
+    pub pending: Vec<crate::cmd::changes::Pending>,
 }
 
 fn requirement_line(v: &Value) -> String {
@@ -289,6 +337,7 @@ pub fn parse_envelope(raw: &Value) -> Envelope {
     if let Some(Value::Array(a)) = raw.get("requirements") {
         e.requirements = a.iter().map(requirement_line).collect();
     }
+    e.profile = crate::cmd::profile::ProfileState::from_status(raw);
     e
 }
 
@@ -606,6 +655,28 @@ mod tests {
             &json!({"kind": "notice", "ts": 11, "name": "change.reverted", "message": "", "data": {"id": 12}}),
         );
         assert_eq!(e.text, "↺ change #12 reverted");
+        let cs = json!({"id": 7, "description": "shorter epochs", "ttl_until": 5});
+        let e = describe(
+            &json!({"kind": "notice", "ts": 13, "name": "change.applied", "message": "changeset 7 applied: shorter epochs", "source": "changes", "data": cs}),
+        );
+        assert_eq!(
+            (e.text.as_str(), e.severity),
+            ("✎ change #7 applied: shorter epochs (auto-reverts unless confirmed)", 1)
+        );
+        let e = describe(&json!({"kind": "notice", "ts": 14, "name": "change.expired", "message": "", "data": cs}));
+        assert_eq!(e.text, "↺ change #7 expired: auto-reverted, it wasn't confirmed: shorter epochs");
+        let e = describe(
+            &json!({"kind": "notice", "ts": 15, "name": "change.reverted", "message": "", "data": {"id": 8, "reverts": 7, "description": "revert 7: shorter epochs"}}),
+        );
+        assert_eq!(e.text, "↺ change #7 reverted (as #8)");
+        let e = describe(
+            &json!({"kind": "notice", "ts": 16, "name": "change.failed", "message": "", "data": {"id": 9, "description": "x", "error": "EPERM"}}),
+        );
+        assert_eq!((e.text.as_str(), e.severity), ("✗ change #9 failed: x (EPERM)", 2));
+        let e = describe(
+            &json!({"kind": "notice", "ts": 17, "name": "change.confirmed", "message": "", "data": {"id": 7}}),
+        );
+        assert_eq!((e.text.as_str(), e.severity), ("✓ change #7 confirmed", 0));
         let e = describe(&json!({"kind": "notice", "ts": 12, "name": "x.y", "message": "hello", "source": "s"}));
         assert_eq!(e.text, "• x.y: hello [s]");
         let e = describe(&json!({"kind": "mystery", "ts": 9}));

@@ -30,7 +30,7 @@ options=(!lto !debug)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
-_bins=(lindeskd lindesk-session lindeskctl lindesk-data lindesk-bench)
+_bins=(lindeskd lindesk-session lindeskctl lindesk-data lindesk-bench lindesk-mcp)
 
 prepare() {
   cd "$pkgname-$pkgver"

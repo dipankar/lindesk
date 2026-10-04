@@ -197,6 +197,25 @@ Every change lindesk makes is runtime-only and restored when its daemon stops (e
 crash). `restore` is the manual escape hatch; a running daemon would re-apply its
 settings, hence `--stop`.
 
+## Profiles, changes and hardware
+
+```console
+$ lindeskctl profile list               # active profile (●), what matches now, and why
+$ lindeskctl profile show gaming        # its overlay and the threshold values it resolves to
+$ lindeskctl profile use gaming         # pin it (a versioned change); `use auto` to go back
+$ lindeskctl changes list               # every change, by you or an agent, with ttl left
+$ lindeskctl changes apply --set plugins.threshold.config.epoch=400ms --ttl 10m -m "shorter epochs"
+$ lindeskctl hardware                   # detected hardware and how lindesk adapts to it
+$ lindeskctl swap                       # swap analysis with ready-to-run fixes
+$ lindeskctl calibrate --quick          # measure the latency map
+$ lindeskctl mcp                        # connect a local AI agent
+```
+
+`status` and `watch` show the active profile in the header and count down changes that
+will auto-revert (`↺ change #7 reverts in 8m  keep: lindeskctl changes confirm 7`); the
+event feed shows `profile.changed` and `change.*` events. See [Profiles](profiles.md),
+[Changes](changes.md), [Hardware awareness](hardware.md) and [MCP](mcp.md).
+
 ## Conventions
 
 * `lindeskctl foo args…` runs `lindeskctl-foo args…` from `PATH`, like git. A typo gets a
