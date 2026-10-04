@@ -1,0 +1,52 @@
+[package]
+name = "lindesk-mcp"
+description = "lindesk MCP server: lets local AI agents assess responsiveness and apply guardrailed, versioned, revertible changes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "lindesk-mcp"
+path = "src/main.rs"
+
+[dependencies]
+lindesk-plugin-api.workspace = true
+lindesk-core.workspace = true
+lindesk-host.workspace = true
+lindesk-sys.workspace = true
+lindesk-ipc.workspace = true
+lindesk-query.workspace = true
+rmcp = { workspace = true, features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-io",
+    "transport-streamable-http-server",
+] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+anyhow.workspace = true
+async-trait = "0.1"
+clap.workspace = true
+libc.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net", "io-std"] }
+tokio-util = "0.7"
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+# Wire-compatibility check of `ops::ChangeOp` against the daemons' type.
+lindesk-changes = { path = "../lindesk-changes" }
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+tempfile.workspace = true
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio = { workspace = true, features = ["net", "io-std", "process"] }

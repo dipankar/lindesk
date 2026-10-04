@@ -1,0 +1,12 @@
+[Unit]
+Description=lindesk MCP server socket (streamable HTTP on a private unix socket)
+Documentation=https://github.com/dipankar/lindesk
+
+[Socket]
+ListenStream=%t/lindesk/mcp.sock
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

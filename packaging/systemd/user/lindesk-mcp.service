@@ -1,0 +1,27 @@
+[Unit]
+Description=lindesk MCP server (local AI agents: assess responsiveness, guardrailed changes)
+Documentation=https://github.com/dipankar/lindesk
+# lindesk-mcp holds no privileges: changes go to lindesk-session / lindeskd over D-Bus.
+After=lindesk-session.service
+
+[Service]
+Type=simple
+# With lindesk-mcp.socket the listening socket is passed in (LISTEN_FDS) and --listen only
+# names the same path; without it, lindesk-mcp binds the socket itself (mode 0600).
+ExecStart=/usr/bin/lindesk-mcp --listen unix:%t/lindesk/mcp.sock
+Restart=on-failure
+RestartSec=2s
+Slice=background.slice
+UMask=0077
+# Light sandboxing that works in the user manager without user namespaces.
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target
+Also=lindesk-mcp.socket
