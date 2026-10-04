@@ -428,6 +428,8 @@ fn one() -> f32 {
 }
 
 /// Things that happen. Adapters produce Focus/Interaction; the host produces the rest.
+/// Non-exhaustive: new kinds may be added in minor versions, so match with a wildcard.
+#[non_exhaustive]
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum Event {
@@ -467,6 +469,17 @@ pub enum Event {
     ActionReverted { ts: TimestampMs, target: Target, knob: Knob, reason: String },
     /// A plugin misbehaved (crash, timeout, protocol error, clamped intent).
     PluginError { ts: TimestampMs, plugin: String, message: String },
+    /// Anything else worth recording: `name` is a dotted name such as `profile.changed`,
+    /// `change.applied`, `change.reverted`, `calibration.done`, `hardware.power`.
+    Notice {
+        ts: TimestampMs,
+        name: String,
+        #[serde(default)]
+        source: String,
+        message: String,
+        #[serde(default)]
+        data: serde_json::Value,
+    },
 }
 
 impl Event {
@@ -478,7 +491,8 @@ impl Event {
             | Event::LevelChanged { ts, .. }
             | Event::ActionApplied { ts, .. }
             | Event::ActionReverted { ts, .. }
-            | Event::PluginError { ts, .. } => *ts,
+            | Event::PluginError { ts, .. }
+            | Event::Notice { ts, .. } => *ts,
         }
     }
 
@@ -491,6 +505,7 @@ impl Event {
             Event::ActionApplied { .. } => "action_applied",
             Event::ActionReverted { .. } => "action_reverted",
             Event::PluginError { .. } => "plugin_error",
+            Event::Notice { .. } => "notice",
         }
     }
 }
@@ -577,6 +592,109 @@ pub struct Hardware {
     /// Hypervisor/container name when virtualized (e.g. "kvm", "wsl", "docker").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtualization: Option<String>,
+    /// `uname -m` style architecture: "x86_64", "aarch64", "riscv64", ...
+    pub arch: String,
+    pub vendor: CpuVendor,
+    pub features: CpuFeatures,
+    /// Measured latency map from calibration (`lindeskctl calibrate`), when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency: Option<LatencyMap>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CpuVendor {
+    Intel,
+    Amd,
+    /// Arm Ltd. cores (Cortex/Neoverse).
+    Arm,
+    Apple,
+    Qualcomm,
+    Ampere,
+    Other,
+    #[default]
+    Unknown,
+}
+
+/// Scheduler/power features that change how QoS knobs behave on this CPU.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct CpuFeatures {
+    /// Energy Aware Scheduling active (`/proc/sys/kernel/sched_energy_aware`, ARM/hybrid):
+    /// uclamp steers tasks between big and little cores.
+    pub eas: bool,
+    /// Intel Turbo Boost Max / ITMT core ranking (`sched_itmt_enabled`).
+    pub itmt: bool,
+    /// cpufreq driver, e.g. "intel_pstate", "amd-pstate-epp", "cppc_cpufreq".
+    pub cpufreq_driver: Option<String>,
+    pub governor: Option<String>,
+    /// energy_performance_preference when exposed (e.g. "balance_performance").
+    pub epp: Option<String>,
+    /// Available EPP values / governors (for guardrailed changes).
+    pub epp_available: Vec<String>,
+    pub governors_available: Vec<String>,
+    /// NUMA nodes.
+    pub numa_nodes: u32,
+}
+
+/// Baseline latencies measured on an idle machine. Policies compare live numbers to these.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct LatencyMap {
+    pub measured_at: TimestampMs,
+    /// Duration of the calibration run.
+    pub duration_ms: u64,
+    /// Per logical CPU: timer wakeup overshoot and relative single-thread throughput.
+    pub cpus: Vec<CpuLatency>,
+    pub memory: MemoryLatency,
+    /// Per managed block device.
+    pub storage: Vec<StorageLatency>,
+    /// Swap device characteristics, when swap exists.
+    pub swap: Vec<SwapLatency>,
+    /// Calibration noise: true when the machine wasn't idle enough (numbers less reliable).
+    pub noisy: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct CpuLatency {
+    pub cpu: u32,
+    pub wakeup_p50_us: f64,
+    pub wakeup_p99_us: f64,
+    /// Throughput relative to the fastest CPU (1.0 = fastest).
+    pub relative_perf: f64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct MemoryLatency {
+    /// Dependent-load (pointer chase) latency over a buffer much larger than LLC.
+    pub load_latency_ns: f64,
+    /// memcpy bandwidth, bytes/s.
+    pub copy_bps: u64,
+    /// Page-fault (first touch) latency.
+    pub fault_us: f64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct StorageLatency {
+    pub dev: String,
+    pub read_4k_p50_us: f64,
+    pub read_4k_p99_us: f64,
+    pub seq_read_bps: u64,
+    pub seq_write_bps: u64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct SwapLatency {
+    /// Swap device or file path.
+    pub path: String,
+    /// "zram", "zswap+disk", "partition", "file".
+    pub kind: String,
+    /// Estimated page-in latency (from the backing device or zram decompression), microseconds.
+    pub page_in_us: f64,
 }
 
 impl Hardware {
