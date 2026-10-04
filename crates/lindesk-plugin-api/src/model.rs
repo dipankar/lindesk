@@ -546,6 +546,85 @@ pub struct HostCaps {
     /// Block devices (`MAJ:MIN`) that back the filesystems lindesk cares about.
     #[serde(default)]
     pub devices: Vec<String>,
+    /// What the machine is: CPU topology, memory, storage, power. Policies scale with it.
+    #[serde(default)]
+    pub hardware: Hardware,
+}
+
+/// Hardware profile of the host (detected by `lindesk-sys::hardware`).
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct Hardware {
+    /// Logical CPUs online.
+    pub cpus: u32,
+    /// Physical cores.
+    pub cores: u32,
+    pub smt: bool,
+    /// On hybrid CPUs (Intel P/E cores, ARM big.LITTLE): the logical CPUs of each kind.
+    /// Both empty on uniform CPUs.
+    pub performance_cpus: Vec<u32>,
+    pub efficiency_cpus: Vec<u32>,
+    pub cpu_model: String,
+    pub mem_total: u64,
+    pub swap_total: u64,
+    /// zram swap or zswap is in use (swap is cheap, reclaim is CPU-bound).
+    pub compressed_swap: bool,
+    /// Devices lindesk manages (same order as [`HostCaps::devices`]).
+    pub storage: Vec<StorageDevice>,
+    pub power: PowerSource,
+    /// Laptop/convertible chassis (from DMI).
+    pub portable: bool,
+    /// Hypervisor/container name when virtualized (e.g. "kvm", "wsl", "docker").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtualization: Option<String>,
+}
+
+impl Hardware {
+    pub fn is_hybrid(&self) -> bool {
+        !self.performance_cpus.is_empty() && !self.efficiency_cpus.is_empty()
+    }
+
+    pub fn storage_for(&self, dev: &str) -> Option<&StorageDevice> {
+        self.storage.iter().find(|s| s.dev == dev)
+    }
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct StorageDevice {
+    /// `MAJ:MIN` of the whole disk.
+    pub dev: String,
+    pub name: String,
+    pub kind: StorageKind,
+    /// Active I/O scheduler (`none`, `mq-deadline`, `bfq`, `kyber`).
+    pub scheduler: String,
+    /// Rough sustained sequential bandwidth for this kind of device, bytes/s. Used to scale
+    /// I/O throttles; not a measurement.
+    pub nominal_bps: u64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageKind {
+    Nvme,
+    Ssd,
+    Hdd,
+    Emmc,
+    Sd,
+    Virtual,
+    Network,
+    #[default]
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum PowerSource {
+    /// Mains power (or a desktop without batteries).
+    Ac,
+    Battery,
+    #[default]
+    Unknown,
 }
 
 /// Everything a policy sees on each evaluation.

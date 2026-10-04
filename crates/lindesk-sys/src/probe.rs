@@ -10,7 +10,7 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-use lindesk_plugin_api::HostCaps;
+use lindesk_plugin_api::{Hardware, HostCaps};
 use serde::{Deserialize, Serialize};
 
 use crate::blockdev::{self, BlockDev, DevId};
@@ -285,11 +285,16 @@ pub struct Probe {
     pub conflicts: Vec<Conflict>,
     /// Relevant kernel config options (`y`/`m`/`n`), when a config was found.
     pub kconfig: Option<BTreeMap<String, String>>,
+    /// CPU topology, memory, managed disks, power and virtualization
+    /// (see [`crate::hardware`]). Storage is in the same order as [`Probe::devices`].
+    #[serde(default)]
+    pub hardware: Hardware,
 }
 
 /// Kernel config options recorded in [`Probe::kconfig`].
 pub const KCONFIG_KEYS: &[&str] = &[
     "PSI",
+    "PSI_DEFAULT_DISABLED",
     "UCLAMP_TASK_GROUP",
     "BLK_CGROUP_IOLATENCY",
     "BLK_CGROUP_IOCOST",
@@ -401,8 +406,11 @@ impl Probe {
         }
     }
 
-    /// The summary handed to plugins.
+    /// The summary handed to plugins. `hardware.storage` is ordered like `devices`.
     pub fn host_caps(&self) -> HostCaps {
+        let devices: Vec<String> = self.devices().iter().map(|d| d.dev.to_string()).collect();
+        let mut hardware = self.hardware.clone();
+        hardware.storage = devices.iter().filter_map(|d| self.hardware.storage_for(d).cloned()).collect();
         HostCaps {
             cgroup_v2: self.cgroup_mode == CgroupMode::V2,
             systemd: self.systemd.running,
@@ -414,7 +422,8 @@ impl Probe {
             io_max: self.io_max,
             sched_ext: self.sched_ext.available,
             bpf: self.btf,
-            devices: self.devices().iter().map(|d| d.dev.to_string()).collect(),
+            devices,
+            hardware,
         }
     }
 }
@@ -489,6 +498,8 @@ pub fn probe(roots: &Roots, env: &Env) -> Probe {
     let io_weight_effective = !devices.is_empty()
         && devices.iter().all(|d| d.is_bfq() || io_cost.devices.iter().any(|c| c.dev == d.dev && c.enabled));
 
+    let hardware = crate::hardware::detect_for(roots, &devices);
+
     let sched_dir = roots.sys.join("kernel/sched_ext");
     let sched_ext = SchedExt {
         available: sched_dir.is_dir(),
@@ -515,6 +526,7 @@ pub fn probe(roots: &Roots, env: &Env) -> Probe {
         desktop: desktop(env),
         conflicts: conflicts(roots),
         kconfig,
+        hardware,
     }
 }
 
