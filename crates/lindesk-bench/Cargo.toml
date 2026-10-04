@@ -8,5 +8,27 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = ["lake"]
+# Store results into the telemetry lake (`bench_runs` / `bench_samples`) through
+# lindesk-store. The results JSON is always written, with or without this feature.
+lake = ["dep:lindesk-store"]
+
 [dependencies]
 lindesk-plugin-api.workspace = true
+lindesk-sys.workspace = true
+lindesk-ipc.workspace = true
+lindesk-store = { workspace = true, optional = true }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+chrono.workspace = true
+humantime.workspace = true
+ulid.workspace = true
+zbus.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true
