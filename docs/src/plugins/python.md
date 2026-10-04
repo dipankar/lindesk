@@ -7,10 +7,6 @@ as `interactive` and Steam's web helper as `background`. The finished plugin is 
 You need Python 3.8 or newer. The SDK is a single file that uses only the standard
 library.
 
-> **Status:** the `lindeskctl plugin …` subcommands are being implemented alongside this
-> guide. The checks behind `plugin test` already exist (`lindesk_host::conformance`), and
-> every example in the repository passes them.
-
 ## 1. Scaffold
 
 ```console
@@ -162,22 +158,27 @@ Conformance spawns the plugin like the host does and checks that:
 ## 6. Install
 
 ```console
-$ mkdir -p ~/.local/share/lindesk/plugins
-$ cp -r . ~/.local/share/lindesk/plugins/steam-games
-$ lindeskctl plugin reload
+$ lindeskctl plugin install .
+testing steam-games (protocol conformance)…
+✓ installed steam-games into ~/.local/share/lindesk/plugins/steam-games
+sent SIGHUP to lindesk-session; it re-reads its config and plugins
 $ lindeskctl plugin list
-NAME          KINDS       ORIGIN    HEALTH   CALLS  P99
-threshold     policy      built-in  running  14211  0.3ms
-rules         classifier  built-in  running    388  0.1ms
-steam-games   classifier  user      running     12  0.9ms
+NAME         KINDS       ORIGIN   STATE      CALLS  ERRORS    P99  DETAIL
+rules        classifier  builtin  ● running    388       0  0.1ms
+threshold    policy      builtin  ● running  14211       0  0.3ms
+steam-games  classifier  user     ● running     12       0  0.9ms  ~/.local/share/lindesk/plugins/steam-games
 ```
 
-(Until `plugin reload` lands, `systemctl --user restart lindesk-session` does the same.)
+`plugin install` runs the conformance suite first, copies the directory (following
+symlinks, skipping `target/`, `.git` and caches) and asks `lindesk-session` to reload.
+By hand, that's `cp -rL . ~/.local/share/lindesk/plugins/steam-games` followed by
+`lindeskctl plugin reload`. `lindeskctl plugin disable steam-games` turns it off without
+uninstalling it; `lindeskctl plugin uninstall steam-games` removes it.
 
 Start a game and see what lindesk thinks:
 
 ```console
-$ lindeskctl explain "$(pidof -s eldenring.exe)"
+$ lindeskctl explain eldenring.exe
 steam_app_1245620.scope (user 1000)   class interactive   via classifier:steam-games
   reason: Steam game scope steam_app_1245620.scope
   ...

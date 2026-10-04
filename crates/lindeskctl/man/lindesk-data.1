@@ -1,0 +1,81 @@
+.TH LINDESK\-DATA 1 "2026" "lindesk 0.1.0" "User Commands"
+.SH NAME
+lindesk\-data \- maintain and query the lindesk telemetry lake
+.SH SYNOPSIS
+.B lindesk\-data
+.RB [ \-\-root
+.IR DIR ]
+.RB [ \-\-config
+.IR FILE ]
+.RB [ \-\-json ]
+.I COMMAND
+.SH DESCRIPTION
+lindesk records pressure, per-unit usage, events and metrics into a hive-partitioned
+Parquet lake.
+.B lindesk\-data
+compacts sealed hour partitions, maintains the 1-minute and 1-hour rollups, applies
+retention and regenerates
+.IR catalog.duckdb ,
+a views-only database that any DuckDB client can open read-only. It runs from
+.I lindesk\-compact.timer
+(system and user instances) and only touches partitions older than the current hour,
+under the lake's lock. The same operations are available as
+.BR "lindeskctl data" .
+.SH COMMANDS
+.TP
+.B maintain
+Compact, prune and regenerate the catalog (what the timer runs).
+.TP
+.B compact
+Merge each sealed hour's files and refresh the rollups.
+.TP
+.B prune
+Apply retention:
+.BR telemetry.retention.raw ,
+.BR rollup_1m ,
+.B rollup_1h
+and
+.BR max_size .
+.TP
+.B catalog
+Regenerate
+.IR catalog.duckdb .
+.TP
+.B stats
+Partitions, files, rows and bytes per table.
+.TP
+.BI query " SQL " "\fR[\fB\-\-format\fR table|csv|json|parquet] [\fB\-\-output\fR " FILE ]
+Run one read-only statement.
+.TP
+.BI "delete \-\-where " PREDICATE " \fR[\fB\-\-table\fR " T "\fR] [\fB\-\-since\fR " TIME "\fR] [\fB\-\-until\fR " TIME "\fR] [\fB\-\-yes\fR]"
+Delete matching rows from raw tables and rollups. Without
+.B \-\-yes
+only counts them.
+.TP
+.B purge \-\-yes
+Remove all telemetry.
+.SH OPTIONS
+.TP
+.BI \-\-root " DIR"
+Lake root (also
+.BR LINDESK_TELEMETRY_DIR ).
+Default:
+.B telemetry.dir
+from the config, else
+.I /var/lib/lindesk/telemetry
+as root or
+.I $XDG_STATE_HOME/lindesk/telemetry
+otherwise.
+.TP
+.BI \-\-config " FILE"
+Config to read retention from (default
+.I /etc/lindesk/lindesk.toml
+as root, else the user's).
+.TP
+.B \-\-json
+Print reports as JSON.
+.SH SEE ALSO
+.BR lindeskctl (1),
+.BR lindeskd (8),
+.BR lindesk\-session (1),
+.BR duckdb (1)

@@ -1,0 +1,127 @@
+.TH LINDESK\-SESSION 1 "2026" "lindesk 0.1.0" "User Commands"
+.SH NAME
+lindesk\-session \- lindesk per-user session agent
+.SH SYNOPSIS
+.B lindesk\-session
+.RB [ \-\-config
+.IR FILE ]
+.RB [ \-\-state\-dir
+.IR DIR ]
+.RB [ \-\-telemetry\-dir
+.IR DIR ]
+.RB [ \-\-dry\-run ]
+.RB [ \-\-standalone ]
+.RB [ \-\-no\-adapters ]
+.RB [ \-\-log\-level
+.IR FILTER ]
+.br
+.B lindesk\-session \-\-restore
+.SH DESCRIPTION
+.B lindesk\-session
+is the per-user half of lindesk. It runs unprivileged as a
+.B systemd \-\-user
+service
+.RI ( lindesk\-session.service ,
+part of
+.IR graphical\-session.target )
+and owns
+.B org.lindesk.QoS1
+on the session bus.
+.PP
+It tracks the foreground application and user input (built-in COSMIC and X11 adapters; the
+GNOME Shell extension and the KWin script push over D-Bus), maps processes and app ids to
+systemd user units, applies settings to those units through the user manager, hosts user
+plugins and writes the user's telemetry lake. Without a
+.BR lindeskd (8)
+broker it runs the whole pipeline locally, limited to the user's own units.
+.PP
+All changes are runtime-only and restored on exit
+.RB ( ExecStopPost=lindesk\-session\ \-\-restore ).
+The agent re-reads its configuration and plugin directories on
+.B SIGHUP
+.RB ( "lindeskctl plugin reload" )
+or on restart.
+.PP
+It runs
+.B connected
+when
+.BR lindeskd (8)
+is present (the broker's policy decisions are relayed to it) and
+.B standalone
+otherwise, switching as the broker comes and goes.
+.SH OPTIONS
+.TP
+.BI \-\-config " FILE"
+Configuration file (default
+.IR $XDG_CONFIG_HOME/lindesk/lindesk.toml ).
+.TP
+.BI \-\-state\-dir " DIR"
+Applied-state directory (default
+.IR $XDG_RUNTIME_DIR/lindesk ).
+.TP
+.BI \-\-telemetry\-dir " DIR"
+Telemetry lake (default
+.IR $XDG_STATE_HOME/lindesk/telemetry ).
+.TP
+.B \-\-dry\-run
+Observe only.
+.TP
+.B \-\-standalone
+Never use the broker.
+.TP
+.B \-\-no\-adapters
+Don't start the built-in desktop adapters.
+.TP
+.BI \-\-log\-level " FILTER"
+Log filter (else
+.BR RUST_LOG ,
+else
+.BR info ).
+.TP
+.B \-\-restore
+Revert every setting recorded in the state file, then exit.
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.SH D-BUS
+.B org.lindesk.QoS1
+at
+.IR /org/lindesk/QoS1 :
+.BR SetForegroundProcess ,
+.BR SetForegroundApp ,
+.BR BeginInteraction ,
+.BR EndInteraction ,
+.B SetClass
+(own processes only),
+.BR ReportMetric ,
+.BR Status ,
+.B Explain
+and the
+.B LevelChanged
+signal.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/lindesk/lindesk.toml
+Configuration (default
+.IR ~/.config/lindesk/lindesk.toml ).
+.TP
+.I $XDG_CONFIG_HOME/lindesk/rules.d/
+Your classifier rules, consulted before the system's.
+.TP
+.I $XDG_DATA_HOME/lindesk/plugins/
+User plugins (default
+.IR ~/.local/share/lindesk/plugins ).
+.TP
+.I $XDG_RUNTIME_DIR/lindesk/state.json
+Applied settings with their original values.
+.TP
+.I $XDG_STATE_HOME/lindesk/telemetry/
+Your telemetry lake (default
+.IR ~/.local/state/lindesk/telemetry ).
+.SH SEE ALSO
+.BR lindeskctl (1),
+.BR lindeskd (8),
+.BR lindesk\-data (1)

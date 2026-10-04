@@ -1,0 +1,134 @@
+.TH LINDESKD 8 "2026" "lindesk 0.1.0" "System Administration"
+.SH NAME
+lindeskd \- lindesk QoS broker (desktop responsiveness governor)
+.SH SYNOPSIS
+.B lindeskd
+.RB [ \-\-config
+.IR FILE ]
+.RB [ \-\-state\-dir
+.IR DIR ]
+.RB [ \-\-telemetry\-dir
+.IR DIR ]
+.RB [ \-\-dry\-run ]
+.RB [ \-\-log\-level
+.IR FILTER ]
+.RB [ \-\-no\-dbus ]
+.br
+.B lindeskd \-\-restore
+.SH DESCRIPTION
+.B lindeskd
+is the privileged half of lindesk, a userspace QoS governor that keeps the application
+you are using responsive while builds, copies and indexers run in the background.
+It runs as root under systemd
+.RI ( lindeskd.service ,
+.BR Type=notify ,
+with a watchdog) and owns
+.B org.lindesk.Broker1
+on the system bus.
+.PP
+It probes the host's capabilities, watches PSI, hosts system plugins, runs the policy
+pipeline (sensors, classifiers, policies, the resolver with safety caps, actuators,
+sinks), applies settings to system units, enables iocost when
+.B io.iocost = "auto"
+and sends each user's desired settings to their
+.BR lindesk\-session (1)
+agent with the
+.B UserState
+signal.
+.PP
+Every change is runtime-only. The original values are recorded in
+.I /run/lindesk/state.json
+and restored on exit, after a crash
+.RB ( ExecStopPost=lindeskd\ \-\-restore ),
+or with
+.BR "lindeskctl restore \-\-system" .
+Interactive work is never made dangerous: no realtime classes, floors on every throttle,
+and critical workloads can be boosted but never throttled.
+.PP
+At startup it checks its requirements (cgroup v2 or v1 controllers, PSI, privileges) and
+exits with status 78 when one fails; see
+.BR "lindeskctl doctor \-\-preflight" .
+.B SIGHUP
+reloads the configuration and plugins (as does the
+.B Reload
+D-Bus method);
+.B SIGTERM
+restores everything and exits.
+.SH OPTIONS
+.TP
+.BI \-\-config " FILE"
+Configuration file (default
+.IR /etc/lindesk/lindesk.toml ).
+.TP
+.BI \-\-state\-dir " DIR"
+Where the applied state and saved iocost settings live (default
+.IR /run/lindesk ).
+.TP
+.BI \-\-telemetry\-dir " DIR"
+Telemetry lake (default
+.B telemetry.dir
+or
+.IR /var/lib/lindesk/telemetry ).
+.TP
+.B \-\-dry\-run
+Observe only: compute, record and explain, but apply nothing.
+.TP
+.BI \-\-log\-level " FILTER"
+Log filter (else
+.BR RUST_LOG ,
+else
+.BR info ).
+Logs go to the journal when started by systemd, else to stderr.
+.TP
+.B \-\-no\-dbus
+Don't own the bus name (testing).
+.TP
+.B \-\-restore
+Revert every setting recorded in the state file (and the saved iocost settings), then exit.
+Idempotent; exit status 1 when something could not be restored.
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.SH D-BUS
+.B org.lindesk.Broker1
+at
+.IR /org/lindesk/Broker1 :
+.BR RegisterSession ,
+.BR ReportForeground ,
+.BR Interaction ,
+.BR SetClass ,
+.BR GetStatus ,
+.BR Explain ,
+.B Reload
+and the
+.B UserState
+signal. Callers are identified by their bus credentials and authorized with polkit
+.RB ( org.lindesk.set\-class\-own ,
+.BR org.lindesk.set\-class\-any ,
+.BR org.lindesk.manage ).
+.SH FILES
+.TP
+.I /etc/lindesk/lindesk.toml
+Configuration. Every key has a default; check it with
+.BR "lindeskctl config check \-\-system" .
+.TP
+.I /usr/share/lindesk/rules.d/ /etc/lindesk/rules.d/
+Classifier rules.
+.TP
+.I /usr/lib/lindesk/plugins/ /etc/lindesk/plugins/
+System plugins. Loaded only when root-owned and not group- or world-writable.
+.TP
+.I /run/lindesk/state.json
+Applied settings with their original values.
+.TP
+.I /var/lib/lindesk/telemetry/
+System telemetry lake (Parquet; readable by group
+.BR lindesk ).
+.SH SEE ALSO
+.BR lindeskctl (1),
+.BR lindesk\-session (1),
+.BR lindesk\-data (1),
+.BR systemd.resource\-control (5)

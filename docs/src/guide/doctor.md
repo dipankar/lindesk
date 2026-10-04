@@ -2,7 +2,45 @@
 
 ```console
 $ lindeskctl doctor
-DOCTOR_OUTPUT
+⚠ requirements met with 2 warnings (lindeskctl doctor --preflight)
+24×CPU · hybrid 16P+8E · 63 GiB · NVMe · AC
+
+System
+Kernel                   7.0.11-76070011-generic
+CPU                      12th Gen Intel Core i9-12950HX — hybrid: 8P (16 threads) + 8E → foreground boosts favour P-cores via uclamp.min (EAS/ITMT); batch is capped with uclamp.max under pressure, which keeps it on E-cores
+ITMT                     off on a hybrid Intel CPU → the scheduler does not rank P-cores first; foreground boosts rely on uclamp alone
+Memory                   62.5 GiB RAM, 20 GiB swap (compressed)
+Storage                  nvme0n1 NVMe (bfq)
+Power                    AC
+Virtualized              no
+cgroup v2                yes
+Controllers              cpuset cpu io memory hugetlb pids rdma misc dmem
+User delegation (1000)   cpu io memory pids
+systemd                  255 (running)
+PSI                      global + per-cgroup
+uclamp                   yes
+io.latency               not built (CONFIG_BLK_CGROUP_IOLATENCY) → using iocost + io.max
+iocost                   available, disabled → lindeskd enables it when io.iocost = "auto"
+I/O scheduler            nvme0n1 bfq
+io.weight                effective
+io.max                   yes
+Filesystem /             ext4, cgroup writeback supported
+Filesystem /home         ext4, same filesystem as /
+sched_ext                available, disabled
+BPF/BTF                  yes
+Desktop                  GNOME (Wayland) [ubuntu:GNOME] → install the lindesk GNOME Shell extension for focus tracking
+system76-scheduler       running → system76-scheduler active: disable its foreground boost or stop it (systemctl disable --now com.system76.Scheduler.service)
+Backend                  systemd
+Responsiveness level: FULL
+
+lindesk services
+lindeskd                 not installed → install lindesk: sudo apt install ./lindesk_*.deb (or dnf/AUR), or ./packaging/install.sh
+lindesk-session          not installed → install lindesk: sudo apt install ./lindesk_*.deb (or dnf/AUR), or ./packaging/install.sh
+GNOME extension          not installed → foreground tracking on GNOME needs it: install the lindesk package or adapters/gnome-shell-extension
+Config                   ~/.config/lindesk/lindesk.toml not present; defaults apply
+Telemetry                22.0 KiB in ~/.local/state/lindesk/telemetry
+
+→ next step: install lindesk: sudo apt install ./lindesk_*.deb (or dnf/AUR), or ./packaging/install.sh  (lindesk-session is not installed, so nothing is protected yet)
 ```
 
 `doctor` has four parts:
@@ -44,7 +82,12 @@ $ lindeskctl doctor --preflight --quiet    # only warnings and failures (nothing
 ```
 
 ```console
-PREFLIGHT_OUTPUT
+$ lindeskctl doctor --preflight --quiet
+  ⚠ WARN  polkit                      org.lindesk.policy not installed: only root can change classes  (lindeskd)
+                                      → install /usr/share/polkit-1/actions/org.lindesk.policy (packaging/polkit)
+  ⚠ WARN  Conflicting daemons         system76-scheduler running: it also adjusts priorities/cgroups and will fight lindesk  (lindeskd, lindesk-session, lindeskctl)
+                                      → systemctl disable --now com.system76.Scheduler.service
+⚠ requirements met with 2 warnings
 ```
 
 Each requirement is PASS, WARN (lindesk works, with a fallback) or FAIL (that component

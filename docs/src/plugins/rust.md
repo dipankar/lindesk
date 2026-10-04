@@ -224,13 +224,15 @@ Python and shell examples' own test scripts.
 ## Install
 
 ```console
-$ cargo build --release
-$ dest=~/.local/share/lindesk/plugins/on-battery
-$ mkdir -p "$dest" && cp plugin.toml "$dest"/ && cp target/release/on-battery "$dest"/
-$ lindeskctl plugin reload
+$ lindeskctl plugin install .
 ```
 
-Make `exec` in the installed plugin.toml point at the binary. The example uses
-`exec = "on-battery"`, next to the manifest. For a system plugin (`privilege = "system"`),
-install into `/etc/lindesk/plugins/<name>/`, owned by root and not group- or
-world-writable.
+For a Rust plugin (a directory with a `Cargo.toml`), `plugin install` runs
+`cargo build --release`, runs conformance, copies `plugin.toml` and the binary into
+`~/.local/share/lindesk/plugins/<name>/` with `exec` rewritten to point at the binary,
+and reloads the session agent. For a system plugin (`privilege = "system"`), use
+`sudo lindeskctl plugin install --system .`: it goes to `/etc/lindesk/plugins/<name>/`,
+owned by root and not group- or world-writable, and `lindeskd` reloads.
+
+By hand: `cargo build --release`, copy `plugin.toml` and `target/release/<name>` into the
+plugin directory, set `exec = "<name>"`, then `lindeskctl plugin reload`.

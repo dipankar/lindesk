@@ -134,7 +134,7 @@ are both recorded as `plugin_error` events and show up in `lindeskctl explain`.
 Every applied value remembers the plugin, the reason and the priority that won it:
 
 ```console
-$ lindeskctl explain $(pidof -s rustc)
+$ lindeskctl explain rustc
 app-cargo-4242.scope (user 1000)   class batch   via classifier:rules (rule "compilers")
   cpu.idle=1           threshold   batch: idle CPU, low I/O share (static, work-conserving)
   io.weight=1          threshold   YELLOW: system io pressure 31% > 20%; batch yields
@@ -142,7 +142,7 @@ app-cargo-4242.scope (user 1000)   class batch   via classifier:rules (rule "com
     overruled: threshold wanted cpu.uclamp.max=40
 ```
 
-(Exact layout may differ: `explain` is being written alongside these docs.)
+(The exact layout is in [Everyday use](../guide/usage.md#why-explain); `--json` gives the full `Explanation`.)
 
 ## Privilege
 

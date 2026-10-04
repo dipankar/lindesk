@@ -11,3 +11,30 @@ authors.workspace = true
 [dependencies]
 lindesk-plugin-api.workspace = true
 lindesk-core.workspace = true
+lindesk-host.workspace = true
+lindesk-sys.workspace = true
+lindesk-ipc.workspace = true
+lindesk-query.workspace = true
+lindesk-store.workspace = true
+# Only the threshold policy is needed (simulate's baseline); skip the desktop adapters.
+lindesk-builtins = { path = "../lindesk-builtins", version = "0.1.0", default-features = false }
+anyhow.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+clap_mangen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+toml_edit = "0.25"
+humantime.workspace = true
+bytesize.workspace = true
+chrono.workspace = true
+libc.workspace = true
+zbus = { workspace = true, features = ["blocking-api"] }
+# `watch`: full-screen live view.
+ratatui = "0.29"
+crossterm = "0.28"
+
+[dev-dependencies]
+lindesk-sys = { workspace = true, features = ["fixtures"] }
+tempfile.workspace = true

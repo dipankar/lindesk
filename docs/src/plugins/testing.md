@@ -6,7 +6,7 @@ There are three layers, from fastest to most realistic:
 |---|---|---|
 | Unit tests | `testing::Harness` (Rust), the generated `test_*.py` (Python), `test.sh` (shell) | logic bugs, wire-format mistakes |
 | Protocol conformance | `lindeskctl plugin test <dir>` | anything that would get the plugin restarted or disabled in production |
-| Replay | `lindeskctl simulate --policy <dir> --from -1h` (planned) | bad decisions on *your* machine's real history |
+| Replay | `lindeskctl simulate --policy <dir> --from -1h` | bad decisions on *your* machine's real history |
 
 ## Unit tests
 
@@ -91,46 +91,65 @@ use it in one integration test,
 
 ## Simulate: replay real telemetry through your policy
 
-> **Planned.** `lindeskctl simulate` is being written. This section describes the design,
-> and the engine side already exists. `Engine::step(now)` is deterministic, and
-> `SimClock` and `MemoryEnvironment` exist for this purpose.
-
 lindesk records pressure, per-unit usage and classes, focus and every decision into its
 telemetry lake. `simulate` turns that history into a test harness for your policy:
 
 ```console
-$ lindeskctl simulate --policy ./on-battery --from -1h
-replaying 2026-10-03 14:02:11 → 15:02:11 (14 400 ticks, 37 units, 412 focus/interaction events)
+$ lindeskctl simulate --policy ./batch-saver --from -1h
+replaying 2026-10-03 04:59:59 → 2026-10-03 05:02:10  (120 ticks, 2 units, 360 samples, 1 focus/interaction events)
+candidate  ./batch-saver (with threshold)   baseline  threshold
 
-LEVEL   green 51m12s   yellow 7m40s   red 1m19s          (same as recorded)
+LEVEL
+  candidate green 1m00s    yellow 1m10s    red -      
+  baseline  green 1m01s    yellow 1m09s    red -      
+  recorded  green 34s      yellow 1m37s    red -      
 
-ACTIONS (would apply; nothing is changed)
- 14:17:03.250  user/1000:app-cargo-99.scope               cpu.uclamp.max=50   on-battery  on battery (BAT0 64%): batch runs at reduced clocks
- 14:17:03.250  user/1000:app-tracker-miner-fs-3-12.scope  cpu.weight=25       on-battery  on battery (BAT0 64%): background yields harder
- ...
+LEVEL CHANGES  candidate
+  05:00:30.000  ● GREEN → ● YELLOW  batch-saver
+  05:01:40.000  ● YELLOW → ● GREEN  threshold
 
-DIFF vs threshold alone
- knob             units  ticks changed  example
- cpu.weight           3          9 210  app-tracker-miner-fs-3-12.scope: 50 → 25
- cpu.uclamp.max       1          9 210  app-cargo-99.scope: none → 50%
- cpu.weight (fg)      1            214  app-gnome-org.gnome.TextEditor-77.scope: 500 → 200 (boost cut at 200ms)
+DIFF  candidate vs baseline (nothing is applied)
+  05:00:30.000  lindesk-run-make-1.scope  uclamp.max 30%  was nothing  [batch-saver: io pressure 60%]
+  05:00:30.000  lindesk-run-make-1.scope  cpu.weight 5  was nothing  [batch-saver: io pressure 60%]
+  05:00:31.000  lindesk-run-make-1.scope  (no cpu.uclamp.max change)  was uclamp.max 40%
+  05:01:30.000  lindesk-run-make-1.scope  uclamp.max 40%  was nothing  [threshold: YELLOW: system io pressure 43% > 20%; batch yields; uclamp.max keeps it on E-cores]
+  05:01:30.000  lindesk-run-make-1.scope  revert cpu.weight  was nothing
+
+SUMMARY
+  actions    candidate 16, baseline 13; 4 only in candidate, 1 only in baseline, 0 with different values
+  would have throttled lindesk-run-make-1.scope for 2m10s (baseline 2m10s)
+
+NOTES
+  [overruled] threshold: user/1000:lindesk-run-make-1.scope cpu.uclamp.max: cpu.uclamp.max=40.00 overruled by batch-saver
 ```
 
-How it works (planned):
+How it works:
 
-1. The recorded `pressure`, `units` and `events` tables for the window are read through the
+1. The recorded `pressure`, `units` and `events` rows of the window are read through the
    same query layer as `lindeskctl query`.
-2. A `MemoryEnvironment` is rebuilt from the recorded units and classes, and a `SimClock`
-   steps through the window at the recorded tick rate.
-3. Your policy is spawned like any external plugin, with `host = "simulate"` in
-   `initialize`. It runs together with the built-in policies, exactly as it would in
-   production, in dry-run mode, so nothing is applied.
-4. The same window is replayed with the built-in policies alone. The two runs are diffed
-   per (unit, knob), and the levels are compared.
+2. A `MemoryEnvironment` is rebuilt from the recorded units (with their cgroups, from the
+   per-cgroup pressure rows), and each unit's recorded class is pinned.
+3. A replay sensor feeds the recorded samples and usage back in timestamp order, the
+   recorded focus and interaction events are pushed at their times, and a `SimClock` steps
+   the real `Engine` once per recorded timestamp. A recording actuator accepts every
+   action: nothing touches the system.
+4. Your policy is spawned like any external plugin, with `host = "simulate"` in
+   `initialize`, and runs together with the baseline (the built-in `threshold`), exactly as
+   in production. The same window is then replayed with the baseline alone, and the two
+   runs are diffed per (time, unit, knob). Levels are compared with the recorded ones.
 
-Options (planned): `--to` (default now), `--policy` repeated for several plugins,
-`--config <lindesk.toml>` to try different thresholds, `--system` for the system lake,
-and `--json`.
+Options:
+
+| Option | Default | |
+|---|---|---|
+| `--policy` | (required) | a plugin directory, or `builtin:threshold` |
+| `--from`, `--to` | `-1h`, `now` | RFC 3339, `YYYY-MM-DD[ HH:MM[:SS]]`, `now`, or `-1h` / `-30m` |
+| `--baseline` | `builtin:threshold` | or `none` to see the candidate alone |
+| `--config` | your lindesk.toml | `[plugins.*]` settings to use, e.g. tuned thresholds |
+| `--system` | | replay the system lake (`privilege = "system"` policies) |
+| `--lake` | from the config | any lake directory |
+| `--limit` | 40 | action lines to print (`--json` has everything) |
+| `--json` | | the whole result: levels, actions, diff, throttle time per unit |
 
 For a policy to replay faithfully:
 

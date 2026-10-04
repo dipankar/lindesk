@@ -84,10 +84,11 @@ sudo apt install ./lindesk_*.deb
 # Anything else:
 ./packaging/install.sh
 
-lindeskctl doctor        # what your kernel/desktop supports
-lindeskctl watch         # live view: level, protected and yielding workloads
+lindeskctl doctor        # what your kernel/desktop supports, and the one next step
+lindeskctl               # what lindesk is doing right now
+lindeskctl watch         # live dashboard: level, PSI, protected and yielding work, events
 lindeskctl run --batch make -j32
-lindeskctl explain $(pidof firefox)
+lindeskctl explain firefox
 ```
 
 ## Components
@@ -96,7 +97,7 @@ lindeskctl explain $(pidof firefox)
 |---|---|
 | `lindeskd` | privileged broker (system service): probe, PSI, policy, system units, iocost |
 | `lindesk-session` | per-user agent: foreground tracking, user units, user plugins |
-| `lindeskctl` | CLI: doctor, status/watch, explain, run/set, plugin tooling, simulate, query/data, bench |
+| `lindeskctl` | CLI: doctor, status/watch/events, explain, run/set/restore, plugin tooling, simulate, query/data, config, bench |
 | `lindesk-data` | telemetry maintenance (timer) |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the contracts between them.
