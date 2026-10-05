@@ -342,6 +342,37 @@ pub enum Cmd {
     )]
     Query(QueryArgs),
 
+    /// Turn lindesk on: enable and start the daemons (and handle conflicting daemons).
+    #[command(after_help = "Examples:\n  lindeskctl on\n  sudo lindeskctl on --all-users --disable-conflicts")]
+    On(OnArgs),
+
+    /// Turn lindesk off: back to the machine's default behaviour, without uninstalling.
+    #[command(
+        long_about = "Stop and disable lindeskd and lindesk-session (both restore everything they \
+                      changed when they stop), put conflicting daemons back to their \
+                      install-time state (unless --keep-conflicts) and record that lindesk is off, \
+                      so upgrades don't turn it back on. Config, profiles, change history and \
+                      telemetry are kept. `lindeskctl on` reverses it.",
+        after_help = "Examples:\n  lindeskctl off\n  sudo lindeskctl off --all-users --yes"
+    )]
+    Off(OffArgs),
+
+    /// Pause: revert everything lindesk applied and only observe, without stopping it.
+    #[command(
+        long_about = "Every running daemon (your session agent, and lindeskd when allowed) reverts \
+                      the settings it applied and keeps sensing and deciding without applying \
+                      anything: an instant A/B switch. With --for it resumes by itself.",
+        after_help = "Examples:\n  lindeskctl pause --for 10m\n  lindeskctl pause          # until lindeskctl resume"
+    )]
+    Pause {
+        /// Resume automatically after this long (`30m`, `1h`).
+        #[arg(long = "for", value_parser = parse_duration, value_name = "DURATION")]
+        duration: Option<Duration>,
+    },
+
+    /// End a pause early.
+    Resume,
+
     /// Machine setup: conflicting priority daemons (`setup conflicts`).
     #[command(subcommand)]
     Setup(SetupCmd),
@@ -986,6 +1017,38 @@ pub enum ChangesCmd {
     },
 }
 
+#[derive(Args, Debug, Default)]
+pub struct OnArgs {
+    /// Disable conflicting priority daemons without asking (a revertible change).
+    #[arg(long, conflicts_with = "keep_conflicts")]
+    pub disable_conflicts: bool,
+    /// Leave conflicting daemons alone.
+    #[arg(long)]
+    pub keep_conflicts: bool,
+    /// As root: also start every logged-in user's session agent now.
+    #[arg(long)]
+    pub all_users: bool,
+    /// Don't ask.
+    #[arg(long, short)]
+    pub yes: bool,
+    /// How long to wait for the daemons to answer, seconds.
+    #[arg(long, default_value_t = 30, hide = true)]
+    pub wait: u64,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct OffArgs {
+    /// Leave conflicting daemons as they are now (default: back to their install-time state).
+    #[arg(long)]
+    pub keep_conflicts: bool,
+    /// As root: also stop every logged-in user's session agent now.
+    #[arg(long)]
+    pub all_users: bool,
+    /// Don't ask.
+    #[arg(long, short)]
+    pub yes: bool,
+}
+
 /// A change store scope.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum StoreScope {
@@ -1307,6 +1370,16 @@ mod tests {
             Some(Cmd::Setup(SetupCmd::Conflicts { disable: true, yes: true, .. }))
         ));
         assert!(parse(&["setup", "conflicts", "--disable", "--restore"]).is_err());
+        assert!(matches!(
+            parse(&["pause", "--for", "10m"]).unwrap().cmd,
+            Some(Cmd::Pause { duration: Some(d) }) if d == Duration::from_secs(600)
+        ));
+        assert!(matches!(parse(&["resume"]).unwrap().cmd, Some(Cmd::Resume)));
+        assert!(matches!(
+            parse(&["off", "--keep-conflicts", "--yes"]).unwrap().cmd,
+            Some(Cmd::Off(OffArgs { keep_conflicts: true, yes: true, all_users: false }))
+        ));
+        assert!(parse(&["on", "--disable-conflicts", "--keep-conflicts"]).is_err());
         assert!(parse(&["setup", "conflicts", "--restore-conflicts"]).is_err(), "needs --reconcile");
         assert!(matches!(
             parse(&["setup", "conflicts", "--reconcile", "--keep-current"]).unwrap().cmd,

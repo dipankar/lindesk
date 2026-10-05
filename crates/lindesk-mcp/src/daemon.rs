@@ -98,6 +98,7 @@ impl DbusDaemon {
                     DaemonRequest::SwapReport => p.swap_report().await,
                     // Calibration is a broker (system scope) call.
                     DaemonRequest::Calibrate { .. } => Err(zbus::Error::Unsupported),
+                    DaemonRequest::SetPaused { paused, seconds } => p.set_paused(paused, seconds).await,
                 }
             }
             Scope::System => {
@@ -118,6 +119,7 @@ impl DbusDaemon {
                     DaemonRequest::SetProfile(n) => p.set_profile(&n).await,
                     DaemonRequest::GetHardware => p.get_hardware().await,
                     DaemonRequest::SwapReport => p.swap_report().await,
+                    DaemonRequest::SetPaused { paused, seconds } => p.set_paused(paused, seconds).await,
                     DaemonRequest::Calibrate { quick } => {
                         let opts = serde_json::to_string(&CalibrateRequest { quick }).unwrap_or_default();
                         match p.calibrate_with(&opts).await {

@@ -9,6 +9,7 @@ pub mod events;
 pub mod hw;
 pub mod mcp;
 pub mod plugin;
+pub mod power;
 pub mod profile;
 pub mod setup;
 pub mod simulate;

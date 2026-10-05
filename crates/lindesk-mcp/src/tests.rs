@@ -223,6 +223,32 @@ async fn mutations_without_a_daemon_fail_with_remedies() {
 }
 
 #[tokio::test]
+async fn pause_is_always_timed_and_off_is_not_a_tool() {
+    let d = FakeDaemon::new(|_, req| match req {
+        DaemonRequest::SetPaused { paused, seconds } => {
+            Ok(json!({"paused": paused, "until_ms": (*seconds > 0).then_some(1_000)}).to_string())
+        }
+        _ => Ok("{}".into()),
+    });
+    let h = harness(d).await;
+    let r = h.call("pause", json!({})).await;
+    assert!(!is_error(&r), "{r:?}");
+    assert!(text(&r).contains("paused for 10 min"), "{}", text(&r));
+    let r = h.call("pause", json!({"minutes": 0})).await;
+    assert!(is_error(&r) && text(&r).starts_with("rejected"));
+    let r = h.call("pause", json!({"minutes": 121})).await;
+    assert!(is_error(&r));
+    let r = h.call("resume", json!({"scope": "system"})).await;
+    assert!(!is_error(&r), "{r:?}");
+    let calls = h.daemon.calls();
+    assert!(matches!(calls[0], (Scope::User, DaemonRequest::SetPaused { paused: true, seconds: 600 })));
+    assert!(matches!(calls[1], (Scope::System, DaemonRequest::SetPaused { paused: false, seconds: 0 })));
+    assert_eq!(calls.len(), 2, "rejected pauses never reach the daemon");
+    let tools = h.client.list_all_tools().await.unwrap();
+    assert!(!tools.iter().any(|t| t.name == "off" || t.name == "uninstall"), "turning lindesk off is a human decision");
+}
+
+#[tokio::test]
 async fn apply_sends_envelope_and_default_ttl() {
     let d = FakeDaemon::new(|_, req| match req {
         DaemonRequest::ApplyChange { .. } => Ok(json!({"id": 7, "status": "applied", "ttl_until": 1}).to_string()),
@@ -393,6 +419,8 @@ async fn tools_have_annotations() {
         "revert_change",
         "set_profile",
         "calibrate",
+        "pause",
+        "resume",
     ] {
         assert!(names.contains(&n), "missing {n}: {names:?}");
     }
@@ -405,7 +433,8 @@ async fn tools_have_annotations() {
             t.name
         );
         let mutating =
-            ["apply_change", "confirm_change", "revert_change", "set_profile", "calibrate"].contains(&t.name.as_ref());
+            ["apply_change", "confirm_change", "revert_change", "set_profile", "calibrate", "pause", "resume"]
+                .contains(&t.name.as_ref());
         assert_eq!(a.read_only_hint, Some(!mutating), "{}", t.name);
         assert!(t.description.as_ref().is_some_and(|d| d.len() > 80), "{} needs a real description", t.name);
     }

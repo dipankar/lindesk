@@ -26,6 +26,7 @@ type Check = fn(&Value) -> Result<(), String>;
 
 /// Every built-in plugin config validator, by plugin name.
 fn plugin_validators() -> Vec<(&'static str, Check)> {
+    #[allow(unused_mut)] // without the adapter features nothing is pushed
     let mut v: Vec<(&'static str, Check)> = vec![
         (crate::policy::threshold::NAME, |v| ThresholdConfig::from_json(v).map(|_| ())),
         (crate::sensors::PSI, |v| PsiConfig::from_json(v).map(|_| ())),

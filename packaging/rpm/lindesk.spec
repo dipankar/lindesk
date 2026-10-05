@@ -83,6 +83,8 @@ export LINDESK_BIN_DIR=%{lindesk_bin_dir}
 %tmpfiles_create %{_tmpfilesdir}/lindesk.conf
 %systemd_post lindeskd.service
 %systemd_user_post lindesk-session.service lindesk-mcp.socket
+# The pre-lindesk state of conflicting daemons (kept from the first install on).
+%{_bindir}/lindeskctl setup snapshot --method rpm >/dev/null 2>&1 || :
 # Requirement check: never fails the transaction. On a hard failure (exit 1) lindeskd is
 # installed and enabled by the preset, but not started.
 lindesk_rc=0
@@ -94,6 +96,17 @@ if [ -x %{_bindir}/lindeskctl ]; then
         lindesk_out=$(%{_bindir}/lindeskctl doctor --preflight --quiet 2>&1 </dev/null) || lindesk_rc=$?
     fi
 fi
+# `lindeskctl off` keeps lindesk off across upgrades.
+if grep -q '"lindesk_enabled": false' /var/lib/lindesk/install-state.json 2>/dev/null; then
+    lindesk_rc=2
+    echo "lindesk: lindesk was turned off with 'lindeskctl off'; leaving it off (turn it on: lindeskctl on)"
+fi
+# Packages never disable anything: print the command for conflicting daemons.
+for u in com.system76.Scheduler.service system76-scheduler.service ananicy-cpp.service ananicy.service uresourced.service; do
+    if systemctl is-active --quiet "$u" 2>/dev/null; then
+        echo "lindesk: $u is active and will fight lindesk; disable it (revertible): sudo lindeskctl setup conflicts --disable"
+    fi
+done
 if [ "$lindesk_rc" -eq 1 ]; then
     {
         echo "lindesk: WARNING: this system does not meet lindesk's requirements:"
@@ -142,8 +155,9 @@ fi
 %systemd_preun lindeskd.service
 %systemd_user_preun lindesk-session.service lindesk-mcp.socket lindesk-mcp.service
 if [ $1 -eq 0 ]; then
-    # Undo every runtime change (the unit's ExecStopPost does this too under systemd).
-    %{_bindir}/lindeskd --restore >/dev/null 2>&1 || :
+    # Stop and restore everything lindesk changed (runtime settings, versioned changes,
+    # drop-ins, desktop integration). Purge data afterwards with: rm -rf /var/lib/lindesk
+    %{_datadir}/lindesk/uninstall.sh --restore-only --yes --keep-current || :
 fi
 
 %postun
@@ -188,6 +202,7 @@ fi
 %{_bindir}/lindeskctl
 %{_bindir}/lindesk-bench
 %{_bindir}/lindesk-mcp
+%{_bindir}/lindesk-uninstall
 %{_unitdir}/lindeskd.service
 %{_userunitdir}/lindesk-session.service
 %{_userunitdir}/lindesk-mcp.service

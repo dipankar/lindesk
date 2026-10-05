@@ -293,6 +293,18 @@ pub struct Envelope {
     /// `daemon.telemetry`: whether the optional telemetry plugin runs (absent from older
     /// daemons).
     pub telemetry: Option<Value>,
+    /// `daemon.paused` when paused: until when (`None` = until resumed).
+    pub paused: Option<Option<i64>>,
+}
+
+impl Envelope {
+    /// `⏸ paused (resumes in 24m)` while paused.
+    pub fn paused_text(&self, now: i64) -> Option<String> {
+        self.paused.map(|until| match until {
+            Some(u) => format!("⏸ paused (resumes in {})", crate::ui::duration_ms((u - now).max(0))),
+            None => "⏸ paused (until lindeskctl resume)".to_string(),
+        })
+    }
 }
 
 fn requirement_line(v: &Value) -> String {
@@ -328,6 +340,9 @@ pub fn parse_envelope(raw: &Value) -> Envelope {
         e.mode = d.get("mode").and_then(Value::as_str).map(str::to_string);
         e.uptime = d.get("uptime_s").and_then(Value::as_f64).map(|s| Duration::from_secs_f64(s.max(0.0)));
         e.telemetry = d.get("telemetry").filter(|t| t.is_object()).cloned();
+        if let Some(p) = d.get("paused").filter(|p| p["paused"] == true) {
+            e.paused = Some(p["until_ms"].as_i64());
+        }
     }
     e.epoch = raw.get("epoch").and_then(|x| x.get("active")).and_then(Value::as_bool);
     if let Some(fg) = raw.get("pressure").and_then(|p| p.get("foreground")).filter(|v| v.is_object()) {

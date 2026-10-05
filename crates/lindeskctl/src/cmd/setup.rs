@@ -85,7 +85,7 @@ pub struct Env {
 }
 
 impl Env {
-    fn new(lib: Option<&Path>, origin: SetupOrigin) -> Result<Env> {
+    pub fn new(lib: Option<&Path>, origin: SetupOrigin) -> Result<Env> {
         Ok(Env {
             lib: lib.map_or_else(|| PathBuf::from(LIB_DIR), Path::to_path_buf),
             explicit: lib.is_some(),
@@ -97,11 +97,15 @@ impl Env {
         })
     }
 
-    fn require_root(&self, what: &str) -> Result<()> {
+    pub fn services(&self) -> &Services {
+        &self.services
+    }
+
+    pub fn require_root(&self, what: &str) -> Result<()> {
         if self.explicit { Ok(()) } else { crate::paths::require_root(what) }
     }
 
-    fn state_path(&self) -> PathBuf {
+    pub fn state_path(&self) -> PathBuf {
         self.lib.join("install-state.json")
     }
 
@@ -133,7 +137,7 @@ impl Env {
 }
 
 /// Installed conflicting units with their (enabled, active) state.
-fn installed(services: &dyn ServiceRunner) -> Vec<(String, bool, bool)> {
+pub fn installed(services: &dyn ServiceRunner) -> Vec<(String, bool, bool)> {
     install_state::observe(services)
         .into_iter()
         .filter(|u| u.installed)
@@ -188,7 +192,7 @@ fn show(ui: &Ui, env: &Env) -> Result<()> {
     Ok(())
 }
 
-fn disable_conflicts(ui: &Ui, env: &Env, yes: bool) -> Result<()> {
+pub fn disable_conflicts(ui: &Ui, env: &Env, yes: bool) -> Result<()> {
     let ops: Vec<ChangeOp> = installed(&*env.services)
         .into_iter()
         .filter(|(_, e, a)| *e || *a)
@@ -231,7 +235,7 @@ fn disable_conflicts(ui: &Ui, env: &Env, yes: bool) -> Result<()> {
     if cs.status == Status::Failed { Err(Exit(1).into()) } else { Ok(()) }
 }
 
-fn restore_conflicts_cmd(ui: &Ui, env: &Env, yes: bool) -> Result<()> {
+pub fn restore_conflicts_cmd(ui: &Ui, env: &Env, yes: bool) -> Result<()> {
     let store = env.store()?;
     let changes = service_changes(&store)?;
     if changes.is_empty() {
@@ -266,13 +270,13 @@ fn restore_conflicts_cmd(ui: &Ui, env: &Env, yes: bool) -> Result<()> {
 
 /// What `--reconcile` does with a difference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Choice {
+pub enum Choice {
     Ask,
     Restore,
     Keep,
 }
 
-fn reconcile_conflicts(ui: &Ui, env: &Env, choice: Choice) -> Result<()> {
+pub fn reconcile_conflicts(ui: &Ui, env: &Env, choice: Choice) -> Result<()> {
     let path = env.state_path();
     let Some(state): Option<InstallState> = install_state::load(&path)? else {
         if ui.json {

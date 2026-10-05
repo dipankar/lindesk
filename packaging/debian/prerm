@@ -10,9 +10,13 @@ if [ "$1" = remove ] || [ "$1" = deconfigure ]; then
 			systemctl stop lindeskd.service >/dev/null 2>&1 || true
 		fi
 	fi
-	# lindeskd.service's ExecStopPost already restores; this also covers non-systemd hosts
-	# and a crashed daemon. --restore is idempotent.
-	if [ -x /usr/bin/lindeskd ]; then
+	# Stop everything and restore what lindesk changed: cgroup settings and iocost,
+	# every versioned change (sysctls, schedulers, services it disabled), drop-ins and
+	# desktop integration. Conflicting daemons changed by hand are left as they are.
+	if [ -x /usr/share/lindesk/uninstall.sh ]; then
+		/usr/share/lindesk/uninstall.sh --restore-only --yes --keep-current ||
+			echo "lindesk: warning: some changes could not be restored (see above)" >&2
+	elif [ -x /usr/bin/lindeskd ]; then
 		/usr/bin/lindeskd --restore >/dev/null 2>&1 || echo "lindesk: warning: lindeskd --restore failed" >&2
 	fi
 fi

@@ -140,6 +140,9 @@ pub struct LindeskState {
     /// lindesk processes found in /proc (comm).
     #[serde(default)]
     pub processes: Vec<String>,
+    /// Daemons paused for this phase (`--off-mode pause`): running, but applying nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paused: Vec<String>,
 }
 
 impl LindeskState {

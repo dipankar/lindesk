@@ -48,6 +48,26 @@ pub struct InstallState {
     pub units: Vec<UnitState>,
     #[serde(default)]
     pub upgrades: Vec<Upgrade>,
+    /// False after `lindeskctl off`: upgrades and package scripts must not start lindesk
+    /// again (`lindeskctl on` sets it back).
+    #[serde(default = "yes")]
+    pub lindesk_enabled: bool,
+    /// Every `lindeskctl on` / `off`, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toggles: Vec<Toggle>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// One `lindeskctl on` / `off`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Toggle {
+    pub at_ms: TimestampMs,
+    pub uid: u32,
+    /// `on` or `off`.
+    pub action: String,
 }
 
 /// A unit whose current state differs from the snapshot.
@@ -112,6 +132,8 @@ pub fn record_install(
         created_ms: now,
         units: observe(services),
         upgrades: Vec::new(),
+        lindesk_enabled: true,
+        toggles: Vec::new(),
     };
     save(path, &s)?;
     Ok((s, true))
@@ -130,6 +152,26 @@ pub fn ensure(
         return Ok(false);
     }
     record_install(path, method, version, services, now).map(|(_, created)| created)
+}
+
+/// `lindeskctl on` / `off`: records whether lindesk should run, creating the snapshot first
+/// when there is none (`method` "cli").
+pub fn set_enabled(
+    path: &Path,
+    enabled: bool,
+    uid: u32,
+    version: &str,
+    services: &dyn ServiceRunner,
+    now: TimestampMs,
+) -> Result<InstallState> {
+    let mut s = match load(path)? {
+        Some(s) => s,
+        None => record_install(path, "cli", version, services, now)?.0,
+    };
+    s.lindesk_enabled = enabled;
+    s.toggles.push(Toggle { at_ms: now, uid, action: if enabled { "on" } else { "off" }.into() });
+    save(path, &s)?;
+    Ok(s)
 }
 
 /// Units whose current state differs from the snapshot (installed units only).
@@ -179,6 +221,26 @@ mod tests {
         let diff = differences(&s2, &svc);
         assert_eq!(diff.len(), 1);
         assert_eq!((diff[0].snapshot.enabled, diff[0].current.enabled), (true, false));
+    }
+
+    #[test]
+    fn off_survives_upgrades_until_on() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("install-state.json");
+        let svc = FakeServices::default();
+        record_install(&p, "deb", "0.1.0", &svc, 1).unwrap();
+        let s = set_enabled(&p, false, 1000, "0.1.0", &svc, 2).unwrap();
+        assert!(!s.lindesk_enabled);
+        // What the package scripts grep for.
+        assert!(std::fs::read_to_string(&p).unwrap().contains("\"lindesk_enabled\": false"));
+        let (s, _) = record_install(&p, "deb", "0.2.0", &svc, 3).unwrap();
+        assert!(!s.lindesk_enabled, "an upgrade keeps lindesk off");
+        let s = set_enabled(&p, true, 0, "0.2.0", &svc, 4).unwrap();
+        assert!(s.lindesk_enabled);
+        assert_eq!(s.toggles.iter().map(|t| t.action.as_str()).collect::<Vec<_>>(), ["off", "on"]);
+        // An older file without the field means enabled.
+        let old = r#"{"schema":1,"method":"script","version":"0.1.0","created_ms":1,"units":[]}"#;
+        assert!(serde_json::from_str::<InstallState>(old).unwrap().lindesk_enabled);
     }
 
     #[test]

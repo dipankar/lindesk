@@ -411,7 +411,11 @@ purge_all() {
 			run rm -rf "$destdir$libdir" && removed+=("$libdir")
 		fi
 	fi
-	((live)) || return 0
+	if ((!live)); then
+		# A staged tree: drop the parents the state lived in when they are now empty.
+		rmdir "$destdir/var/lib" "$destdir/var" "$destdir/run" 2>/dev/null || true
+		return 0
+	fi
 	local -a homes=()
 	while read -r name uid home; do
 		for d in "$home/.config/lindesk" "$home/.local/state/lindesk" "$home/.local/share/lindesk/plugins"; do
@@ -447,7 +451,7 @@ if ((!restore_only)); then
 fi
 
 echo
-echo "lindesk uninstall summary${dry_run:+ (dry run)}:"
+if ((dry_run)); then echo "lindesk uninstall summary (dry run):"; else echo "lindesk uninstall summary:"; fi
 ((${#restored[@]})) && printf '  restored: %s\n' "${restored[@]}"
 ((${#removed[@]})) && printf '  removed:  %s\n' "${removed[@]}"
 ((${#kept[@]})) && printf '  kept:     %s\n' "${kept[@]}"

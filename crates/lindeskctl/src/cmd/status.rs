@@ -47,7 +47,7 @@ pub fn fetch(system: bool) -> Result<Fetched, Vec<(Daemon, anyhow::Error)>> {
 
 /// The friendly "nothing is running" message.
 pub fn not_running_message(ui: &Ui, errors: &[(Daemon, anyhow::Error)]) -> String {
-    let mut s = format!("{} {}\n", ui.dim("○"), ui.bold("lindesk isn't running (or isn't reachable)."));
+    let mut s = format!("{} {}\n", ui.dim("○"), ui.bold("lindesk is off (not running, or not reachable)."));
     for (d, e) in errors {
         let first = e.to_string().lines().next().unwrap_or_default().to_string();
         s.push_str(&format!("  {:<16} {}\n", d.name(), ui.dim(first)));
@@ -140,7 +140,7 @@ pub fn render(
     let mut s = String::new();
     // One-line summary.
     s.push_str(&format!("{} {} {}\n", badge(ui, st.level), ui.dim("—"), ui.bold(live::summary(st))));
-    let mut meta = vec![source.name().to_string()];
+    let mut meta = vec![if env.paused.is_some() { "paused" } else { "on" }.to_string(), source.name().to_string()];
     if let Some(m) = &env.mode {
         meta.push(m.clone());
     }
@@ -159,6 +159,13 @@ pub fn render(
     }
     s.push_str(&format!("  {line}\n"));
     let now = if st.now > 0 { st.now } else { lindesk_core::clock::now_ms() };
+    if let Some(p) = env.paused_text(now) {
+        s.push_str(&format!(
+            "  {}  {}\n",
+            ui.yellow(p),
+            ui.dim("nothing is applied; lindesk only observes (lindeskctl resume)")
+        ));
+    }
     for p in &env.pending {
         s.push_str(&format!(
             "  {} {}{}  {}\n",
@@ -395,7 +402,8 @@ pub fn bare(ui: &Ui) -> Result<()> {
     match fetch(ui.system) {
         Ok(Fetched { source, status: Some(st), envelope, .. }) => {
             s.push_str(&format!("{} {} {}\n", badge(ui, st.level), ui.dim("—"), ui.bold(live::summary(&st))));
-            let mut meta = vec![source.name().to_string()];
+            let mut meta =
+                vec![if envelope.paused.is_some() { "paused" } else { "on" }.to_string(), source.name().to_string()];
             meta.extend(envelope.mode.clone());
             if let Some(p) = &envelope.profile {
                 meta.push(format!("profile {}", p.short()));
@@ -406,6 +414,9 @@ pub fn bare(ui: &Ui) -> Result<()> {
                 meta.push("DRY RUN".into());
             }
             s.push_str(&format!("  {}\n", ui.dim(meta.join(" · "))));
+            if let Some(p) = envelope.paused_text(lindesk_core::clock::now_ms()) {
+                s.push_str(&format!("  {}\n", ui.yellow(p)));
+            }
             s.push_str(&format!("  {} {}\n", ui.dim("pressure"), psi_inline(ui, &psi)));
             if !st.yielding.is_empty() {
                 let y: Vec<String> = st.yielding.iter().take(4).map(ToString::to_string).collect();
@@ -432,12 +443,12 @@ pub fn bare(ui: &Ui) -> Result<()> {
             ));
         }
         Err(_) => {
-            let next = if crate::paths::which("lindesk-session").is_some() {
-                format!("— start it: {}", Daemon::Session.start_hint())
+            let (state, next) = if crate::paths::which("lindesk-session").is_some() {
+                ("lindesk is off", "— turn it on: lindeskctl on".to_string())
             } else {
-                "— not installed: ./packaging/install.sh or your distro package".to_string()
+                ("lindesk is not installed", "— ./packaging/install.sh or your distro package".to_string())
             };
-            s.push_str(&format!("{} {} {}\n", ui.dim("○"), ui.bold("lindesk isn't running"), ui.dim(next)));
+            s.push_str(&format!("{} {} {}\n", ui.dim("○"), ui.bold(state), ui.dim(next)));
             s.push_str(&format!("  {} {}\n", ui.dim("pressure"), psi_inline(ui, &psi)));
             s.push_str(&format!("  {}\n", ui.dim(ui::hardware_compact(&live::local_hardware()))));
         }
@@ -581,7 +592,7 @@ pub mod tests {
             s.contains("  telemetry: not installed (optional) → to record history: sudo apt install lindesk-telemetry"),
             "{s}"
         );
-        assert!(s.contains("lindesk-session · connected · profile auto→battery · 32×CPU · 62 GiB"), "{s}");
+        assert!(s.contains("on · lindesk-session · connected · profile auto→battery · 32×CPU · 62 GiB"), "{s}");
         assert!(s.contains("↺ change #7 reverts in 8m — shorter epochs  keep it: lindeskctl changes confirm 7"), "{s}");
         assert!(s.contains("⚡ interaction epoch"), "{s}");
         assert!(s.contains("⚠ PSI: per-cgroup PSI disabled"), "{s}");

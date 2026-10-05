@@ -52,6 +52,7 @@ impl Lindesk {
             session_unit_active: unit_active(true, SESSION_UNIT),
             system_unit_active: unit_active(false, SYSTEM_UNIT),
             processes: lindesk_processes(),
+            paused: Vec::new(),
         }
     }
 
@@ -71,6 +72,41 @@ impl Lindesk {
                 return timed(p.report_foreground(pid, "")).await;
             }
             Err(anyhow!("no lindesk D-Bus service to talk to"))
+        })
+    }
+
+    /// `SetPaused` on every lindesk daemon that is up: observe-only, every setting it
+    /// applied reverted (`seconds > 0` auto-resumes). Returns which daemons paused; the
+    /// broker may refuse (polkit), which leaves system units managed.
+    pub fn set_paused(&self, paused: bool, seconds: u32) -> Result<Vec<&'static str>> {
+        self.rt.block_on(async {
+            let mut done = Vec::new();
+            let mut errors = Vec::new();
+            if let Some(c) = &self.session
+                && name_owned(c, QOS_NAME).await
+            {
+                match timed(QoSProxy::new(c).await?.set_paused(paused, seconds)).await {
+                    Ok(_) => done.push("lindesk-session"),
+                    Err(e) => errors.push(format!("lindesk-session: {e}")),
+                }
+            }
+            if let Some(c) = &self.system
+                && name_owned(c, BROKER_NAME).await
+            {
+                match timed(BrokerProxy::new(c).await?.set_paused(paused, seconds)).await {
+                    Ok(_) => done.push("lindeskd"),
+                    Err(e) => errors.push(format!(
+                        "lindeskd: {e} (system units stay managed; run as root or allow org.lindesk.manage)"
+                    )),
+                }
+            }
+            if done.is_empty() && !errors.is_empty() {
+                return Err(anyhow!("{}", errors.join("; ")));
+            }
+            for e in errors {
+                eprintln!("lindesk-bench: warning: {e}");
+            }
+            Ok(done)
         })
     }
 

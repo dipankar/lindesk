@@ -141,6 +141,26 @@ pub struct SetProfileArgs {
     pub ttl_minutes: Option<u32>,
 }
 
+/// Longest pause an agent may ask for: a pause always ends by itself.
+pub const MAX_PAUSE_MINUTES: u32 = 120;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PauseArgs {
+    /// `user` (default): your session agent (your apps). `system`: lindeskd (needs admin).
+    #[serde(default)]
+    pub scope: Scope,
+    /// Minutes until lindesk resumes by itself (1–120, default 10). There is no indefinite
+    /// pause from MCP.
+    #[serde(default)]
+    pub minutes: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResumeArgs {
+    #[serde(default)]
+    pub scope: Scope,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CalibrateArgs {
     /// A shorter, less precise run (a few seconds instead of ≈15 s).
@@ -1185,6 +1205,56 @@ impl LindeskMcp {
     ) -> Result<CallToolResult, McpError> {
         let ops = [ChangeOp::ProfileUse { scope: a.scope, name: a.name.clone() }];
         Ok(self.apply(&ctx, a.scope, &ops, &format!("switch profile to {}", a.name), a.ttl_minutes).await)
+    }
+
+    #[tool(
+        description = "Pause lindesk for an A/B comparison: the daemon reverts every setting it applied and only \
+            observes until it resumes by itself after `minutes` (1-120, default 10) or resume is called. Nothing is \
+            stopped or uninstalled. user scope (default) pauses your session agent; system pauses lindeskd and may \
+            prompt for admin authentication. Tell the user, and resume when the comparison is done. (There is \
+            deliberately no tool to turn lindesk off: that is the user's decision, `lindeskctl off`.)",
+        annotations(
+            title = "Pause lindesk",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn pause(&self, Parameters(a): Parameters<PauseArgs>) -> Result<CallToolResult, McpError> {
+        let minutes = a.minutes.unwrap_or(10);
+        if !(1..=MAX_PAUSE_MINUTES).contains(&minutes) {
+            let msg = format!("rejected: minutes must be 1..={MAX_PAUSE_MINUTES} (a pause always ends by itself)");
+            return Ok(failure(msg.clone(), json!({"error": "rejected", "message": msg})));
+        }
+        match self.daemon_json(a.scope, DaemonRequest::SetPaused { paused: true, seconds: minutes * 60 }).await {
+            Ok(v) => Ok(success(
+                format!(
+                    "{} paused for {minutes} min: every setting it applied is reverted, it only observes. Call resume \
+                     (or wait) to turn it back on.",
+                    daemon_name(a.scope)
+                ),
+                json!({"scope": a.scope, "pause": v}),
+            )),
+            Err(e) => Ok(daemon_failure(&e, "pause")),
+        }
+    }
+
+    #[tool(
+        description = "End a pause early: lindesk applies its decisions again.",
+        annotations(
+            title = "Resume lindesk",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn resume(&self, Parameters(a): Parameters<ResumeArgs>) -> Result<CallToolResult, McpError> {
+        match self.daemon_json(a.scope, DaemonRequest::SetPaused { paused: false, seconds: 0 }).await {
+            Ok(v) => Ok(success(format!("{} resumed", daemon_name(a.scope)), json!({"scope": a.scope, "pause": v}))),
+            Err(e) => Ok(daemon_failure(&e, "resume")),
+        }
     }
 
     #[tool(

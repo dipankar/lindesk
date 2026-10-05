@@ -306,3 +306,8 @@ pub fn is_not_running(e: &anyhow::Error) -> bool {
 pub fn is_unsupported(e: &anyhow::Error) -> bool {
     e.to_string().contains("doesn't implement")
 }
+
+/// `SetPaused(paused, seconds)`: the pause JSON.
+pub fn set_paused(d: Daemon, paused: bool, seconds: u32) -> Result<String> {
+    call(d, "SetPaused", TIMEOUT, |p| p.set_paused(paused, seconds), |p| p.set_paused(paused, seconds))
+}

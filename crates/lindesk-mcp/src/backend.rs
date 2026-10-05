@@ -38,6 +38,10 @@ pub enum DaemonRequest {
     Calibrate {
         quick: bool,
     },
+    SetPaused {
+        paused: bool,
+        seconds: u32,
+    },
 }
 
 impl DaemonRequest {
@@ -58,6 +62,7 @@ impl DaemonRequest {
             DaemonRequest::GetHardware => "GetHardware",
             DaemonRequest::SwapReport => "SwapReport",
             DaemonRequest::Calibrate { .. } => "Calibrate",
+            DaemonRequest::SetPaused { .. } => "SetPaused",
         }
     }
 }

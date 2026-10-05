@@ -42,8 +42,29 @@ _lindesk_start_sessions() {
   return 0
 }
 
+# _lindesk_off: `lindeskctl off` keeps lindesk off across upgrades.
+_lindesk_off() {
+  grep -q '"lindesk_enabled": false' /var/lib/lindesk/install-state.json 2>/dev/null
+}
+
+# _lindesk_conflicts: never disable anything from a package hook; print the command.
+_lindesk_conflicts() {
+  for _u in com.system76.Scheduler.service system76-scheduler.service ananicy-cpp.service ananicy.service uresourced.service; do
+    if systemctl is-active --quiet "$_u" 2>/dev/null; then
+      echo "==> lindesk: $_u is active and will fight lindesk; disable it (revertible): sudo lindeskctl setup conflicts --disable"
+    fi
+  done
+  return 0
+}
+
 post_install() {
+  /usr/bin/lindeskctl setup snapshot --method arch >/dev/null 2>&1 || true
   systemctl --global enable lindesk-session.service >/dev/null 2>&1 || true
+  if _lindesk_off; then
+    echo "==> lindesk: it was turned off with 'lindeskctl off' and stays off (turn it on: lindeskctl on)"
+    return 0
+  fi
+  _lindesk_conflicts
   _lindesk_preflight || return 0
   _lindesk_start_sessions
   cat <<'MSG'
@@ -62,6 +83,8 @@ MSG
 }
 
 post_upgrade() {
+  /usr/bin/lindeskctl setup snapshot --method arch >/dev/null 2>&1 || true
+  _lindesk_off && return 0
   _lindesk_preflight || return 0
   if [ -d /run/systemd/system ] && systemctl is-active --quiet lindeskd.service; then
     systemctl try-restart lindeskd.service || true
@@ -74,8 +97,10 @@ pre_remove() {
   fi
   systemctl --global disable lindesk-session.service >/dev/null 2>&1 || true
   systemctl --global disable lindesk-mcp.socket lindesk-mcp.service >/dev/null 2>&1 || true
-  # Undo every runtime change (lindeskd.service's ExecStopPost does this too).
-  /usr/bin/lindeskd --restore >/dev/null 2>&1 || echo "==> lindesk: warning: lindeskd --restore failed"
+  # Stop and restore everything lindesk changed (runtime settings, versioned changes,
+  # drop-ins, desktop integration). Purge data afterwards with: rm -rf /var/lib/lindesk
+  /usr/share/lindesk/uninstall.sh --restore-only --yes --keep-current ||
+    echo "==> lindesk: warning: some changes could not be restored"
 }
 
 post_remove() {

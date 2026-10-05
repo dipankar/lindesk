@@ -173,6 +173,50 @@ quiet "$INSTALL" --destdir="$dest" --no-build
 quiet "$INSTALL" --destdir="$dest" --uninstall
 if [[ -z $(ls -A "$dest") ]]; then ok "uninstall leaves the destdir empty"; else bad "uninstall left: $(cd "$dest" && find . -mindepth 1)"; fi
 
+# --purge removes even a modified config (and the state a destdir may hold).
+quiet "$INSTALL" --destdir="$dest" --no-build
+echo "# admin edit" >>"$dest/etc/lindesk/lindesk.toml"
+mkdir -p "$dest/var/lib/lindesk/changes" && echo '{}' >"$dest/var/lib/lindesk/install-state.json"
+quiet "$SCRIPT_DIR/uninstall.sh" --destdir="$dest" --purge --yes
+if [[ -z $(ls -A "$dest") ]]; then ok "uninstall --purge leaves the destdir empty"; else bad "--purge left: $(cd "$dest" && find . -mindepth 1)"; fi
+quiet "$INSTALL" --destdir="$dest" --no-build
+"$SCRIPT_DIR/uninstall.sh" --destdir="$dest" --dry-run >"$work/log" 2>&1
+[[ -x $dest/usr/bin/lindeskd ]] && grep -q 'dry-run' "$work/log" && ok "uninstall --dry-run changes nothing" ||
+	bad "uninstall --dry-run"
+[[ -x $dest/usr/bin/lindesk-uninstall && -x $dest/usr/share/lindesk/uninstall.sh ]] &&
+	grep -q -- "--prefix=/usr" "$dest/usr/bin/lindesk-uninstall" && ok "lindesk-uninstall is installed" ||
+	bad "lindesk-uninstall missing"
+quiet "$SCRIPT_DIR/uninstall.sh" --destdir="$dest"
+rm -rf "${dest:?}"/*
+
+# A package postinst keeps lindesk off after `lindeskctl off` (install-state.json), and
+# never disables conflicting daemons itself. Every system tool is a logging stub.
+mkdir -p "$work/pistub" "$work/pilib"
+for t in systemctl deb-systemd-helper deb-systemd-invoke systemd-sysusers systemd-tmpfiles loginctl addgroup getent; do
+	printf '#!/bin/sh\necho "%s $*" >>"%s/calls"\nexit 0\n' "$t" "$work" >"$work/pistub/$t"
+	chmod +x "$work/pistub/$t"
+done
+run_postinst() {
+	: >"$work/calls"
+	PATH="$work/pistub:/usr/bin:/bin" LINDESK_LIB_DIR="$work/pilib" sh "$SCRIPT_DIR/debian/postinst" configure 0.0.9 \
+		>"$work/pi.log" 2>&1
+}
+echo '{"schema": 1, "lindesk_enabled": false, "units": []}' >"$work/pilib/install-state.json"
+run_postinst
+if grep -q "turned off with 'lindeskctl off'" "$work/pi.log" && ! grep -Eq 'invoke (try-restart|start) lindeskd|systemctl (try-restart|start) lindeskd' "$work/calls"; then
+	ok "postinst keeps lindesk off after lindeskctl off"
+else
+	bad "postinst re-enabled a lindesk that was turned off: $(cat "$work/pi.log" "$work/calls")"
+fi
+echo '{"schema": 1, "lindesk_enabled": true, "units": []}' >"$work/pilib/install-state.json"
+run_postinst
+if [[ ! -d /run/systemd/system ]] || grep -Eq '(deb-systemd-invoke|systemctl) try-restart lindeskd' "$work/calls"; then
+	ok "postinst restarts lindeskd when it is on"
+else
+	bad "postinst didn't restart lindeskd: $(cat "$work/pi.log" "$work/calls")"
+fi
+if ! grep -Eq 'systemctl (disable|stop|mask)' "$work/calls"; then ok "postinst disables nothing"; else bad "postinst disabled something"; fi
+
 # Core-only install and uninstall.
 quiet "$INSTALL" --destdir="$dest" --no-build --without-telemetry
 quiet "$INSTALL" --destdir="$dest" --uninstall
@@ -295,6 +339,7 @@ rm -rf "${dest:?}"/*
 # Package scripts: a failing `lindeskctl doctor --preflight` never fails the transaction
 # and keeps lindeskd from starting. Run them with a stub PATH (lindeskctl at /usr/bin is
 # not ours to fake, so only syntax and the no-lindeskctl path are exercised here).
+bash -n "$SCRIPT_DIR/uninstall.sh" && ok "uninstall.sh parses" || bad "uninstall.sh syntax"
 for s in "$SCRIPT_DIR/debian/postinst" "$SCRIPT_DIR/aur/lindesk.install" "$SCRIPT_DIR/debian/telemetry/postinst" \
 	"$SCRIPT_DIR/debian/telemetry/prerm" "$SCRIPT_DIR/debian/telemetry/postrm" "$SCRIPT_DIR/aur/lindesk-telemetry.install"; do
 	sh -n "$s" && ok "${s#"$SCRIPT_DIR"/} parses (sh -n)" || bad "${s#"$SCRIPT_DIR"/} syntax"

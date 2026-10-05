@@ -30,7 +30,14 @@ purge)
 		# shellcheck disable=SC2086
 		deb-systemd-helper unmask $SYSTEM_UNITS >/dev/null || true
 	fi
-	rm -rf /var/lib/lindesk /run/lindesk
+	if [ -e /var/lib/lindesk/restore-failed ]; then
+		# The restore at removal didn't fully succeed: keep the change store and the
+		# install-time snapshot so it can be finished by hand.
+		echo "lindesk: keeping /var/lib/lindesk (restore incomplete: lindesk-uninstall from a source tree, or lindeskctl changes revert-all)" >&2
+	else
+		rm -rf /var/lib/lindesk
+	fi
+	rm -rf /run/lindesk
 	rmdir /etc/lindesk/rules.d /etc/lindesk/plugins /etc/lindesk 2>/dev/null || true
 	# The 'lindesk' system group is kept, as Debian policy recommends.
 	;;

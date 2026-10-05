@@ -9,6 +9,30 @@ set -e
 SYSTEM_UNITS="lindeskd.service"
 USER_UNITS="lindesk-session.service"
 
+LIB_DIR=${LINDESK_LIB_DIR:-/var/lib/lindesk}
+CONFLICT_UNITS="com.system76.Scheduler.service system76-scheduler.service ananicy-cpp.service ananicy.service uresourced.service"
+
+# turned_off: `lindeskctl off` recorded that lindesk must stay off (upgrades included).
+turned_off() {
+	grep -q '"lindesk_enabled": false' "$LIB_DIR/install-state.json" 2>/dev/null
+}
+
+# conflicts: never disable anything from a package script; print the command instead.
+conflicts() {
+	command -v systemctl >/dev/null 2>&1 || return 0
+	_found=
+	for _u in $CONFLICT_UNITS; do
+		if systemctl is-active --quiet "$_u" 2>/dev/null || systemctl is-enabled --quiet "$_u" 2>/dev/null; then
+			_found="$_found $_u"
+		fi
+	done
+	[ -n "$_found" ] || return 0
+	echo "lindesk: conflicting priority daemon(s) active:$_found"
+	echo "lindesk:   they re-prioritise processes too and will fight lindesk. Disable them (revertible):"
+	echo "lindesk:   sudo lindeskctl setup conflicts --disable"
+	return 0
+}
+
 # tmo CMD...: run with a 15 s timeout when timeout(1) exists.
 tmo() { if command -v timeout >/dev/null 2>&1; then timeout 15 "$@"; else "$@"; fi; }
 
@@ -84,8 +108,17 @@ configure | abort-upgrade | abort-deconfigure | abort-remove)
 		systemctl --global enable $USER_UNITS >/dev/null 2>&1 || true
 	fi
 
+	# The pre-lindesk state of conflicting daemons, kept from the first install on.
+	if [ -z "$DPKG_ROOT" ] && [ -x /usr/bin/lindeskctl ]; then
+		tmo /usr/bin/lindeskctl setup snapshot --method deb >/dev/null 2>&1 || true
+	fi
+
 	ok=1
 	preflight || ok=0
+	if turned_off; then
+		ok=0
+		echo "lindesk: lindesk was turned off with 'lindeskctl off'; leaving it off (turn it on: lindeskctl on)"
+	fi
 
 	if [ -d /run/systemd/system ] && [ "$ok" -eq 0 ]; then
 		systemctl --system daemon-reload >/dev/null || true
@@ -104,6 +137,7 @@ configure | abort-upgrade | abort-deconfigure | abort-remove)
 		echo "lindesk: systemd is not running; services enabled but not started."
 		echo "lindesk: without systemd, lindesk-session starts from /etc/xdg/autostart."
 	fi
+	turned_off || conflicts
 	if [ -z "$2" ]; then
 		echo "lindesk: what now: 'lindeskctl' shows what lindesk is doing, 'lindeskctl watch' follows it live,"
 		echo "lindesk:   'lindeskctl doctor' shows what this machine supports."

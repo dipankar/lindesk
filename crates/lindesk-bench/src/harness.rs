@@ -123,8 +123,13 @@ pub struct RunArgs {
     #[arg(long)]
     pub label: Option<String>,
     /// Stop/start lindesk-session (user unit) as each phase needs. Never touches lindeskd.
+    /// Only for `--off-mode stop`.
     #[arg(long)]
     pub manage_services: bool,
+    /// How the off phase turns lindesk off: `pause` (the default: `lindeskctl pause`, every
+    /// setting reverted, nothing to stop or restart) or `stop` (lindesk must not run).
+    #[arg(long, value_enum, default_value_t = OffMode::Pause)]
+    pub off_mode: OffMode,
     /// Run probe and load directly, without systemd-run scopes.
     #[arg(long)]
     pub no_scope: bool,
@@ -233,7 +238,11 @@ pub fn run(args: RunArgs) -> Result<i32> {
 
     let ld = Lindesk::connect()?;
     let initial = ld.detect();
-    check_feasible(&plan.phases, &initial, args.manage_services)?;
+    // Pausing needs a running lindesk; otherwise the usual stopped/running checks apply.
+    if args.off_mode == OffMode::Stop || !initial.running() {
+        check_feasible(&plan.phases, &initial, args.manage_services)?;
+    }
+    let mut pause = PauseGuard { ld: &ld, paused: false };
     let mut services = ServiceGuard { initially_active: initial.session_unit_active, changed: false };
     // systemd-run brings up lindesk-batch.slice if it isn't there; put it back down after.
     let _slice = SliceGuard {
@@ -260,11 +269,35 @@ pub fn run(args: RunArgs) -> Result<i32> {
         if i > 0 && !sys::sleep_unless_stopped(plan.cooldown) {
             break;
         }
-        let state = ensure_phase_state(&ld, phase, args.manage_services, &mut services)?;
+        let state = if args.off_mode == OffMode::Pause && ld.detect().running() {
+            // Pause for the off phase (auto-resuming well after it, should we die), resume for on.
+            let paused = phase == Phase::Off;
+            let secs = (plan.ramp + plan.duration + plan.cooldown).as_secs() as u32 + 120;
+            if paused != pause.paused {
+                let who = ld.set_paused(paused, if paused { secs } else { 0 })?;
+                pause.paused = paused;
+                if paused {
+                    eprintln!("lindesk-bench: paused {} for the off phase", who.join(" and "));
+                }
+            }
+            let mut st = ld.detect();
+            if paused {
+                st.paused = vec!["lindesk".into()];
+            }
+            st
+        } else {
+            ensure_phase_state(&ld, phase, args.manage_services, &mut services)?
+        };
         eprintln!(
             "lindesk-bench: phase {} (lindesk {})",
             phase.as_str(),
-            if state.running() { "running" } else { "stopped" }
+            if !state.paused.is_empty() {
+                "paused"
+            } else if state.running() {
+                "running"
+            } else {
+                "stopped"
+            }
         );
         match run_phase(&ctx, phase, &ld, state, run_dir.path()) {
             Ok(p) => phases.push(p),
@@ -276,6 +309,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
         }
     }
     drop(run_dir);
+    drop(pause);
     drop(services);
     if sys::stop_requested() {
         eprintln!("lindesk-bench: interrupted; load stopped and scratch files removed, no results written");
@@ -326,6 +360,33 @@ pub fn run(args: RunArgs) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+/// How the off phase gets lindesk out of the way.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OffMode {
+    /// Pause it (observe-only) for the phase and resume afterwards.
+    #[default]
+    Pause,
+    /// Require it stopped (or stop the session agent with --manage-services).
+    Stop,
+}
+
+/// Resumes lindesk if the bench paused it (also on errors and Ctrl-C).
+struct PauseGuard<'a> {
+    ld: &'a Lindesk,
+    paused: bool,
+}
+
+impl Drop for PauseGuard<'_> {
+    fn drop(&mut self) {
+        if self.paused {
+            self.paused = false;
+            if let Err(e) = self.ld.set_paused(false, 0) {
+                eprintln!("lindesk-bench: resuming lindesk failed ({e:#}); run: lindeskctl resume");
+            }
+        }
+    }
 }
 
 fn check_feasible(phases: &[Phase], s: &LindeskState, manage: bool) -> Result<()> {

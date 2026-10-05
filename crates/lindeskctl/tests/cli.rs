@@ -365,3 +365,53 @@ fn swap_and_mcp_status_json() {
     assert_eq!(v["session_daemon"], false);
     assert!(v.get("stdio_ready").is_some());
 }
+
+/// `off`/`on` drive systemd through `$LINDESK_SYSTEMCTL`: a fake that logs its arguments.
+#[test]
+fn off_and_on_with_a_fake_systemctl() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc_geteuid() } == 0 {
+        eprintln!("running as root: skipping (the test covers the user path)");
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let log = d.path().join("calls");
+    let fake = d.path().join("systemctl");
+    std::fs::write(&fake, format!("#!/bin/sh\necho \"$*\" >> {}\nexit 0\n", log.display())).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let run = d.path().join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    let env: Vec<(&str, std::path::PathBuf)> = vec![
+        ("LINDESK_SYSTEMCTL", fake.clone()),
+        ("HOME", d.path().to_path_buf()),
+        ("XDG_RUNTIME_DIR", run.clone()),
+        ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/lindesk-test".into()),
+        ("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/nonexistent/lindesk-test".into()),
+    ];
+    let env_ref: Vec<(&str, &Path)> = env.iter().map(|(k, v)| (*k, v.as_path())).collect();
+    let o = ctl(&["off", "--yes"], &env_ref);
+    assert!(o.status.success(), "{}{}", stdout(&o), stderr(&o));
+    assert!(stdout(&o).contains("lindesk is off"), "{}", stdout(&o));
+    assert!(stdout(&o).contains("Turn it back on: lindeskctl on"));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(calls.lines().collect::<Vec<_>>(), ["--user mask --now lindesk-session.service lindesk-mcp.socket"]);
+
+    std::fs::remove_file(&log).unwrap();
+    let o = ctl(&["on", "--keep-conflicts", "--wait", "0"], &env_ref);
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        [
+            "--user unmask lindesk-session.service lindesk-mcp.socket",
+            "--user enable --now lindesk-session.service",
+            "enable --now lindeskd.service"
+        ]
+    );
+    assert_eq!(o.status.code(), Some(1), "nothing answers on these buses: {}", stdout(&o));
+    assert!(stdout(&o).contains("doesn't answer yet"), "{}", stdout(&o));
+}
+
+unsafe extern "C" {
+    #[link_name = "geteuid"]
+    fn libc_geteuid() -> u32;
+}
