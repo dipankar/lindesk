@@ -16,6 +16,12 @@ use lindesk_ipc::{BROKER_NAME, BrokerProxy, QOS_NAME};
 use serde_json::{Value, json};
 use support::*;
 
+/// These tests ask the broker to map this process to one of the user's own units, which
+/// only works when the test runs inside `user@UID.service` (a desktop or `systemd-run --user`).
+fn in_user_manager() -> bool {
+    std::fs::read_to_string("/proc/self/cgroup").is_ok_and(|c| c.contains("/user@"))
+}
+
 fn json(s: &str) -> Value {
     serde_json::from_str(s).unwrap()
 }
@@ -28,6 +34,12 @@ async fn broker_relays_to_connected_session() {
         );
         return;
     };
+    if !in_user_manager() {
+        eprintln!(
+            "skipping: this process isn't in a systemd user manager's cgroup (CI runner, container, ssh without lingering)"
+        );
+        return;
+    }
     let tmp = fast_tempdir();
     let dir = |d: &str| tmp.path().join(d).display().to_string();
     let system = Bus::system_like(tmp.path());
@@ -179,6 +191,12 @@ async fn broker_control_plane_and_event_privacy() {
         );
         return;
     };
+    if !in_user_manager() {
+        eprintln!(
+            "skipping: this process isn't in a systemd user manager's cgroup (CI runner, container, ssh without lingering)"
+        );
+        return;
+    }
     let tmp = fast_tempdir();
     let dir = |d: &str| tmp.path().join(d).display().to_string();
     let system = Bus::system_like(tmp.path());

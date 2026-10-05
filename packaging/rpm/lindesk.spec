@@ -75,7 +75,7 @@ export LINDESK_BIN_DIR=%{lindesk_bin_dir}
 (cd %{buildroot} && find .%{_datadir}/bash-completion .%{_datadir}/zsh .%{_datadir}/fish \
     .%{_mandir} -type f ! -name 'lindesk-data.1*' 2>/dev/null | sed 's|^\.||') > %{name}-generated.files || :
 # rpm refuses an empty `-f` list, so the telemetry list always carries the licence files.
-( echo '%license LICENSE-MIT LICENSE-APACHE'
+( echo '%%license LICENSE-MIT LICENSE-APACHE'
   cd %{buildroot} && find .%{_mandir} -type f -name 'lindesk-data.1*' 2>/dev/null | sed 's|^\.||' ) \
     > %{name}-telemetry-generated.files || :
 
