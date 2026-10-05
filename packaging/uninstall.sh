@@ -93,7 +93,13 @@ try() {
 		run "$@"
 		return 0
 	fi
-	if ! with_timeout "$@"; then
+	local rc=0
+	if declare -F "$1" >/dev/null; then
+		"$@" || rc=$? # shell functions time out inside (as_user)
+	else
+		with_timeout "$@" || rc=$?
+	fi
+	if ((rc)); then
 		problems+=("$what")
 		return 1
 	fi
@@ -188,10 +194,12 @@ as_user() {
 	local name=$1 uid=$2 home=$3
 	shift 3
 	local env=(HOME="$home" XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus")
+	local t=()
+	have timeout && t=(timeout "${TMO:-60}")
 	if have runuser; then
-		run runuser -u "$name" -- env "${env[@]}" "$@"
+		run "${t[@]}" runuser -u "$name" -- env "${env[@]}" "$@"
 	else
-		run su -s /bin/sh "$name" -c "$(printf '%q ' env "${env[@]}" "$@")"
+		run "${t[@]}" su -s /bin/sh "$name" -c "$(printf '%q ' env "${env[@]}" "$@")"
 	fi
 }
 
