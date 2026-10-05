@@ -485,11 +485,15 @@ pub fn run(ui: &Ui) -> Result<()> {
     let reports = requirement_reports(&probe);
     let (services, telemetry) = service_findings(&probe);
     let (control, control_info) = control_plane_findings(ui.system);
+    // Persistent limits and scheduler rules from outside lindesk (it only makes runtime changes).
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let foreign = lindesk_sys::foreign::scan(&lindesk_sys::roots::Roots::host(), home.as_deref());
     let needs_action = findings(&probe).iter().chain(services.iter()).any(|f| f.severity >= Severity::Warn);
     if ui.json {
         let mut v: serde_json::Value = serde_json::from_str(&render_json(&probe))?;
         v["services"] = serde_json::to_value(&services)?;
         v["control_plane"] = json!({"findings": control, "details": control_info});
+        v["foreign_tuning"] = serde_json::to_value(&foreign)?;
         v["telemetry"] = telemetry;
         v["needs_action"] = json!(needs_action);
         v["requirements"] = serde_json::to_value(&reports)?;
@@ -507,6 +511,11 @@ pub fn run(ui: &Ui) -> Result<()> {
         s.push_str(&ui.bold("Control plane\n"));
         s.push_str(&render(ui, &control));
         s.push('\n');
+        if !foreign.is_empty() {
+            s.push_str(&ui.bold("Tuning lindesk didn't make\n"));
+            s.push_str(&render(ui, &lindesk_sys::foreign::findings(&foreign)));
+            s.push('\n');
+        }
         s.push_str(&verdict(ui, &probe, &reports, &services));
         crate::ui::out(&s);
     }

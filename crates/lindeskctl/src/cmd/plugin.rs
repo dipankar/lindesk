@@ -26,6 +26,7 @@ pub const BUILTINS: &[(&str, &str)] = &[
     ("psi", "sensor"),
     ("cgroup-stat", "sensor"),
     ("rules", "classifier"),
+    ("workload", "classifier"),
     ("threshold", "policy"),
     ("systemd", "actuator"),
     ("cgroup-v2-raw", "actuator"),

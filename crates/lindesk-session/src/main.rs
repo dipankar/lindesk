@@ -27,7 +27,7 @@ use clap::Parser;
 use lindesk_builtins::actuators::systemd::SystemdClient;
 use lindesk_builtins::actuators::{self, Bus};
 use lindesk_builtins::adapters::{self, SessionEnv};
-use lindesk_builtins::classifier::RulesClassifier;
+use lindesk_builtins::classifier::{RulesClassifier, WorkloadClassifier};
 use lindesk_builtins::env::{Mode as EnvMode, SysEnvironment};
 use lindesk_builtins::policy::{RelayFeed, RelayPolicy, ThresholdPolicy, relay};
 use lindesk_builtins::sensors::{CgroupStatSensor, PsiSensor};
@@ -271,6 +271,8 @@ fn run(cli: Cli, uid: u32) -> anyhow::Result<()> {
         registered("psi", reg.register_sensor(Box::new(GatedSensor::new(PsiSensor::new(), psi_gate)), tick));
         registered("cgroup-stat", reg.register_sensor(Box::new(CgroupStatSensor::new()), config.telemetry.interval));
         registered("rules", reg.register_classifier(Box::new(RulesClassifier::default()), 0));
+        // After the rules: speaks only for units they had no opinion on (builds in terminal tabs).
+        registered("workload", reg.register_classifier(Box::new(WorkloadClassifier::default()), -10));
         let threshold = Observed::new(ThresholdPolicy::default(), hooks.metrics.clone());
         registered("threshold", reg.register_policy(Box::new(GatedPolicy::new(threshold, threshold_gate)), 0));
         registered(relay::NAME, reg.register_policy(Box::new(RelayPolicy::new(feed)), relay::PRIORITY));

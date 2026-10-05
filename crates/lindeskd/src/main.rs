@@ -24,7 +24,7 @@ use anyhow::Context;
 use clap::Parser;
 use lindesk_builtins::actuators::systemd::SystemdClient;
 use lindesk_builtins::actuators::{self, Bus, RelayActuator, RelayTable};
-use lindesk_builtins::classifier::RulesClassifier;
+use lindesk_builtins::classifier::{RulesClassifier, WorkloadClassifier};
 use lindesk_builtins::env::{Mode, SysEnvironment, UserWatch};
 use lindesk_builtins::policy::ThresholdPolicy;
 use lindesk_builtins::sensors::{CgroupStatSensor, PsiSensor};
@@ -387,6 +387,8 @@ fn register_builtins(engine: &mut Engine, config: &Config, backend: Backend, met
     registered("psi", reg.register_sensor(Box::new(PsiSensor::new()), tick));
     registered("cgroup-stat", reg.register_sensor(Box::new(CgroupStatSensor::new()), config.telemetry.interval));
     registered("rules", reg.register_classifier(Box::new(RulesClassifier::default()), 0));
+    // After the rules: speaks only for units they had no opinion on (builds in terminal tabs).
+    registered("workload", reg.register_classifier(Box::new(WorkloadClassifier::default()), -10));
     registered(
         "threshold",
         reg.register_policy(Box::new(Observed::new(ThresholdPolicy::default(), metrics.clone())), 0),

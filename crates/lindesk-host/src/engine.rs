@@ -41,6 +41,9 @@ use crate::supervisor::SupervisorConfig;
 const PROC_REFRESH_MS: i64 = 5_000;
 /// How long a target whose classification hit a plugin error waits before retrying.
 const CLASSIFY_RETRY_MS: i64 = 5_000;
+/// Every target is reclassified this often, so classifiers that look at what a unit is doing
+/// right now (a build starting or finishing) are heard without the unit's main process changing.
+const RECLASSIFY_MS: i64 = 15_000;
 /// Notes not seen for this long are dropped from `explain`.
 const NOTE_TTL_MS: i64 = 60_000;
 const MAX_NOTES_PER_TARGET: usize = 32;
@@ -188,6 +191,8 @@ struct TargetState {
     decision: Option<ClassDecision>,
     dirty: bool,
     retry_at: Option<TimestampMs>,
+    /// When the class was last decided.
+    classified_at: Option<TimestampMs>,
     usage: Option<Usage>,
     rates: Rates,
     /// Rates just before the first throttle, and when it happened.
@@ -715,7 +720,8 @@ impl Engine {
                     }
                 }
             }
-            let retry = st.retry_at.is_some_and(|r| now >= r);
+            let retry =
+                st.retry_at.is_some_and(|r| now >= r) || st.classified_at.is_none_or(|c| now - c >= RECLASSIFY_MS);
             if st.decision.is_some() && !st.dirty && !retry {
                 continue;
             }
@@ -726,6 +732,7 @@ impl Engine {
             errors.extend(errs.into_iter().map(|(p, e)| (t.clone(), p, e)));
             let st = self.targets.get_mut(&t).expect("present");
             st.dirty = false;
+            st.classified_at = Some(now);
             st.retry_at = provisional.then_some(now + CLASSIFY_RETRY_MS);
             if st.decision.as_ref().map(|d| d.class) != Some(decision.class) {
                 cx.host_events.push(Event::ClassSet {

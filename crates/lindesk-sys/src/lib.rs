@@ -19,6 +19,7 @@ pub mod cgroupfs;
 pub mod doctor;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
+pub mod foreign;
 pub mod hardware;
 pub mod iocost;
 pub mod probe;
