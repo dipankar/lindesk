@@ -21,6 +21,8 @@
 #                      instead of compiling from the source tarball)
 #   CARGO_TARGET_DIR   where `cargo build --release` puts binaries for the deb (default target/)
 #   LINDESK_DIST       output directory (default: <repo>/dist)
+#   LINDESK_PACKAGES   deb only: all (default), core (just lindesk) or telemetry
+#                      (just lindesk-telemetry); only those binaries are needed
 #   LINDESK_CHOWN      uid:gid to give the produced files (set automatically when this script
 #                      dispatches to docker, so dist/ is not left root-owned)
 set -euo pipefail
@@ -29,7 +31,15 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 PKG=$ROOT/packaging
 DIST=${LINDESK_DIST:-$ROOT/dist}
-BINARIES=(lindeskd lindesk-session lindeskctl lindesk-bench lindesk-mcp lindesk-data lindesk-telemetry-sink)
+CORE_BINARIES=(lindeskd lindesk-session lindeskctl lindesk-bench lindesk-mcp)
+TELEMETRY_BINARIES=(lindesk-data lindesk-telemetry-sink)
+PACKAGES=${LINDESK_PACKAGES:-all}
+case $PACKAGES in
+all) BINARIES=("${CORE_BINARIES[@]}" "${TELEMETRY_BINARIES[@]}") ;;
+core) BINARIES=("${CORE_BINARIES[@]}") ;;
+telemetry) BINARIES=("${TELEMETRY_BINARIES[@]}") ;;
+*) echo "build-packages: LINDESK_PACKAGES must be all, core or telemetry" >&2; exit 2 ;;
+esac
 DEB_IMAGE=${LINDESK_DEB_IMAGE:-debian:stable-slim}
 RPM_IMAGE=${LINDESK_RPM_IMAGE:-fedora:latest}
 ARCH_IMAGE=${LINDESK_ARCH_IMAGE:-archlinux:latest}
@@ -141,8 +151,8 @@ build_deb() {
 	scratch work
 	mkdir -p "$DIST"
 	DEBS=()
-	deb_package lindesk "$work" "$arch" --without-telemetry
-	deb_package lindesk-telemetry "$work" "$arch" --telemetry-only
+	[[ $PACKAGES == telemetry ]] || deb_package lindesk "$work" "$arch" --without-telemetry
+	[[ $PACKAGES == core ]] || deb_package lindesk-telemetry "$work" "$arch" --telemetry-only
 	finish "${DEBS[@]}"
 }
 
