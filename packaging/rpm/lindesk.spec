@@ -69,12 +69,14 @@ cargo build --release --locked \
 export LINDESK_BIN_DIR=%{lindesk_bin_dir}
 %endif
 ./packaging/install.sh --destdir=%{buildroot} --prefix=%{_prefix} --sysconfdir=%{_sysconfdir} \
-    --no-build --no-enable --no-manifest
+    --no-build --no-enable --no-manifest --with-telemetry
 # Completions and man pages exist only if `lindeskctl completions|man` are supported;
 # lindesk-data.1 belongs to the telemetry subpackage.
 (cd %{buildroot} && find .%{_datadir}/bash-completion .%{_datadir}/zsh .%{_datadir}/fish \
     .%{_mandir} -type f ! -name 'lindesk-data.1*' 2>/dev/null | sed 's|^\.||') > %{name}-generated.files || :
-(cd %{buildroot} && find .%{_mandir} -type f -name 'lindesk-data.1*' 2>/dev/null | sed 's|^\.||') \
+# rpm refuses an empty `-f` list, so the telemetry list always carries the licence files.
+( echo '%license LICENSE-MIT LICENSE-APACHE'
+  cd %{buildroot} && find .%{_mandir} -type f -name 'lindesk-data.1*' 2>/dev/null | sed 's|^\.||' ) \
     > %{name}-telemetry-generated.files || :
 
 %post

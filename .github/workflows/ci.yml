@@ -12,6 +12,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Runner disks are small and the DuckDB/Vortex test binaries are huge with debug info
+  # (the linker died with a bus error when the disk filled up).
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
   # Core packages: no DuckDB/Vortex, quick to build. Telemetry ones build the bundled DuckDB.
   CORE: -p lindesk-plugin-api -p lindesk-plugin -p lindesk-core -p lindesk-host -p lindesk-builtins -p lindesk-sys -p lindesk-ipc -p lindesk-changes -p lindesk-version -p lindeskd -p lindesk-session -p lindeskctl -p lindesk-mcp -p lindesk-bench
 
@@ -21,6 +26,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
       - uses: actions/checkout@v5
       # rust-toolchain.toml pins the toolchain; local builds and CI use the same one.
       - run: rustup toolchain install && rustup show
@@ -35,6 +44,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
       - uses: actions/checkout@v5
       - run: rustup toolchain install && rustup show
       - uses: Swatinem/rust-cache@v2
@@ -119,6 +132,10 @@ jobs:
     timeout-minutes: 120
     needs: [lint]
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
       - uses: actions/checkout@v5
       - run: rustup toolchain install && rustup show
       - uses: Swatinem/rust-cache@v2

@@ -149,7 +149,7 @@ impl<K: Eq + Hash + Clone> ToplevelTracker<K> {
 
 /// Decodes a `zcosmic_toplevel_handle_v1.state` array (native-endian `u32`s).
 pub fn decode_states(raw: &[u8]) -> impl Iterator<Item = u32> + '_ {
-    raw.chunks_exact(4).map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+    raw.as_chunks::<4>().0.iter().map(|c| u32::from_ne_bytes(*c))
 }
 
 /// True if a `state` array contains `activated`.
