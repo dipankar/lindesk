@@ -93,6 +93,10 @@ pub struct PluginStats {
     pub latency_ewma_us: f64,
     /// p99 over the last 256 calls, µs.
     pub latency_p99_us: u64,
+    /// Notifications (e.g. `sink.record` batches) dropped because the plugin was not
+    /// reading its stdin.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dropped: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,6 +104,10 @@ pub struct PluginStats {
 }
 
 const LATENCY_WINDOW: usize = 256;
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
 
 /// Health state machine plus statistics for one plugin.
 #[derive(Debug)]
@@ -223,6 +231,13 @@ impl Supervisor {
                 }
             }
         }
+    }
+
+    /// A notification was dropped because the plugin's stdin queue was full. Returns the
+    /// total so far. Not a failure: the plugin may just be slow.
+    pub fn on_dropped(&mut self) -> u64 {
+        self.stats.dropped += 1;
+        self.stats.dropped
     }
 
     fn note_error(&mut self, msg: &str) {

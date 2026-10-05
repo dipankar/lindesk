@@ -5,11 +5,15 @@
 //! `Box<dyn Classifier>` and a `Box<dyn Policy>`, and the engine can't tell it apart from a
 //! built-in.
 //!
-//! Per process there are two threads: a reader that parses stdout (responses go to the
-//! waiting caller by id; `event`/`log`/`metric`/`samples` notifications are routed to the
-//! host queues, the adapter sink or `tracing`) and a stderr forwarder. Calls block the
-//! caller until the reply or the per-method timeout. Crashes, timeouts and malformed output
-//! feed the [`Supervisor`]; the process is restarted lazily on the first call after backoff.
+//! Per process there are three threads: a writer that owns the child's stdin, a reader that
+//! parses stdout (responses go to the waiting caller by id; `event`/`log`/`metric`/`samples`
+//! notifications are routed to the host queues, the adapter sink or `tracing`) and a stderr
+//! forwarder. Nothing the host sends ever blocks on the pipe: lines go through a bounded
+//! queue ([`STDIN_QUEUE`]) to the writer thread, so a plugin that stops reading its stdin
+//! can't stall the engine. A full queue fails a request like a timeout and drops a
+//! notification (counted in [`PluginStats::dropped`]). Calls block the caller until the
+//! reply or the per-method timeout. Crashes, timeouts and malformed output feed the
+//! [`Supervisor`]; the process is restarted lazily on the first call after backoff.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
@@ -43,6 +47,11 @@ pub const QUEUE_CAPACITY: usize = 16_384;
 
 /// How many log lines (stderr + `log` notifications) are kept per plugin.
 const LOG_RING: usize = 200;
+
+/// Lines waiting for a plugin's stdin. When a plugin stops reading, the pipe fills, the
+/// writer thread blocks, and this queue fills: requests then fail as timeouts and
+/// notifications (`sink.record` batches) are dropped instead of blocking the caller.
+pub const STDIN_QUEUE: usize = 64;
 
 /// Environment variables passed through to plugins; everything else is cleared.
 const ENV_KEEP: [&str; 4] = ["PATH", "HOME", "LANG", "LINDESK_SDK_PATH"];
@@ -221,7 +230,9 @@ struct Inner {
 
 struct Conn {
     child: Mutex<Child>,
-    stdin: Mutex<Option<ChildStdin>>,
+    /// Queue to the writer thread, which owns the child's stdin. Dropping the sender closes
+    /// stdin once the queued lines are written.
+    stdin: Mutex<Option<Sender<String>>>,
     pending: Mutex<HashMap<u64, Sender<Response>>>,
     next_id: AtomicU64,
     alive: AtomicBool,
@@ -235,17 +246,23 @@ fn lk<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Conn {
-    fn write_line(&self, line: &str) -> std::io::Result<()> {
-        let mut g = lk(&self.stdin);
-        let stdin = g.as_mut().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin closed"))?;
-        stdin.write_all(line.as_bytes())?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()
+    /// Queue one line for the writer thread; never blocks. `WouldBlock` when the plugin
+    /// isn't keeping up with its stdin.
+    fn write_line(&self, line: String) -> std::io::Result<()> {
+        let g = lk(&self.stdin);
+        let tx = g.as_ref().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin closed"))?;
+        tx.try_send(line).map_err(|e| match e {
+            TrySendError::Full(_) => std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("the plugin is not reading its stdin ({STDIN_QUEUE} lines queued)"),
+            ),
+            TrySendError::Disconnected(_) => std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin closed"),
+        })
     }
 
     fn send(&self, v: &impl Serialize) -> std::io::Result<()> {
         let line = serde_json::to_string(v).map_err(std::io::Error::other)?;
-        self.write_line(&line)
+        self.write_line(line)
     }
 
     fn wait_exit(&self, deadline: Instant) -> Option<ExitStatus> {
@@ -537,12 +554,13 @@ impl ExternalPlugin {
             .process_group(0)
             .spawn()
             .map_err(|e| (PluginError::Io(format!("spawning {}: {e}", inner.exec.display())), false))?;
-        let stdin = child.stdin.take();
+        let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
+        let (stdin_tx, stdin_rx) = crossbeam_channel::bounded::<String>(STDIN_QUEUE);
         let conn = Arc::new(Conn {
             child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            stdin: Mutex::new(Some(stdin_tx)),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             alive: AtomicBool::new(true),
@@ -551,6 +569,10 @@ impl ExternalPlugin {
         });
         let weak = Arc::downgrade(inner);
         let thread_name = format!("plugin-{}", inner.name);
+        std::thread::Builder::new()
+            .name(format!("{thread_name}-in"))
+            .spawn(move || writer_loop(stdin_rx, stdin))
+            .map_err(|e| (PluginError::from(e), false))?;
         {
             let (weak, conn) = (weak.clone(), conn.clone());
             std::thread::Builder::new()
@@ -629,6 +651,10 @@ impl ExternalPlugin {
         }
         if let Err(e) = conn.send(&Request::new(id, method, params)) {
             lk(&conn.pending).remove(&id);
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                // Not reading its stdin: as unresponsive as a timeout, and supervised as one.
+                return Err(PluginError::Timeout);
+            }
             return Err(PluginError::Io(format!("writing to plugin: {e}")));
         }
         match rx.recv_timeout(timeout) {
@@ -684,10 +710,22 @@ impl ExternalPlugin {
         }
     }
 
-    /// Send a notification (e.g. `sink.record`). Starts the process if needed.
+    /// Send a notification (e.g. `sink.record`). Starts the process if needed. Never
+    /// blocks on the plugin: when it isn't reading its stdin the notification is dropped,
+    /// counted in [`PluginStats::dropped`] and logged (the first time, then every 100th).
     pub fn notify(&self, method: &str, params: impl Serialize) -> PluginResult<()> {
         let conn = self.ensure_running()?;
-        conn.send(&Notification::new(method, params)).map_err(|e| PluginError::Io(format!("writing to plugin: {e}")))
+        match conn.send(&Notification::new(method, params)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                let n = supervisor::lock(&self.inner.sup).on_dropped();
+                if n == 1 || n.is_multiple_of(100) {
+                    self.host_log(LogLevel::Warn, format!("{method} dropped ({n} so far): {e}"));
+                }
+                Ok(())
+            }
+            Err(e) => Err(PluginError::Io(format!("writing to plugin: {e}"))),
+        }
     }
 
     /// Stop the process: `shutdown` notification and stdin close, then SIGTERM after
@@ -704,6 +742,22 @@ impl ExternalPlugin {
     fn host_log(&self, level: LogLevel, message: String) {
         self.inner.log(LogSource::Host, level, message);
     }
+}
+
+/// Owns the child's stdin: writes queued lines until the queue's senders are gone (then
+/// closes stdin, which the plugin sees as EOF) or the pipe breaks.
+fn writer_loop(rx: Receiver<String>, stdin: ChildStdin) {
+    let mut w = std::io::BufWriter::new(stdin);
+    while let Ok(line) = rx.recv() {
+        if w.write_all(line.as_bytes()).and_then(|()| w.write_all(b"\n")).is_err() {
+            return;
+        }
+        // Batch what is already queued, then flush so the plugin sees every line promptly.
+        if rx.is_empty() && w.flush().is_err() {
+            return;
+        }
+    }
+    let _ = w.flush();
 }
 
 fn graceful_stop(c: &Conn, scale: f64) -> ShutdownOutcome {

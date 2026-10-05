@@ -283,6 +283,52 @@ while true; do sleep 0.05; done
     assert!(p.pid().is_none());
 }
 
+/// A sink that stops reading its stdin must never stall the caller: `sink.record` is a
+/// notification queued to a writer thread, and batches beyond the queue are dropped.
+#[test]
+fn a_sink_that_stops_reading_never_blocks_record() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Answers initialize, then sleeps without reading stdin again.
+    let script = r#"#!/bin/bash
+read -r line
+echo '{"jsonrpc":"2.0","id":1,"result":{"name":"wedged","version":"1","api_version":1,"kinds":["sink"]}}'
+exec sleep 600
+"#;
+    let dir = write_plugin(tmp.path(), "wedged", &["sink"], script, "");
+    let mut p = spawn(&dir, ExternalOptions::default());
+    // ~20 KiB per batch: the 64 KiB pipe fills after a few, then the queue.
+    let batch: Vec<Record> = (0..200)
+        .map(|i| {
+            Record::Metric(Metric {
+                ts: i,
+                name: "padding_padding_padding_padding".into(),
+                value: i as f64,
+                labels: Default::default(),
+                plugin: "test".into(),
+            })
+        })
+        .collect();
+    let mut took: Vec<Duration> = (0..500)
+        .map(|_| {
+            let t = Instant::now();
+            Sink::record(&mut p, &batch).unwrap();
+            t.elapsed()
+        })
+        .collect();
+    took.sort();
+    assert!(took[474] < Duration::from_millis(5), "p95 record() {:?}", took[474]);
+    assert!(took[499] < Duration::from_millis(200), "max record() {:?}", took[499]);
+    assert!(p.stats().dropped > 100, "batches beyond the queue are dropped: {:?}", p.stats());
+    assert_eq!(p.health(), Health::Running, "dropping is not a failure");
+    // A request can't get through either: it fails like a timeout instead of hanging.
+    let t = Instant::now();
+    assert!(matches!(Sink::flush(&mut p), Err(PluginError::Timeout)));
+    assert!(t.elapsed() < Duration::from_millis(500));
+    let t = Instant::now();
+    p.shutdown();
+    assert!(t.elapsed() < Duration::from_secs(5), "shutdown is bounded");
+}
+
 #[test]
 fn handshake_must_report_declared_kinds() {
     let tmp = tempfile::tempdir().unwrap();
