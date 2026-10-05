@@ -4,69 +4,143 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # Core packages: no DuckDB/Vortex, quick to build. Telemetry ones build the bundled DuckDB.
+  CORE: -p lindesk-plugin-api -p lindesk-plugin -p lindesk-core -p lindesk-host -p lindesk-builtins -p lindesk-sys -p lindesk-ipc -p lindesk-changes -p lindesk-version -p lindeskd -p lindesk-session -p lindeskctl -p lindesk-mcp -p lindesk-bench
 
 jobs:
-  check:
+  lint:
+    name: fmt + clippy
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - uses: actions/checkout@v5
+      # rust-toolchain.toml pins the toolchain; local builds and CI use the same one.
+      - run: rustup toolchain install && rustup show
       - uses: Swatinem/rust-cache@v2
-      - name: System dependencies
-        run: sudo apt-get update && sudo apt-get install -y xvfb python3 libdbus-1-dev pkg-config
+        with:
+          shared-key: dev
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dev
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y dbus dbus-daemon xvfb python3 jq
+      - run: cargo test --workspace --locked --no-fail-fast
       - name: Python SDK tests
         run: python3 -m unittest discover -s sdk/python -p 'test_*.py'
       - name: Example plugins pass conformance
         run: |
-          cargo build -p lindeskctl
+          cargo build --locked -p lindeskctl
           for p in examples/plugins/*/*/plugin.toml; do
             ./target/debug/lindeskctl plugin test "$(dirname "$p")"
           done
-      - name: doctor smoke test
-        run: cargo run -p lindeskctl -- doctor
-      # The core package links neither DuckDB nor Vortex/Arrow (docs/ARCHITECTURE.md,
-      # "Cargo feature hygiene"); only lindesk-data and lindesk-telemetry-sink may.
-      - name: Core binaries link no DuckDB or Vortex
+      - name: doctor and version smoke test
         run: |
+          ./target/debug/lindeskctl --version
+          ./target/debug/lindeskctl doctor || true
+          ./target/debug/lindeskctl doctor --json >/dev/null
+
+  core-is-lean:
+    name: core links no DuckDB/Vortex
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      # docs/ARCHITECTURE.md, "Cargo feature hygiene": only lindesk-data and
+      # lindesk-telemetry-sink may link the telemetry stack.
+      - run: |
           for p in lindeskd lindesk-session lindeskctl lindesk-mcp lindesk-bench; do
-            if cargo tree -e normal -p "$p" --prefix none |
+            if cargo tree --locked -e normal -p "$p" --prefix none |
               grep -E '^(duckdb|libduckdb-sys|vortex|vortex-[a-z-]+|arrow-[a-z]+|parquet|lindesk-store|lindesk-query) v'; then
               echo "::error::$p depends on telemetry-only crates"; exit 1
             fi
           done
 
-  packages:
+  msrv:
+    name: MSRV (core)
     runs-on: ubuntu-24.04
-    needs: check
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v5
+      - name: Install the MSRV toolchain from Cargo.toml
+        run: |
+          msrv=$(awk -F'"' '/^rust-version/ {print $2; exit}' Cargo.toml)
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+          rustup toolchain install "$msrv" --profile minimal
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv
+      - run: cargo +"$MSRV" check --locked $CORE
+
+  stable-latest:
+    name: latest stable (informational)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # Shows what the next toolchain bump will flag; never blocks a merge.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install stable --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: stable
+      - run: cargo +stable clippy --locked $CORE --all-targets -- -D warnings
+
+  deny:
+    name: licences + advisories
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  packages:
+    name: packages (deb, rpm, arch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
       - name: Lint packaging scripts
         run: |
-          shellcheck packaging/install.sh packaging/build-packages.sh packaging/check-layout.sh \
-            packaging/runit/lindeskd/run packaging/runit/lindeskd/finish packaging/openrc/lindeskd
+          shellcheck packaging/install.sh packaging/uninstall.sh packaging/build-packages.sh packaging/check-layout.sh \
+            packaging/runit/lindeskd/run packaging/runit/lindeskd/finish packaging/openrc/lindeskd scripts/release.sh
           shellcheck -s sh packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm \
             packaging/debian/telemetry/postinst packaging/debian/telemetry/prerm packaging/debian/telemetry/postrm
           shellcheck -s bash packaging/aur/lindesk.install packaging/aur/lindesk-telemetry.install
       - name: install.sh layout, idempotency and uninstall
         run: ./packaging/check-layout.sh
-      # Build once on the runner; every package format stages these binaries through
-      # install.sh. (Drop LINDESK_BIN_DIR to compile inside the Fedora/Arch containers.)
+      # Build once on the runner; every package format stages these binaries through install.sh.
       - name: Release binaries (core, then telemetry)
         run: |
+          export LINDESK_GIT_HASH="${GITHUB_SHA::7}"
           cargo build --release --locked -p lindeskd -p lindesk-session -p lindeskctl -p lindesk-bench -p lindesk-mcp
           cargo build --release --locked -p lindesk-data -p lindesk-telemetry-sink
           ls -l target/release/lindesk*
+          ./target/release/lindeskctl --version
       - name: Build .deb
         run: LINDESK_BIN_DIR=target/release ./packaging/build-packages.sh deb
       - name: Build RPM in Fedora
@@ -79,7 +153,7 @@ jobs:
             apt-get update -qq
             export DEBIAN_FRONTEND=noninteractive
             apt-get install -y -qq /dist/lindesk_*.deb
-            lindeskctl --help >/dev/null
+            lindeskctl --version
             lindesk-mcp --help >/dev/null
             getent group lindesk
             test -d /var/lib/lindesk/changes
@@ -108,7 +182,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD/dist":/dist:ro fedora:latest sh -euxc '
             dnf install -y -q $(ls /dist/lindesk-[0-9]*.rpm | grep -v src.rpm)
-            lindeskctl --help >/dev/null
+            lindeskctl --version
             lindesk-mcp --help >/dev/null
             getent group lindesk
             test -f /usr/share/lindesk/profiles.d/00-balanced.toml
@@ -124,3 +198,4 @@ jobs:
           path: |
             dist/*
             dist/.SRCINFO
+          retention-days: 14

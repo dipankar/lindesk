@@ -1,0 +1,43 @@
+# git-cliff (https://git-cliff.org): CHANGELOG.md from conventional commits.
+# scripts/release.sh runs `git-cliff --tag vX.Y.Z --output CHANGELOG.md`.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to lindesk. Versions follow [SemVer](https://semver.org); the plugin
+API version (`lindesk_plugin_api::API_VERSION`) changes only on breaking protocol changes.
+
+"""
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}\
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | split(pat="\n") | first | upper_first }}\
+{% if commit.breaking %} (**breaking**){% endif %}
+{% endfor %}\
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+commit_parsers = [
+  { message = "^release", skip = true },
+  { message = "^feat", group = "<!-- 0 -->Added" },
+  { message = "^fix", group = "<!-- 1 -->Fixed" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^refactor", group = "<!-- 3 -->Changed" },
+  { message = "^docs?", group = "<!-- 4 -->Documentation" },
+  { message = "^(ci|build|chore|test)", group = "<!-- 5 -->Build and CI" },
+  { message = "^WIP", skip = true },
+  { message = ".*", group = "<!-- 6 -->Other" },
+]
+tag_pattern = "v[0-9]*"
+sort_commits = "oldest"

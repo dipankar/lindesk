@@ -1,0 +1,64 @@
+# cargo-deny (https://embarkstudios.github.io/cargo-deny/): run by CI's `deny` job and by
+#   cargo deny check
+# Fails on: a licence outside the allow-list, a RustSec advisory (vulnerability, unsound,
+# unmaintained or yanked crate), a banned crate, a crate from an unknown registry or git repo.
+
+[graph]
+# The binaries we ship are Linux-only; the Windows/macOS-only crates in the lockfile never
+# build, so keep their licences and advisories out of the report.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+# An advisory we have looked at and accepted goes here with the reason, e.g.
+#   { id = "RUSTSEC-0000-0000", reason = "only reachable through X, which we don't use" },
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# Every licence used by the dependency graph today (cargo deny list). All permissive.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+]
+exceptions = [
+    # COSMIC's Wayland protocol bindings (the `cosmic` adapter of lindesk-builtins, linked
+    # into lindesk-session) are GPL-3.0-only. Shipping that adapter makes the lindesk-session
+    # binary GPL-3.0 as a whole; see CONTRIBUTING.md ("Licences"). Build without it with
+    # `--no-default-features --features x11` on lindesk-builtins.
+    { allow = ["GPL-3.0-only"], crate = "cosmic-protocols" },
+]
+
+[licenses.private]
+# Workspace crates and examples that aren't published.
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    # Telemetry-only crates must not reach the core binaries; CI's `cargo tree` check
+    # enforces it per binary. OpenSSL is never needed (rustls everywhere).
+    { crate = "openssl-sys", reason = "use rustls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

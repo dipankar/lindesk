@@ -1,0 +1,55 @@
+# Weekly dependency updates, one grouped PR per ecosystem for minor+patch bumps.
+# Majors come one PR each. The bundled telemetry stack (DuckDB, Vortex, Arrow/Parquet) moves
+# only by hand: its versions are coupled (Vortex pins an Arrow; the DuckDB `vortex`
+# extension must match the bundled DuckDB) and a bump needs the lake tests plus a manual
+# query check (CONTRIBUTING.md, "Telemetry dependencies").
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+        exclude-patterns:
+          - "duckdb"
+          - "libduckdb-sys"
+          - "vortex*"
+          - "arrow*"
+          - "parquet"
+    ignore:
+      # Coupled telemetry stack: manual (see above).
+      - dependency-name: "duckdb"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "libduckdb-sys"
+      - dependency-name: "vortex*"
+      - dependency-name: "arrow*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "parquet"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: cargo
+    directory: /examples/gen-schema
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      gen-schema:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]

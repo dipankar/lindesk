@@ -1,0 +1,7 @@
+# The toolchain for local builds and CI (fmt, clippy, test, packages, releases). Bump it
+# deliberately: CI's non-blocking `stable-latest` job shows what the next one will flag.
+# The MSRV (`rust-version` in Cargo.toml) is checked separately by the `msrv` job.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
