@@ -415,3 +415,43 @@ unsafe extern "C" {
     #[link_name = "geteuid"]
     fn libc_geteuid() -> u32;
 }
+
+/// `changes apply --offline` then `changes revert-all` (what uninstall runs) on a fixture
+/// /proc: the value comes back, the persisted drop-in goes, and a second run is a no-op.
+#[test]
+fn offline_apply_and_revert_all_on_a_fixture_root() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("root");
+    std::fs::create_dir_all(root.join("proc/sys/vm")).unwrap();
+    std::fs::create_dir_all(root.join("etc")).unwrap();
+    std::fs::write(root.join("proc/sys/vm/swappiness"), "60\n").unwrap();
+    let (store, r) = (d.path().join("changes"), root.to_str().unwrap().to_string());
+    let s = store.to_str().unwrap().to_string();
+    let env: &[(&str, &Path)] = &[("HOME", d.path())];
+    let o = ctl(
+        &[
+            "changes",
+            "apply",
+            "--offline",
+            "--store",
+            &s,
+            "--root",
+            &r,
+            "--sysctl",
+            "vm.swappiness=10",
+            "--persist",
+            "--yes",
+        ],
+        env,
+    );
+    assert!(o.status.success(), "{}{}", stdout(&o), stderr(&o));
+    assert_eq!(std::fs::read_to_string(root.join("proc/sys/vm/swappiness")).unwrap().trim(), "10");
+    assert!(root.join("etc/sysctl.d/90-lindesk.conf").is_file());
+    let o = ctl(&["changes", "revert-all", "--store", &s, "--root", &r, "--yes"], env);
+    assert!(o.status.success(), "{}{}", stdout(&o), stderr(&o));
+    assert_eq!(std::fs::read_to_string(root.join("proc/sys/vm/swappiness")).unwrap().trim(), "60");
+    assert!(!root.join("etc/sysctl.d/90-lindesk.conf").exists(), "persisted drop-in removed");
+    let o = ctl(&["changes", "revert-all", "--store", &s, "--root", &r, "--yes"], env);
+    assert!(o.status.success());
+    assert!(stdout(&o).contains("nothing to revert"), "{}", stdout(&o));
+}

@@ -130,7 +130,10 @@ fn revert_all(ui: &Ui, scope: StoreScope, yes: bool, local: &LocalStore) -> Resu
     let scope = scope_of(scope);
     let store = open_local(scope, local, "reverting every system change")?;
     let recovered = store.recover()?;
-    let effective: Vec<ChangeSet> = store.history(usize::MAX)?.into_iter().filter(ChangeSet::is_effective).collect();
+    let history = store.history(usize::MAX)?;
+    // Everything up to the newest revert-to-0 that is still in effect is already undone.
+    let floor = history.iter().filter(|c| c.revert_to == Some(0) && c.is_effective()).map(|c| c.id).max().unwrap_or(0);
+    let effective: Vec<ChangeSet> = history.into_iter().filter(|c| c.id > floor && c.is_effective()).collect();
     if effective.is_empty() {
         if ui.json {
             return ui.print_json(&json!({"scope": scope, "recovered": recovered.len(), "reverted": []}));
