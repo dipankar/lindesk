@@ -60,7 +60,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// lindesk session agent: per-user foreground tracking and QoS.
 #[derive(Parser, Debug, Clone, PartialEq)]
-#[command(name = "lindesk-session", version, about, long_about = None)]
+#[command(name = "lindesk-session", version = lindesk_version::LONG, about, long_about = None)]
 pub struct Cli {
     /// Configuration file [default: $XDG_CONFIG_HOME/lindesk/lindesk.toml].
     #[arg(long, value_name = "FILE")]
@@ -326,10 +326,10 @@ fn run(cli: Cli, uid: u32) -> anyhow::Result<()> {
     let links = Links { sys_conn, initial_mode, standalone: cli.standalone, fwd_tx, fwd_rx };
     let served = rt.block_on(serve(uid, handle.clone(), notes, links, signals, control, change_rx));
     handle.shutdown();
-    if join.join().is_err() {
-        tracing::error!("the engine thread panicked");
-    }
+    let engine = engine_thread::joined(join);
     rt.shutdown_timeout(Duration::from_secs(1));
+    // A panicked engine is an error: exit non-zero so Restart=on-failure brings us back.
+    engine?;
     served
 }
 

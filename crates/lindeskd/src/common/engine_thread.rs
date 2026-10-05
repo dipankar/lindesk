@@ -439,6 +439,24 @@ impl EngineThread {
     }
 }
 
+/// Waits for the engine thread (after [`Command::Shutdown`]) and turns a panic into an error,
+/// so the daemon exits non-zero and systemd's `Restart=on-failure` brings it back
+/// (`ExecStopPost=` restores the settings first). Exiting 0 after a panic left the daemon
+/// dead with its settings in force.
+pub fn joined(join: JoinHandle<()>) -> anyhow::Result<()> {
+    match join.join() {
+        Ok(()) => Ok(()),
+        Err(panic) => {
+            let why = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown cause".into());
+            Err(anyhow::anyhow!("the engine thread panicked: {why}"))
+        }
+    }
+}
+
 /// Start the engine thread. Blocks until the first step completed, so the daemon can
 /// announce readiness (sd_notify, bus name) afterwards.
 pub fn spawn<H: Hooks>(engine: Engine, hooks: H, inbox: Inbox<H::Ext>) -> std::io::Result<EngineThread> {
@@ -724,7 +742,9 @@ impl<H: Hooks> Loop<H> {
         let now = now_ms();
         let mut daemon = serde_json::Map::new();
         daemon.insert("name".into(), json!(self.engine.options().host));
-        daemon.insert("version".into(), json!(env!("CARGO_PKG_VERSION")));
+        daemon.insert("version".into(), json!(lindesk_version::VERSION));
+        daemon.insert("git".into(), json!(lindesk_version::git()));
+        daemon.insert("build_date".into(), json!(lindesk_version::BUILD_DATE));
         daemon.insert("pid".into(), json!(std::process::id()));
         daemon.insert("uid".into(), json!(rustix::process::getuid().as_raw()));
         daemon.insert("dry_run".into(), json!(self.engine.dry_run()));
@@ -926,6 +946,42 @@ fn pressure_text(samples: &[Sample]) -> String {
 mod tests {
     use super::*;
     use lindesk_plugin_api::Scope;
+
+    /// Hooks whose first `after_step` panics, like a bug in the engine loop would.
+    struct Panicking;
+    impl Hooks for Panicking {
+        type Ext = ();
+        fn unit_candidates(&self, _engine: &Engine, _name: &str) -> Vec<Target> {
+            Vec::new()
+        }
+        fn ext(&mut self, _engine: &mut Engine, _ext: (), _cx: &mut LoopCx<'_>) {}
+        fn after_step(&mut self, _engine: &mut Engine, _report: &StepReport, _cx: &mut LoopCx<'_>) {
+            panic!("injected engine bug");
+        }
+        fn reload(&mut self, _engine: &mut Engine) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    /// Regression: a panicking engine thread must make the daemon's `run()` fail (non-zero
+    /// exit, so systemd restarts it), not end it cleanly.
+    #[test]
+    fn engine_panic_is_an_error() {
+        let mut config = lindesk_core::config::Config::default();
+        config.telemetry.enabled = false;
+        let engine = Engine::new(
+            config,
+            Box::new(lindesk_host::MemoryEnvironment::new()),
+            lindesk_host::EngineOptions::new("test", lindesk_plugin_api::Privilege::User),
+        )
+        .unwrap();
+        let (_handle, inbox) = channel::<()>().unwrap();
+        // `spawn` returns once the thread died before (or after) its first step.
+        let thread = spawn(engine, Panicking, inbox).unwrap();
+        let (_notes, join) = thread.split();
+        let err = joined(join).unwrap_err().to_string();
+        assert!(err.contains("panicked") && err.contains("injected engine bug"), "{err}");
+    }
 
     #[test]
     fn events_carry_seq() {

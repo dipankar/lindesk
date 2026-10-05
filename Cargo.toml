@@ -24,6 +24,7 @@ lindesk-query = { path = "crates/lindesk-query", version = "0.1.0" }
 lindesk-ipc = { path = "crates/lindesk-ipc", version = "0.1.0" }
 lindesk-changes = { path = "crates/lindesk-changes", version = "0.1.0" }
 lindesk-mcp = { path = "crates/lindesk-mcp", version = "0.1.0" }
+lindesk-version = { path = "crates/lindesk-version", version = "0.1.0" }
 
 # external
 anyhow = "1"

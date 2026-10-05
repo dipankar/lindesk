@@ -1,0 +1,12 @@
+[package]
+name = "lindesk-version"
+description = "Build identity of the lindesk binaries: version, git commit and build date"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+build = "build.rs"
+
+[dependencies]

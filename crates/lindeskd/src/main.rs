@@ -58,7 +58,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// lindesk root broker: system-wide QoS governor for desktop responsiveness.
 #[derive(Parser, Debug, Clone, PartialEq)]
-#[command(name = "lindeskd", version, about, long_about = None)]
+#[command(name = "lindeskd", version = lindesk_version::LONG, about, long_about = None)]
 pub struct Cli {
     /// Configuration file.
     #[arg(long, value_name = "FILE", default_value = "/etc/lindesk/lindesk.toml")]
@@ -345,9 +345,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     }
     let served = rt.block_on(serve(&cli, handle.clone(), notes, insecure, signals, control, calibration, change_rx));
     handle.shutdown();
-    if join.join().is_err() {
-        tracing::error!("the engine thread panicked");
-    }
+    let engine = engine_thread::joined(join);
     if !dry_run {
         let (restored, failed) = ioc.restore();
         if restored + failed > 0 {
@@ -355,6 +353,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
     }
     rt.shutdown_timeout(Duration::from_secs(1));
+    // A panicked engine is an error: exit non-zero so Restart=on-failure brings us back.
+    engine?;
     served
 }
 

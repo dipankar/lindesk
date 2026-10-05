@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+lindesk-version.workspace = true
 lindesk-plugin.workspace = true
 lindesk-plugin-api.workspace = true
 lindesk-store.workspace = true

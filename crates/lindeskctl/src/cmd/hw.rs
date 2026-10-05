@@ -111,7 +111,8 @@ fn median(mut v: Vec<f64>) -> f64 {
     if v.is_empty() {
         return 0.0;
     }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // total_cmp: a NaN must not break the sort's total order (it panics on inconsistent orders).
+    v.sort_by(f64::total_cmp);
     let n = v.len();
     if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 }
 }

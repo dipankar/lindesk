@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+lindesk-version.workspace = true
 lindesk-plugin-api.workspace = true
 lindesk-core.workspace = true
 lindesk-host.workspace = true
@@ -31,8 +32,8 @@ chrono.workspace = true
 libc.workspace = true
 zbus = { workspace = true, features = ["blocking-api"] }
 # `watch`: full-screen live view.
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 
 [dev-dependencies]
 lindesk-sys = { workspace = true, features = ["fixtures"] }

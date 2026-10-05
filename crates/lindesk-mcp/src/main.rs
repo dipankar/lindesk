@@ -13,7 +13,7 @@ use lindesk_mcp::{LindeskMcp, host_backends};
 #[derive(Parser, Debug)]
 #[command(
     name = "lindesk-mcp",
-    version,
+    version = lindesk_version::LONG,
     about = "MCP server for lindesk: lets a local AI agent assess responsiveness and apply guardrailed, versioned, revertible fixes",
     long_about = "MCP server for lindesk.\n\n\
         By default it speaks MCP over stdio (register it with `claude mcp add lindesk -- lindesk-mcp`). \

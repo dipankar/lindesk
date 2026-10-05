@@ -146,7 +146,7 @@ impl Sink for TelemetrySink {
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--version") {
-        println!("lindesk-telemetry-sink {}", env!("CARGO_PKG_VERSION"));
+        println!("{}", lindesk_version::line("lindesk-telemetry-sink"));
         return;
     }
     // stderr is forwarded to the host's log with this plugin's name; the host adds times.

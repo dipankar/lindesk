@@ -29,7 +29,7 @@ use lindesk_store::wall_clock_ms;
 
 /// Maintain and query the lindesk telemetry lake.
 #[derive(Parser, Debug)]
-#[command(name = "lindesk-data", version, about, long_about = None)]
+#[command(name = "lindesk-data", version = lindesk_version::LONG, about, long_about = None)]
 struct Cli {
     /// Lake root. Default: `telemetry.dir` from the config, else /var/lib/lindesk/telemetry
     /// as root or $XDG_STATE_HOME/lindesk/telemetry otherwise.

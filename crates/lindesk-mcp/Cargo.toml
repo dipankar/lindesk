@@ -13,6 +13,7 @@ name = "lindesk-mcp"
 path = "src/main.rs"
 
 [dependencies]
+lindesk-version.workspace = true
 lindesk-plugin-api.workspace = true
 lindesk-core.workspace = true
 lindesk-host.workspace = true

@@ -34,7 +34,7 @@ and examples for each command. Unknown commands run `lindeskctl-<cmd>` from PATH
 #[derive(Parser, Debug)]
 #[command(
     name = "lindeskctl",
-    version,
+    version = lindesk_version::LONG,
     about = "Inspect, steer and extend lindesk, the desktop QoS governor",
     long_about = "lindeskctl is the command-line front door to lindesk, a userspace QoS governor \
                   that keeps the app you are using responsive while builds, copies and indexers \

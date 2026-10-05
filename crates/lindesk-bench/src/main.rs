@@ -27,7 +27,7 @@ use clap::{Parser, Subcommand};
 use crate::results::{Phase, Results};
 
 #[derive(Parser)]
-#[command(name = "lindesk-bench", version, about = "lindesk foreground latency probe and A/B torture harness")]
+#[command(name = "lindesk-bench", version = lindesk_version::LONG, about = "lindesk foreground latency probe and A/B torture harness")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

@@ -294,7 +294,7 @@ impl Profile {
             toml::from_str(text).map_err(|e| ProfileError::Parse { path: path.clone(), message: e.to_string() })?;
         let invalid = |message: String| ProfileError::Invalid { path: path.clone(), message };
         let ProfileMeta { name, description, inherits } = file.profile;
-        check_name(&name).map_err(&invalid)?;
+        check_name(&name).map_err(invalid)?;
         if let Some(parent) = &inherits {
             check_name(parent).map_err(|m| invalid(format!("inherits: {m}")))?;
             if parent == &name {
