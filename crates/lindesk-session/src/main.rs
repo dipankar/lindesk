@@ -247,6 +247,7 @@ fn run(cli: Cli, uid: u32) -> anyhow::Result<()> {
     let psi_gate = Gate::new(false);
     let mut hooks = SessionHooks::new(uid, feed.clone(), threshold_gate.clone(), psi_gate.clone());
     hooks.forced_standalone = cli.standalone;
+    hooks.pause_file = xdg("XDG_STATE_HOME", ".local/state").map(|d| d.join("lindesk/paused.json"));
     hooks.config_path = config_path;
     hooks.prepare = Box::new(prepare);
     let profile_name = profiles.active().to_string();

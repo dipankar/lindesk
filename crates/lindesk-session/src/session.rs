@@ -83,6 +83,8 @@ pub struct SessionHooks {
     /// Where the vendor rules come from (`system`, `embedded`, `configured`).
     pub rules_source: &'static str,
     /// First-run quick calibration (standalone mode only).
+    /// Where a pause is persisted (`lindeskctl pause`).
+    pub pause_file: Option<PathBuf>,
     pub calibrator: Option<Calibrator>,
     mode: Mode,
     broker: Option<BrokerView>,
@@ -106,6 +108,7 @@ impl SessionHooks {
             requirements: Vec::new(),
             degraded: Vec::new(),
             rules_source: "system",
+            pause_file: None,
             calibrator: None,
             mode: Mode::Starting,
             broker: None,
@@ -279,6 +282,10 @@ impl Hooks for SessionHooks {
                 c.tick(engine, report, epoch);
             }
         }
+    }
+
+    fn pause_file(&self) -> Option<PathBuf> {
+        self.pause_file.clone()
     }
 
     fn requirements(&self) -> Value {

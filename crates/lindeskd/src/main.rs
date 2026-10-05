@@ -307,6 +307,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         conflicts,
     };
     hooks.config_path = cli.config.clone();
+    hooks.pause_file = Some(lib.join("paused.json"));
     hooks.prepare = Box::new(prepare);
     let profile_name = profiles.active().to_string();
     hooks.profiles = Some(profiles);

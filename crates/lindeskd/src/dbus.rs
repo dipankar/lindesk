@@ -301,6 +301,25 @@ impl Broker {
         self.engine.reload().await.map_err(gone)?.map(|_| ()).map_err(fdo::Error::Failed)
     }
 
+    /// Pause (observe-only: every applied setting reverted, sensing continues) or resume.
+    /// `seconds > 0` auto-resumes after that long. Returns the pause JSON.
+    async fn set_paused(
+        &self,
+        paused: bool,
+        seconds: u32,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> fdo::Result<String> {
+        let caller = self.caller(conn, &hdr).await?;
+        self.polkit(conn, &hdr, &caller, actions::MANAGE).await?;
+        self.engine.set_paused(paused, seconds, format!("uid {}", caller.uid)).await.map_err(gone)
+    }
+
+    /// The pause JSON: `{"paused", "since_ms", "until_ms", "by"}`.
+    async fn get_paused(&self) -> fdo::Result<String> {
+        self.engine.get_paused().await.map_err(gone)
+    }
+
     // ---- control plane (docs/CONTROL-PLANE.md §5), system scope ----------------------------
 
     /// Plan a changeset (no side effects): Plan JSON.

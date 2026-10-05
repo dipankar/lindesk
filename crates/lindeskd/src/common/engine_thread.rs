@@ -91,6 +91,11 @@ pub enum Command<X> {
     Profiles { reply: Reply<ProfilesView> },
     /// A calibration finished and was saved to `path`: put it into the caps and announce it.
     Calibrated { map: Box<LatencyMap>, path: PathBuf },
+    /// Pause (observe-only, every applied setting reverted) or resume. `seconds > 0`
+    /// auto-resumes after that long. Replies with the pause JSON.
+    SetPaused { paused: bool, seconds: u32, by: String, reply: Reply<String> },
+    /// The pause JSON: `{"paused": bool, "until_ms": ms|null, "since_ms": ms|null, "by": …}`.
+    GetPaused { reply: Reply<String> },
     /// Restore everything, stop plugins and end the thread.
     Shutdown,
     /// Daemon-specific.
@@ -199,6 +204,45 @@ pub trait Hooks: Send + 'static {
 
     /// After [`Engine::shutdown`] restored everything.
     fn shutdown(&mut self, _engine: &mut Engine) {}
+
+    /// Where the pause state is kept across restarts (`None`: not persisted).
+    fn pause_file(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// The pause state: observe-only until `until_ms` (`None` = until `resume`).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Pause {
+    pub paused: bool,
+    #[serde(default)]
+    pub since_ms: Option<TimestampMs>,
+    #[serde(default)]
+    pub until_ms: Option<TimestampMs>,
+    #[serde(default)]
+    pub by: Option<String>,
+}
+
+impl Pause {
+    /// `⏸ paused (resumes in 24m)` / `⏸ paused (until resumed)`.
+    pub fn text(&self, now: TimestampMs) -> String {
+        match self.until_ms {
+            Some(u) => format!("⏸ paused (resumes in {})", short_duration((u - now).max(0))),
+            None => "⏸ paused (until resumed)".to_string(),
+        }
+    }
+}
+
+/// `24m`, `1h05m`, `40s`.
+pub fn short_duration(ms: i64) -> String {
+    let s = (ms + 999) / 1000;
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m", (s + 59) / 60)
+    } else {
+        format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
+    }
 }
 
 /// The engine thread is gone (shut down or crashed).
@@ -281,6 +325,15 @@ impl<X: Send + 'static> EngineHandle<X> {
 
     pub async fn reload(&self) -> Result<Result<String, String>, EngineGone> {
         self.call(|reply| Command::Reload { reply }).await
+    }
+
+    /// Pause or resume; see [`Command::SetPaused`].
+    pub async fn set_paused(&self, paused: bool, seconds: u32, by: String) -> Result<String, EngineGone> {
+        self.call(|reply| Command::SetPaused { paused, seconds, by, reply }).await
+    }
+
+    pub async fn get_paused(&self) -> Result<String, EngineGone> {
+        self.call(|reply| Command::GetPaused { reply }).await
     }
 
     pub fn shutdown(&self) {
@@ -396,6 +449,7 @@ pub fn spawn<H: Hooks>(engine: Engine, hooks: H, inbox: Inbox<H::Ext>) -> std::i
             alive: inbox.alive,
             recent: inbox.recent,
             notify: ntx,
+            pause: Pause::default(),
             last_level: None,
             steps: 0,
             seq: 0,
@@ -417,6 +471,7 @@ struct Loop<H: Hooks> {
     alive: Arc<AtomicI64>,
     recent: Arc<Mutex<VecDeque<(Audience, String)>>>,
     notify: tmpsc::UnboundedSender<Notification>,
+    pause: Pause,
     last_level: Option<Level>,
     steps: u64,
     /// Sequence number of the last streamed event.
@@ -427,6 +482,7 @@ struct Loop<H: Hooks> {
 impl<H: Hooks> Loop<H> {
     fn run(&mut self, ready: mpsc::Sender<()>) {
         let tick = self.engine.config().general.tick.max(MIN_STEP_SPACING);
+        self.load_pause();
         self.step();
         let _ = ready.send(());
         let mut last_step = Instant::now();
@@ -449,6 +505,10 @@ impl<H: Hooks> Loop<H> {
                 let _ = rustix::io::read(&*self.waker, &mut buf);
             }
             pending |= fd_fired || last_step.elapsed() >= tick;
+            if self.pause.paused && self.pause.until_ms.is_some_and(|u| now_ms() >= u) {
+                self.set_pause(false, 0, "timer");
+                pending = true;
+            }
             let mut cx_want = false;
             let mut stop = false;
             let mut commands = 0;
@@ -567,6 +627,15 @@ impl<H: Hooks> Loop<H> {
                 self.hooks.calibrated(&mut self.engine, *map, &path);
                 true
             }
+            Command::SetPaused { paused, seconds, by, reply } => {
+                self.set_pause(paused, seconds, &by);
+                let _ = reply.send(self.pause_json());
+                true
+            }
+            Command::GetPaused { reply } => {
+                let _ = reply.send(self.pause_json());
+                false
+            }
             Command::Ext(x) => {
                 let mut cx = LoopCx { published: &self.published, notify: &self.notify, want_step: false };
                 self.hooks.ext(&mut self.engine, x, &mut cx);
@@ -684,6 +753,12 @@ impl<H: Hooks> Loop<H> {
         text.push_str(&super::setup::telemetry_text(&telemetry));
         text.push('\n');
         daemon.insert("telemetry".into(), telemetry);
+        daemon.insert("paused".into(), serde_json::to_value(&self.pause).unwrap_or_default());
+        daemon.insert("state".into(), json!(if self.pause.paused { "paused" } else { "on" }));
+        if self.pause.paused {
+            text.push_str(&self.pause.text(now));
+            text.push('\n');
+        }
         json!({
             "status": status,
             "daemon": daemon,
@@ -716,6 +791,74 @@ impl<H: Hooks> Loop<H> {
             }
         };
         Ok(what::explanation_json(query, &explanation))
+    }
+
+    fn pause_json(&self) -> String {
+        serde_json::to_string(&self.pause).unwrap_or_default()
+    }
+
+    /// A persisted pause survives a restart while its timer runs (an indefinite one until
+    /// `resume`); an expired one is dropped.
+    fn load_pause(&mut self) {
+        let Some(path) = self.hooks.pause_file() else { return };
+        let Ok(text) = std::fs::read_to_string(&path) else { return };
+        match serde_json::from_str::<Pause>(&text) {
+            Ok(p) if p.paused && p.until_ms.is_none_or(|u| u > now_ms()) => {
+                tracing::info!("still paused ({})", p.text(now_ms()));
+                self.engine.set_paused(true);
+                self.pause = p;
+            }
+            _ => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    /// Pause/resume the engine, persist it and announce `lindesk.paused` / `lindesk.resumed`.
+    fn set_pause(&mut self, paused: bool, seconds: u32, by: &str) {
+        let now = now_ms();
+        let until = (seconds > 0).then(|| now + i64::from(seconds) * 1000);
+        if paused == self.pause.paused && (!paused || until == self.pause.until_ms) {
+            return;
+        }
+        let actions = self.engine.set_paused(paused);
+        for a in &actions {
+            tracing::info!(target: "lindesk::action", "{a}");
+        }
+        let host = self.engine.options().host.clone();
+        if paused {
+            self.pause = Pause { paused: true, since_ms: Some(now), until_ms: until, by: Some(by.to_string()) };
+            tracing::info!("paused by {by}: every setting reverted, observing only ({})", self.pause.text(now));
+            self.engine.push_event(super::startup::notice(
+                "lindesk.paused",
+                &host,
+                self.pause.text(now),
+                json!({"until_ms": until, "by": by, "restored": actions.len()}),
+            ));
+        } else {
+            tracing::info!("resumed ({by})");
+            self.engine.push_event(super::startup::notice(
+                "lindesk.resumed",
+                &host,
+                format!("resumed ({by})"),
+                json!({"by": by, "paused_since_ms": self.pause.since_ms}),
+            ));
+            self.pause = Pause::default();
+        }
+        if let Some(path) = self.hooks.pause_file() {
+            let r = if paused {
+                std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new("/")))
+                    .and_then(|()| std::fs::write(&path, self.pause_json()))
+            } else {
+                match std::fs::remove_file(&path) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                    _ => Ok(()),
+                }
+            };
+            if let Err(e) = r {
+                tracing::warn!("pause state {}: {e}", path.display());
+            }
+        }
     }
 
     fn shutdown(&mut self) {

@@ -171,6 +171,25 @@ where
     }
 }
 
+/// Like [`eventually`], but `None` after `timeout` instead of a panic.
+#[allow(dead_code)]
+pub async fn eventually_opt<T, F, Fut>(timeout: Duration, mut f: F) -> Option<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(v) = f().await {
+            return Some(v);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 #[allow(unused_imports)]
 pub use broker_client::BrokerTestProxy;
 #[allow(unused_imports)]
@@ -198,6 +217,8 @@ mod qos_client {
         fn status(&self) -> zbus::Result<String>;
         fn explain(&self, what: &str) -> zbus::Result<String>;
         fn recent_events(&self, n: u32) -> zbus::Result<String>;
+        fn set_paused(&self, paused: bool, seconds: u32) -> zbus::Result<String>;
+        fn get_paused(&self) -> zbus::Result<String>;
         #[zbus(signal)]
         fn level_changed(&self, level: String) -> zbus::Result<()>;
         #[zbus(signal)]

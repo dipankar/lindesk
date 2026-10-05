@@ -118,6 +118,8 @@ pub struct BrokerHooks {
     pub requirements: Vec<Value>,
     pub degraded: Vec<String>,
     pub rules_source: &'static str,
+    /// Where a pause is persisted (`lindeskctl pause`).
+    pub pause_file: Option<PathBuf>,
     pub calibrator: Option<Calibrator>,
     sessions: BTreeSet<u32>,
     last_sent: BTreeMap<u32, String>,
@@ -138,6 +140,7 @@ impl BrokerHooks {
             requirements: Vec::new(),
             degraded: Vec::new(),
             rules_source: "system",
+            pause_file: None,
             calibrator: None,
             sessions: BTreeSet::new(),
             last_sent: BTreeMap::new(),
@@ -262,6 +265,10 @@ impl Hooks for BrokerHooks {
             states.insert(*uid, json);
         }
         cx.publish(|p| p.users = states);
+    }
+
+    fn pause_file(&self) -> Option<PathBuf> {
+        self.pause_file.clone()
     }
 
     fn requirements(&self) -> Value {

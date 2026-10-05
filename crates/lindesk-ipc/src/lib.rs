@@ -52,6 +52,10 @@ pub trait QoS {
     fn explain(&self, what: &str) -> zbus::Result<String>;
     /// JSON array of the last `n` events (oldest first).
     fn recent_events(&self, n: u32) -> zbus::Result<String>;
+    /// Pause (observe-only) or resume; `seconds > 0` auto-resumes. Returns the pause JSON.
+    fn set_paused(&self, paused: bool, seconds: u32) -> zbus::Result<String>;
+    /// `{"paused": bool, "since_ms", "until_ms", "by"}`.
+    fn get_paused(&self) -> zbus::Result<String>;
 
     // ---- control plane (docs/CONTROL-PLANE.md §5), user scope --------------------------
 
@@ -110,6 +114,10 @@ pub mod broker {
         fn reload(&self) -> zbus::Result<()>;
         /// JSON array of the last `n` events (oldest first).
         fn recent_events(&self, n: u32) -> zbus::Result<String>;
+        /// Pause (observe-only) or resume; polkit `org.lindesk.manage`.
+        #[zbus(allow_interactive_auth)]
+        fn set_paused(&self, paused: bool, seconds: u32) -> zbus::Result<String>;
+        fn get_paused(&self) -> zbus::Result<String>;
 
         // ---- control plane (docs/CONTROL-PLANE.md §5), system scope ------------------------
         // Mutating members need polkit `org.lindesk.manage` and may show an authentication
