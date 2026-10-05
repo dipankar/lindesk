@@ -1241,7 +1241,8 @@ impl LindeskMcp {
     }
 
     #[tool(
-        description = "End a pause early: lindesk applies its decisions again.",
+        description = "End a pause early: lindesk applies its decisions again (the settings it reverted for the \
+            pause come back on its next step). Use the same scope as the pause.",
         annotations(
             title = "Resume lindesk",
             read_only_hint = false,

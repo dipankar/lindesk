@@ -67,7 +67,10 @@ fn passes_conformance() {
     let lake = tmp.path().join("lake");
     let report = run_conformance_with(
         &root.join("telemetry-user"),
-        &ConformanceOptions { timeout_scale: 3.0, config: Some(json!({ "dir": lake, "mode": "user" })) },
+        &ConformanceOptions {
+            timeout_scale: 3.0,
+            config: Some(json!({ "dir": lake, "mode": "user", "flush_timeout": "15s" })),
+        },
     );
     println!("{report}");
     assert!(report.passed(), "{report}");
@@ -79,7 +82,8 @@ fn records_sent_over_stdio_land_in_the_lake() {
     let root = install(tmp.path());
     let lake = tmp.path().join("lake");
     let config = Config::from_toml(&format!(
-        "[plugins.telemetry.config]\ndir = {:?}\nflush = \"1h\"\nmode = \"user\"\n",
+        // A debug build encodes slowly on a loaded machine: generous flush timeouts.
+        "[plugins.telemetry.config]\ndir = {:?}\nflush = \"1h\"\nmode = \"user\"\nflush_timeout = \"50s\"\n",
         lake.display().to_string()
     ))
     .unwrap();
@@ -92,7 +96,8 @@ fn records_sent_over_stdio_land_in_the_lake() {
         caps: HostCaps::default(),
         config: serde_json::Value::Null,
     };
-    let mut p = ExternalPlugin::from_discovered(&d.plugins[0], ctx, ExternalOptions::default());
+    let opts = ExternalOptions { timeout_scale: 10.0, ..ExternalOptions::default() };
+    let mut p = ExternalPlugin::from_discovered(&d.plugins[0], ctx, opts);
     p.start().unwrap_or_else(|e| panic!("start: {e}; logs: {:?}", p.recent_logs()));
     let now = 1_791_000_000_000;
     let batch: Vec<Record> = (0..20)

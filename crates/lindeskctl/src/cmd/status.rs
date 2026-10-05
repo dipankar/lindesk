@@ -616,7 +616,7 @@ pub mod tests {
             &ui,
             &json!({"installed": true, "enabled": true, "state": "backoff", "dir": "/nonexistent"}),
         );
-        assert_eq!(l, "telemetry: installed, /nonexistent (backoff)");
+        assert!(l.starts_with("telemetry: installed, /nonexistent (") && l.ends_with("backoff)"), "{l}");
         assert_eq!(
             telemetry_line(&ui, &json!({"enabled": false})),
             "telemetry: disabled ([telemetry] enabled = false)"

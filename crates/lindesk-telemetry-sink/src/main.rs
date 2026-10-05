@@ -32,6 +32,9 @@ use lindesk_store::{AsyncOptions, AsyncStore, FlushOutcome, SinkConfig, StoreOpt
 /// Plugin name (and the `[plugins.<name>]` config key).
 pub const NAME: &str = "telemetry";
 
+/// How long `shutdown` waits for the writer (the host's grace period is 500 ms).
+const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_millis(350);
+
 /// Niceness of the plugin process and its writer thread.
 const NICE: i8 = 10;
 
@@ -106,9 +109,12 @@ impl Plugin for TelemetrySink {
         Ok(())
     }
 
-    /// Flushes and stops the writer, waiting at most the configured flush timeout.
+    /// Stops the writer. The host sends `sink.flush` (which waits up to `flush_timeout`)
+    /// right before `shutdown` and kills a plugin that isn't gone 500 ms later, so this
+    /// waits at most [`SHUTDOWN_WAIT`] for the rest.
     fn shutdown(&mut self) {
-        if let Some(store) = self.store.take() {
+        if let Some(mut store) = self.store.take() {
+            store.set_drop_timeout(SHUTDOWN_WAIT);
             if store.dropped_rows() > 0 {
                 tracing::warn!("{} telemetry rows were dropped this session", store.dropped_rows());
             }

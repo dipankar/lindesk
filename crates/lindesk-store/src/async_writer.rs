@@ -197,6 +197,12 @@ impl AsyncStore {
     }
 
     /// Rows waiting in the queue.
+    /// How long dropping waits for the writer (default: the flush timeout). A plugin that
+    /// must exit promptly after its last flush lowers it.
+    pub fn set_drop_timeout(&mut self, timeout: Duration) {
+        self.flush_timeout = timeout;
+    }
+
     pub fn queued_rows(&self) -> usize {
         self.shared.lock().queue.len()
     }
