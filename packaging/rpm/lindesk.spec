@@ -135,7 +135,7 @@ elif [ "$1" -eq 1 ] && [ -d /run/systemd/system ]; then
         done | sort -u | while read -r _u; do
             [ -n "$_u" ] || continue
             tmo systemctl --user -M "$_u@" daemon-reload >/dev/null 2>&1 || true
-            if tmo systemctl --user -M "$_u@" start lindesk-session.service >/dev/null 2>&1; then
+            if tmo systemctl --user -M "$_u@" restart lindesk-session.service >/dev/null 2>&1; then
                 echo "lindesk: started lindesk-session for $_u"
             fi
         done

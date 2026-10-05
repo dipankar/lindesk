@@ -51,7 +51,8 @@ start_sessions() {
 	done | sort -u | while read -r _u; do
 		[ -n "$_u" ] || continue
 		tmo systemctl --user -M "$_u@" daemon-reload >/dev/null 2>&1 || true
-		if tmo systemctl --user -M "$_u@" start lindesk-session.service >/dev/null 2>&1; then
+		# restart (not start) so an upgrade moves a running agent onto the new binary
+		if tmo systemctl --user -M "$_u@" restart lindesk-session.service >/dev/null 2>&1; then
 			echo "lindesk: started lindesk-session for $_u"
 		fi
 	done
@@ -124,7 +125,9 @@ configure | abort-upgrade | abort-deconfigure | abort-remove)
 		systemctl --system daemon-reload >/dev/null || true
 	elif [ -d /run/systemd/system ]; then
 		systemctl --system daemon-reload >/dev/null || true
-		if [ -n "$2" ]; then action=try-restart; else action=start; fi
+		# Upgrade: restart rather than try-restart. We only get here when lindesk is enabled
+		# (not turned off), and a broker that had died must come back on the new binary.
+		if [ -n "$2" ]; then action=restart; else action=start; fi
 		# shellcheck disable=SC2086
 		if command -v deb-systemd-invoke >/dev/null 2>&1; then
 			deb-systemd-invoke $action $SYSTEM_UNITS >/dev/null || true

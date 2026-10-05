@@ -203,14 +203,14 @@ run_postinst() {
 }
 echo '{"schema": 1, "lindesk_enabled": false, "units": []}' >"$work/pilib/install-state.json"
 run_postinst
-if grep -q "turned off with 'lindeskctl off'" "$work/pi.log" && ! grep -Eq 'invoke (try-restart|start) lindeskd|systemctl (try-restart|start) lindeskd' "$work/calls"; then
+if grep -q "turned off with 'lindeskctl off'" "$work/pi.log" && ! grep -Eq 'invoke (try-restart|restart|start) lindeskd|systemctl (try-restart|restart|start) lindeskd' "$work/calls"; then
 	ok "postinst keeps lindesk off after lindeskctl off"
 else
 	bad "postinst re-enabled a lindesk that was turned off: $(cat "$work/pi.log" "$work/calls")"
 fi
 echo '{"schema": 1, "lindesk_enabled": true, "units": []}' >"$work/pilib/install-state.json"
 run_postinst
-if [[ ! -d /run/systemd/system ]] || grep -Eq '(deb-systemd-invoke|systemctl) try-restart lindeskd' "$work/calls"; then
+if [[ ! -d /run/systemd/system ]] || grep -Eq '(deb-systemd-invoke|systemctl) restart lindeskd' "$work/calls"; then
 	ok "postinst restarts lindeskd when it is on"
 else
 	bad "postinst didn't restart lindeskd: $(cat "$work/pi.log" "$work/calls")"
