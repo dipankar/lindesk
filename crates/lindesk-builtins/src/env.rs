@@ -349,7 +349,7 @@ impl SysEnvironment {
     fn pids_oldest_first(&self, cg: &str) -> Vec<i32> {
         let mut pids = procfs::pids_in_cgroup_tree(&self.roots.cgroup, cg).unwrap_or_default();
         pids.truncate(1024);
-        pids.sort_by_key(|p| (start_time(&self.roots.proc, *p).unwrap_or(u64::MAX), *p));
+        sort_oldest_first(&mut pids, |p| start_time(&self.roots.proc, p));
         pids
     }
 
@@ -403,6 +403,14 @@ impl SysEnvironment {
             app_id: cgroup_path::app_id_from_unit(name),
         }
     }
+}
+
+/// Sorts pids by start time (unknown last), then pid. `start` reads `/proc`, so its answer
+/// can change while we sort (a process exits, a pid is reused): each pid's key is read
+/// exactly once (`sort_by_cached_key`). A key that changes mid-sort makes `sort_by_key`
+/// panic ("does not correctly implement a total order"), which took down the engine thread.
+fn sort_oldest_first(pids: &mut [i32], mut start: impl FnMut(i32) -> Option<u64>) {
+    pids.sort_by_cached_key(|p| (start(*p).unwrap_or(u64::MAX), *p));
 }
 
 /// Start time of a process in clock ticks since boot (`/proc/<pid>/stat` field 22).
@@ -532,6 +540,32 @@ fn unit_kind(name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: the start time of a pid can change between two reads (exit, reuse) while
+    /// the sort runs. Every read here returns a different value; the sort must read each pid
+    /// once, not panic, and order by the value it read.
+    #[test]
+    fn sort_oldest_first_survives_keys_that_change_mid_sort() {
+        let n = 1024;
+        let mut pids: Vec<i32> = (1..=n).rev().collect();
+        let mut reads = std::collections::HashMap::<i32, u32>::new();
+        let mut first = std::collections::HashMap::<i32, u64>::new();
+        let mut calls = 0u64;
+        sort_oldest_first(&mut pids, |p| {
+            calls += 1;
+            *reads.entry(p).or_default() += 1;
+            // Changes on every call; every 7th pid has "exited" (no start time).
+            let v = (p as u64 * 7919 + calls * 104_729) % 100_003;
+            let v = (p % 7 != 0).then_some(v);
+            first.entry(p).or_insert(v.unwrap_or(u64::MAX));
+            v
+        });
+        assert_eq!(pids.len(), n as usize);
+        assert!(reads.values().all(|&r| r == 1), "each pid's start time is read once");
+        let keys: Vec<(u64, i32)> = pids.iter().map(|p| (first[p], *p)).collect();
+        assert!(keys.windows(2).all(|w| w[0] <= w[1]), "sorted by the value read");
+        assert!(pids[pids.len() - 1] % 7 == 0, "unknown start times sort last");
+    }
     use lindesk_sys::fixture::{self, Fixture};
 
     const UM: &str = "/user.slice/user-1000.slice/user@1000.service";
