@@ -1255,7 +1255,7 @@ mod tests {
             "shorter epochs",
         ])
         .unwrap();
-        let Some(Cmd::Changes(ChangesCmd::Apply { ops, ttl, message, yes })) = c.cmd else { panic!() };
+        let Some(Cmd::Changes(ChangesCmd::Apply { ops, ttl, message, yes, .. })) = c.cmd else { panic!() };
         assert_eq!(ops.set, vec![("plugins.threshold.config.epoch".to_string(), "400ms".to_string())]);
         assert_eq!(ttl, Some(Duration::from_secs(600)));
         assert_eq!(message.as_deref(), Some("shorter epochs"));
@@ -1298,6 +1298,20 @@ mod tests {
         ));
         assert!(matches!(parse(&["hardware", "--json"]).unwrap().cmd, Some(Cmd::Hardware)));
         assert!(matches!(parse(&["swap"]).unwrap().cmd, Some(Cmd::Swap)));
+        assert!(matches!(
+            parse(&["changes", "revert-all", "--scope", "user", "--yes"]).unwrap().cmd,
+            Some(Cmd::Changes(ChangesCmd::RevertAll { scope: StoreScope::User, yes: true, .. }))
+        ));
+        assert!(matches!(
+            parse(&["setup", "conflicts", "--disable", "--yes"]).unwrap().cmd,
+            Some(Cmd::Setup(SetupCmd::Conflicts { disable: true, yes: true, .. }))
+        ));
+        assert!(parse(&["setup", "conflicts", "--disable", "--restore"]).is_err());
+        assert!(parse(&["setup", "conflicts", "--restore-conflicts"]).is_err(), "needs --reconcile");
+        assert!(matches!(
+            parse(&["setup", "conflicts", "--reconcile", "--keep-current"]).unwrap().cmd,
+            Some(Cmd::Setup(SetupCmd::Conflicts { reconcile: true, keep_current: true, .. }))
+        ));
         assert!(matches!(parse(&["mcp"]).unwrap().cmd, Some(Cmd::Mcp { cmd: None })));
         let c = parse(&["mcp", "config", "--client", "claude-desktop"]).unwrap();
         assert!(matches!(c.cmd, Some(Cmd::Mcp { cmd: Some(McpCmd::Config { client: McpClient::ClaudeDesktop, .. }) })));

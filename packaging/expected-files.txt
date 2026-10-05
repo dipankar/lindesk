@@ -11,6 +11,7 @@
 755 /usr/bin/lindesk-bench
 755 /usr/bin/lindesk-mcp
 755 /usr/bin/lindesk-session
+755 /usr/bin/lindesk-uninstall
 755 /usr/bin/lindeskctl
 755 /usr/bin/lindeskd
 755 /usr/lib/lindesk/plugins/
@@ -48,6 +49,7 @@
 644 /usr/share/lindesk/rules.d/10-critical.toml
 644 /usr/share/lindesk/rules.d/50-background.toml
 644 /usr/share/lindesk/rules.d/60-batch.toml
+755 /usr/share/lindesk/uninstall.sh
 644 /usr/share/man/man1/lindesk-mcp.1.gz
 644 /usr/share/man/man1/lindeskctl.1.gz
 644 /usr/share/man/man8/lindeskd.8.gz
