@@ -46,7 +46,7 @@ libc = "0.2"
 globset = "0.4"
 humantime = "2"
 bytesize = "2"
-ulid = "1"
+ulid = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 arrow-array = "60"
 arrow-schema = "60"
