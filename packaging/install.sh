@@ -4,8 +4,9 @@
 # The .deb, .rpm and Arch packages all call this script with --destdir, so the layout is
 # defined here and nowhere else. Run it directly to install from a source tree:
 #
-#   ./packaging/install.sh                     # check, build, install to /usr and /etc, enable
-#                                               # and start everything (asks for sudo)
+#   ./packaging/install.sh                     # check, build, install the core to /usr and /etc,
+#                                               # enable and start it (asks for sudo)
+#   ./packaging/install.sh --with-telemetry    # also the optional telemetry (DuckDB + Vortex)
 #   cargo build --release && sudo ./packaging/install.sh --no-build
 #   ./packaging/install.sh --destdir=/tmp/stage --no-build      # stage only (packagers)
 #   sudo ./packaging/install.sh --uninstall
@@ -22,9 +23,17 @@
 # Run as a regular user, the script checks and builds as that user, then re-runs itself
 # with sudo for the install step (so target/ never gets root-owned files).
 #
+# Two components, like the two packages: the core (lindeskd, lindesk-session, lindeskctl,
+# lindesk-mcp, lindesk-bench; no DuckDB or Vortex linked) and telemetry (lindesk-data, the
+# lindesk-telemetry-sink plugin and its two manifests, the lindesk-compact timers). The core
+# is the default; --with-telemetry adds telemetry. A re-run without either flag keeps what
+# is installed; --without-telemetry removes an installed telemetry component.
+# --telemetry-only stages just the telemetry files (packagers, with --destdir).
+#
 # Environment:
 #   LINDESK_BIN_DIR   directory holding prebuilt lindeskd, lindesk-session, lindeskctl,
-#                     lindesk-data, lindesk-bench and lindesk-mcp (implies --no-build)
+#                     lindesk-bench and lindesk-mcp (and, with telemetry, lindesk-data and
+#                     lindesk-telemetry-sink) (implies --no-build)
 #   CARGO_TARGET_DIR  honoured when locating/building binaries (default: <repo>/target)
 #   CARGO             cargo executable (default: cargo from PATH)
 #   RUSTC             rustc executable for the version check (default: next to cargo)
@@ -39,13 +48,19 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 PKG="$ROOT/packaging"
 
-BINARIES=(lindeskd lindesk-session lindeskctl lindesk-data lindesk-bench lindesk-mcp)
-SYSTEM_UNITS=(lindeskd.service lindesk-compact.service lindesk-compact.timer)
+CORE_BINARIES=(lindeskd lindesk-session lindeskctl lindesk-bench lindesk-mcp)
+# lindesk-telemetry-sink goes to PREFIX/lib/lindesk (a plugin, not a command).
+TELEMETRY_BINARIES=(lindesk-data lindesk-telemetry-sink)
+SYSTEM_UNITS=(lindeskd.service)
 # lindesk-mcp.{service,socket} are installed but not enabled: stdio clients need no unit, and
 # the HTTP endpoint is opt-in (systemctl --user enable --now lindesk-mcp.socket).
-USER_UNITS=(lindesk-session.service lindesk-compact.service lindesk-compact.timer lindesk-mcp.service lindesk-mcp.socket)
-ENABLE_SYSTEM=(lindeskd.service lindesk-compact.timer)
-ENABLE_USER=(lindesk-session.service lindesk-compact.timer)
+USER_UNITS=(lindesk-session.service lindesk-mcp.service lindesk-mcp.socket)
+TELEMETRY_UNITS=(lindesk-compact.service lindesk-compact.timer)
+# The telemetry plugin's manifests: lindeskd loads telemetry/, lindesk-session telemetry-user/.
+TELEMETRY_PLUGINS=(telemetry telemetry-user)
+ENABLE_SYSTEM=(lindeskd.service)
+ENABLE_USER=(lindesk-session.service)
+ENABLE_TELEMETRY=(lindesk-compact.timer)
 GNOME_UUID="lindesk@lindesk.org"
 
 prefix=/usr
@@ -61,8 +76,15 @@ init=auto
 preflight_only=0
 skip_preflight=0
 preflight_failed=0
+turned_off=0
 preflight_done=0
 reexec_sudo=0
+conflicts=ask
+with_core=1
+with_telemetry=0
+# auto: core only, but keep an already installed telemetry component (upgrades).
+telemetry_mode=auto
+telemetry_kept=0
 started_users=()
 
 usage() {
@@ -84,11 +106,22 @@ Options:
   --no-enable        do not enable or start services
   --no-manifest      do not write PREFIX/share/lindesk/install-manifest.txt
                      (packages: the package manager tracks the files)
-  --uninstall        remove everything a previous run installed (uses the manifest)
+  --uninstall        restore everything lindesk changed, then remove what a previous run
+                     installed (runs packaging/uninstall.sh; also --purge, --yes, ...)
+  --disable-conflicts
+                     stop and disable running conflicting daemons (system76-scheduler,
+                     ananicy(-cpp), uresourced) as a revertible change, without asking
+  --keep-conflicts   leave them alone (the default without a terminal)
   --dry-run          print what would be done without changing anything
   --preflight        only check this host's requirements (no root needed), then exit;
                      with --no-build the Rust toolchain is not checked
   --skip-preflight   skip the requirement checks before and after installing
+  --with-telemetry   also install the optional telemetry: lindesk-data (DuckDB), the
+                     telemetry plugin (Vortex lake writer) and its timers
+  --without-telemetry
+                     the core only (the default for a new install); also removes an
+                     installed telemetry component, which a plain re-run keeps
+  --telemetry-only   stage only the telemetry files (packagers; needs --destdir)
   -h, --help         show this help
 EOF
 }
@@ -121,6 +154,15 @@ with_timeout() {
 	if have timeout; then timeout 30 "$@"; else "$@"; fi
 }
 
+# ── uninstall: packaging/uninstall.sh does it (restore first, then remove) ─────────────────
+for a in "$@"; do
+	if [[ $a == --uninstall ]]; then
+		args=()
+		for b in "$@"; do [[ $b == --uninstall ]] || args+=("$b"); done
+		exec "$SCRIPT_DIR/uninstall.sh" "${args[@]}"
+	fi
+done
+
 # ── argument parsing ─────────────────────────────────────────────────────────────────────
 ORIG_ARGS=("$@")
 while (($#)); do
@@ -142,10 +184,15 @@ while (($#)); do
 	--no-enable) do_enable=0 ;;
 	--no-manifest) do_manifest=0 ;;
 	--uninstall) uninstall=1 ;;
+	--disable-conflicts) conflicts=disable ;;
+	--keep-conflicts) conflicts=keep ;;
 	--dry-run) dry_run=1 ;;
 	--preflight) preflight_only=1 ;;
 	--skip-preflight) skip_preflight=1 ;;
 	--preflight-done) preflight_done=1 ;; # internal: set by the sudo re-run
+	--with-telemetry) with_core=1; telemetry_mode=on ;;
+	--without-telemetry) with_core=1; telemetry_mode=off ;;
+	--telemetry-only) with_core=0; telemetry_mode=on ;;
 	-h | --help) usage; exit 0 ;;
 	*) usage >&2; die "unknown option: $arg" ;;
 	esac
@@ -176,6 +223,7 @@ fi
 
 live=0
 [[ -z $destdir ]] && live=1
+((with_core || !live)) || die "--telemetry-only is for staging packages (with --destdir)"
 
 # ── preflight ────────────────────────────────────────────────────────────────────────────
 # Written in POSIX sh (no bashisms) so other installers can reuse it verbatim.
@@ -387,6 +435,23 @@ mandir=$datadir/man
 confdir=$sysconfdir/lindesk
 manifest=$pkgdatadir/install-manifest.txt
 
+# Telemetry is opt-in (--with-telemetry). Without either flag an install that already has
+# it (per the manifest) keeps it, so re-running the installer to upgrade loses nothing.
+case $telemetry_mode in
+on) with_telemetry=1 ;;
+off) with_telemetry=0 ;;
+auto)
+	if [[ -f $destdir$manifest ]] && grep -q '^f .*/lindesk-data$' "$destdir$manifest"; then
+		with_telemetry=1
+		telemetry_kept=1
+	fi
+	;;
+esac
+# The binaries this run installs.
+BINARIES=()
+((with_core)) && BINARIES+=("${CORE_BINARIES[@]}")
+((with_telemetry)) && BINARIES+=("${TELEMETRY_BINARIES[@]}")
+
 if ((live)) && ((!uninstall)) && [[ $prefix != /usr ]]; then
 	warn "prefix $prefix: D-Bus and polkit only read /usr/share (and /etc) by default, so the" \
 		"broker policy may not load. systemd does search $prefix/lib/systemd."
@@ -407,7 +472,7 @@ if [[ $init == auto ]]; then
 fi
 
 # ── tracked filesystem helpers ───────────────────────────────────────────────────────────
-declare -A new_dirs=() new_files=() new_confs=()
+declare -A new_dirs=() new_files=() new_confs=() touched_dirs=()
 declare -a dir_order=() file_order=()
 
 # mkdirp PATH: create PATH (relative to destdir) and record every directory created.
@@ -418,6 +483,7 @@ mkdirp() {
 	for part in "${parts[@]}"; do
 		[[ -n $part ]] || continue
 		cur+="/$part"
+		touched_dirs[$cur]=1
 		if [[ ! -d $destdir$cur ]] && [[ -z ${new_dirs[$cur]:-} ]]; then
 			run install -d -m 0755 "$destdir$cur"
 			new_dirs[$cur]=1
@@ -592,10 +658,70 @@ do_install() {
 		[[ -f $bin_src/$b ]] || die "missing binary $bin_src/$b (build first, or set LINDESK_BIN_DIR)"
 	done
 	load_manifest
+	telemetry_removed=0
+	if ((live && with_core && !with_telemetry)) && [[ -e $unitdir/lindesk-compact.timer || -e $bindir/lindesk-data ]]; then
+		info "removing the telemetry component (--without-telemetry)"
+		telemetry_removed=1
+		if [[ -d /run/systemd/system ]]; then
+			try systemctl disable --now "${ENABLE_TELEMETRY[@]}"
+			try systemctl --global disable "${ENABLE_TELEMETRY[@]}"
+		fi
+	fi
 
 	info "installing lindesk into ${destdir:-/} (prefix $prefix, sysconfdir $sysconfdir)"
+	if ((with_core && telemetry_kept)); then
+		info "keeping the installed telemetry component (remove it with --without-telemetry)"
+	elif ((with_core && !with_telemetry)); then
+		info "core only; telemetry (lindesk-data with DuckDB, the Vortex lake writer) is optional: add it with --with-telemetry"
+	fi
 
-	for b in "${BINARIES[@]}"; do put 0755 "$bin_src/$b" "$bindir/$b"; done
+	((with_core)) && install_core
+	((with_telemetry)) && install_telemetry
+
+	if ((do_manifest)); then
+		write_manifest
+	fi
+
+	if ((live)); then
+		integrate_live
+	else
+		info "staged into $destdir; skipping system integration"
+	fi
+}
+
+# install_telemetry: lindesk-data, the sink plugin (one binary, two manifests), the
+# maintenance timers, presets, tmpfiles and the man page.
+install_telemetry() {
+	local f m tmp
+	put 0755 "$bin_src/lindesk-data" "$bindir/lindesk-data"
+	put 0755 "$bin_src/lindesk-telemetry-sink" "$pkglibdir/lindesk-telemetry-sink"
+	for m in "${TELEMETRY_PLUGINS[@]}"; do
+		put 0644 "$PKG/plugins/$m/plugin.toml" "$pkglibdir/plugins/$m/plugin.toml"
+	done
+	for f in "${TELEMETRY_UNITS[@]}"; do
+		put_text 0644 "$PKG/systemd/system/$f" "$unitdir/$f"
+		put_text 0644 "$PKG/systemd/user/$f" "$userunitdir/$f"
+	done
+	put 0644 "$PKG/systemd/lindesk-telemetry.system.preset" "$presetdir/81-lindesk-telemetry.preset"
+	put 0644 "$PKG/systemd/lindesk-telemetry.user.preset" "$userpresetdir/81-lindesk-telemetry.preset"
+	put 0644 "$PKG/systemd/lindesk-telemetry.tmpfiles.conf" "$tmpfilesdir/lindesk-telemetry.conf"
+	# The man page comes from lindesk-data itself (hidden `man` subcommand).
+	if ((dry_run)); then
+		info "would generate the lindesk-data man page with $bin_src/lindesk-data"
+	elif tmp=$(mktemp -d) && with_timeout "$bin_src/lindesk-data" man "$tmp" >/dev/null 2>&1 </dev/null &&
+		[[ -s $tmp/lindesk-data.1 ]]; then
+		gzip -9n -f "$tmp/lindesk-data.1"
+		put 0644 "$tmp/lindesk-data.1.gz" "$mandir/man1/lindesk-data.1.gz"
+		rm -rf "$tmp"
+	else
+		info "lindesk-data cannot run on this host; skipping its man page"
+		rm -rf "${tmp:-}"
+	fi
+}
+
+install_core() {
+	local b f
+	for b in "${CORE_BINARIES[@]}"; do put 0755 "$bin_src/$b" "$bindir/$b"; done
 
 	# systemd
 	for f in "${SYSTEM_UNITS[@]}"; do put_text 0644 "$PKG/systemd/system/$f" "$unitdir/$f"; done
@@ -654,30 +780,27 @@ do_install() {
 	put 0644 "$ROOT/LICENSE-MIT" "$licensedir/LICENSE-MIT"
 	put 0644 "$ROOT/LICENSE-APACHE" "$licensedir/LICENSE-APACHE"
 
-	if ((do_manifest)); then
-		write_manifest
-	fi
-
-	if ((live)); then
-		integrate_live
-	else
-		info "staged into $destdir; skipping system integration"
-	fi
+	# the uninstaller, and a command that runs it with this install's paths
+	put 0755 "$PKG/uninstall.sh" "$pkgdatadir/uninstall.sh"
+	local tmp
+	tmp=$(mktemp)
+	printf '#!/bin/sh\n# Stop lindesk, restore everything it changed, remove it: lindesk-uninstall --help\nexec %q --prefix=%q --sysconfdir=%q --bindir=%q "$@"\n' \
+		"$pkgdatadir/uninstall.sh" "$prefix" "$sysconfdir" "$bindir" >"$tmp"
+	put 0755 "$tmp" "$bindir/lindesk-uninstall"
+	rm -f "$tmp"
 }
 
 write_manifest() {
 	local line path tmp d
 	mkdirp "$(dirname -- "$manifest")"
-	# Keep directories created by earlier runs (we still own them) and drop stale files.
+	# Drop stale files (e.g. telemetry after --without-telemetry), then keep the directories
+	# created by earlier runs (we still own them), except ones this run no longer uses that
+	# are now empty (deepest first).
+	local -a old_dirs=()
 	for line in "${old_manifest_lines[@]}"; do
 		path=${line#? }
 		case $line in
-		"d "*)
-			if [[ -d $destdir$path && -z ${new_dirs[$path]:-} ]]; then
-				new_dirs[$path]=1
-				dir_order+=("$path")
-			fi
-			;;
+		"d "*) old_dirs+=("$path") ;;
 		"f "*)
 			if [[ -z ${new_files[$path]:-} && $path != "$manifest" && -e $destdir$path ]]; then
 				info "removing stale $path"
@@ -686,6 +809,15 @@ write_manifest() {
 			;;
 		esac
 	done
+	while IFS= read -r path; do
+		[[ -n $path && -d $destdir$path && -z ${new_dirs[$path]:-} ]] || continue
+		if [[ -z ${touched_dirs[$path]:-} ]] && ((!dry_run)) && rmdir -- "$destdir$path" 2>/dev/null; then
+			info "removing stale $path/"
+			continue
+		fi
+		new_dirs[$path]=1
+		dir_order+=("$path")
+	done < <(printf '%s\n' "${old_dirs[@]}" | awk '{ print gsub("/", "/"), $0 }' | sort -rn | cut -d' ' -f2-)
 	record_file "$manifest"
 	if ((dry_run)); then
 		info "would write manifest $manifest (${#file_order[@]} files, ${#dir_order[@]} dirs)"
@@ -714,12 +846,15 @@ manual_sysusers_tmpfiles() {
 			warn "cannot create the 'lindesk' group: no groupadd/addgroup"
 		fi
 	fi
-	local type path mode user group _
-	while read -r type path mode user group _; do
-		[[ $type == d ]] || continue
-		getent group "$group" >/dev/null 2>&1 || group=root
-		try install -d -m "$mode" -o "$user" -g "$group" "$path"
-	done < <(grep -v '^[[:space:]]*#' "$tmpfilesdir/lindesk.conf")
+	local type path mode user group _ conf
+	for conf in "$tmpfilesdir/lindesk.conf" "$tmpfilesdir/lindesk-telemetry.conf"; do
+		[[ -f $conf ]] || continue
+		while read -r type path mode user group _; do
+			[[ $type == d ]] || continue
+			getent group "$group" >/dev/null 2>&1 || group=root
+			try install -d -m "$mode" -o "$user" -g "$group" "$path"
+		done < <(grep -v '^[[:space:]]*#' "$conf")
+	done
 }
 
 integrate_live() {
@@ -730,6 +865,7 @@ integrate_live() {
 	if have systemd-sysusers && have systemd-tmpfiles; then
 		try systemd-sysusers "$sysusersdir/lindesk.conf"
 		try systemd-tmpfiles --create "$tmpfilesdir/lindesk.conf"
+		if ((with_telemetry)); then try systemd-tmpfiles --create "$tmpfilesdir/lindesk-telemetry.conf"; fi
 	else
 		manual_sysusers_tmpfiles
 	fi
@@ -746,14 +882,42 @@ integrate_live() {
 
 	post_install_check
 
-	if ((preflight_failed)); then
+	# The pre-lindesk state of the conflicting daemons (recorded once, kept on upgrades),
+	# whether lindesk was turned off with `lindeskctl off` (then it stays off), and the
+	# conflicting daemons themselves.
+	local ctl=$bindir/lindeskctl
+	if [[ -x $ctl ]] && ((!dry_run)); then
+		try "$ctl" setup snapshot --method script
+		if grep -q '"lindesk_enabled": false' /var/lib/lindesk/install-state.json 2>/dev/null; then
+			turned_off=1
+		fi
+	fi
+	((preflight_failed || turned_off)) || handle_conflicts
+
+	if ((preflight_failed || turned_off)); then
 		if ((systemd)); then try systemctl daemon-reload; fi
+		((turned_off)) && info "lindesk was turned off with 'lindeskctl off'; it stays off (turn it on: lindeskctl on)"
 	elif ((systemd)); then
 		try systemctl daemon-reload
 		if ((do_enable)); then
-			info "enabling lindeskd and the maintenance timer"
-			try systemctl enable --now "${ENABLE_SYSTEM[@]}"
-			try systemctl --global enable "${ENABLE_USER[@]}"
+			local sys=("${ENABLE_SYSTEM[@]}") usr=("${ENABLE_USER[@]}")
+			if ((with_telemetry)); then
+				sys+=("${ENABLE_TELEMETRY[@]}")
+				usr+=("${ENABLE_TELEMETRY[@]}")
+				info "enabling lindeskd and the telemetry maintenance timer"
+			else
+				info "enabling lindeskd"
+			fi
+			# A running broker picks up a newly installed (or removed) telemetry plugin.
+			if ((with_telemetry || telemetry_removed)) && systemctl is-active --quiet lindeskd.service; then
+				if ((telemetry_removed)); then
+					try systemctl try-restart lindeskd.service
+				else
+					try systemctl reload-or-restart lindeskd.service
+				fi
+			fi
+			try systemctl enable --now "${sys[@]}"
+			try systemctl --global enable "${usr[@]}"
 			start_sessions
 		fi
 	else
@@ -774,6 +938,39 @@ integrate_live() {
 		esac
 	fi
 	next_steps "$systemd"
+}
+
+# handle_conflicts: running or enabled conflicting priority daemons. Asked on a terminal,
+# else --disable-conflicts / --keep-conflicts (default keep, with a warning). Disabling is a
+# versioned change (lindeskctl setup conflicts --disable), so uninstall reverts it.
+handle_conflicts() {
+	have systemctl || return 0
+	local u name names=() a choice=$conflicts
+	for u in com.system76.Scheduler.service system76-scheduler.service ananicy-cpp.service ananicy.service \
+		uresourced.service; do
+		if systemctl is-active --quiet "$u" 2>/dev/null || systemctl is-enabled --quiet "$u" 2>/dev/null; then
+			case $u in
+			*ystem76*) name=system76-scheduler ;;
+			*) name=${u%.service} ;;
+			esac
+			[[ " ${names[*]} " == *" $name "* ]] || names+=("$name")
+		fi
+	done
+	((${#names[@]})) || return 0
+	if [[ $choice == ask ]]; then
+		choice=keep
+		if [[ -t 0 && -t 1 ]] && ((!dry_run)); then
+			read -r -p "${names[*]} also re-prioritise$([[ ${#names[@]} -eq 1 ]] && echo s) the foreground and will fight lindesk. Disable $([[ ${#names[@]} -eq 1 ]] && echo it || echo them)? [Y/n] " a || a=n
+			[[ -z $a || $a == [yY]* ]] && choice=disable
+		fi
+	fi
+	if [[ $choice == disable ]]; then
+		info "disabling ${names[*]} (a versioned change; undo: lindeskctl setup conflicts --restore)"
+		try "$bindir/lindeskctl" setup conflicts --disable --yes --origin install
+	else
+		warn "${names[*]} also re-prioritise(s) processes and will fight lindesk." \
+			"Disable (revertible): sudo lindeskctl setup conflicts --disable   Why: docs/src/guide/conflicts.md"
+	fi
 }
 
 # post_install_check: the daemons' own requirement checks (lindeskctl doctor --preflight,
@@ -821,6 +1018,10 @@ start_sessions() {
 			continue
 		fi
 		with_timeout systemctl --user -M "$user@" daemon-reload >/dev/null 2>&1 || true
+		# Already running: reload so it discovers a newly installed telemetry plugin.
+		if ((with_telemetry)); then
+			with_timeout systemctl --user -M "$user@" reload lindesk-session.service >/dev/null 2>&1 || true
+		fi
 		if with_timeout systemctl --user -M "$user@" start lindesk-session.service >/dev/null 2>&1; then
 			info "started lindesk-session for $user"
 			started_users+=("$user")
@@ -886,6 +1087,20 @@ What now:
   lindeskctl watch        the same, live
   lindeskctl doctor       what this machine supports, and what to fix
   lindeskctl calibrate    measure this machine's latency baseline (≈15 s, when idle)
+EOF
+	if ((with_telemetry)); then
+		cat <<EOF
+  lindeskctl query "select resource, avg(some_avg10) from pressure group by 1"
+                          SQL over what lindesk recorded (telemetry is installed)
+EOF
+	else
+		cat <<EOF
+
+  Telemetry is not installed (lindesk runs fine without it). Add it later with:
+    $0 --with-telemetry
+EOF
+	fi
+	cat <<EOF
 
   AI agents (MCP): claude mcp add lindesk -- lindesk-mcp
     (optional HTTP endpoint: systemctl --user enable --now lindesk-mcp.socket)
@@ -897,79 +1112,4 @@ What now:
 EOF
 }
 
-# ── uninstall ────────────────────────────────────────────────────────────────────────────
-do_uninstall() {
-	local m=$destdir$manifest line path sum
-	[[ -f $m ]] || die "no install manifest at $m. Was lindesk installed by a package? Use your package manager."
-	load_manifest
-
-	if ((live)); then
-		info "stopping lindesk and restoring all runtime changes"
-		if [[ -d /run/systemd/system ]]; then
-			try systemctl disable --now "${ENABLE_SYSTEM[@]}"
-			try systemctl --global disable "${ENABLE_USER[@]}"
-		fi
-		if have rc-service && [[ -e $sysconfdir/init.d/lindeskd ]]; then
-			try rc-service lindeskd stop
-			try rc-update del lindeskd default
-		fi
-		for path in /var/service/lindeskd /etc/runit/runsvdir/default/lindeskd; do
-			[[ -L $path ]] && try rm -f "$path"
-		done
-		if [[ -x $bindir/lindeskd ]]; then
-			if ((dry_run)); then
-				run "$bindir/lindeskd" --restore
-			else
-				with_timeout "$bindir/lindeskd" --restore </dev/null || warn "lindeskd --restore failed"
-			fi
-		fi
-	fi
-
-	info "removing files listed in $manifest"
-	local -a dirs=()
-	for line in "${old_manifest_lines[@]}"; do
-		case $line in
-		"f "*)
-			path=${line#f }
-			[[ $path == "$manifest" ]] && continue
-			if [[ -e $destdir$path || -L $destdir$path ]]; then run rm -f "$destdir$path"; fi
-			;;
-		"c "*)
-			line=${line#c }; sum=${line%% *}; path=${line#* }
-			[[ -f $destdir$path ]] || continue
-			if [[ $(sha256 "$destdir$path") == "$sum" ]]; then
-				run rm -f "$destdir$path"
-			else
-				info "keeping modified $path"
-			fi
-			;;
-		"d "*) dirs+=("${line#d }") ;;
-		esac
-	done
-	run rm -f "$m"
-	# Deepest first; only directories we created, and only if empty.
-	while IFS= read -r path; do
-		[[ -n $path && -d $destdir$path ]] || continue
-		if ((dry_run)); then
-			run rmdir "$destdir$path"
-		else
-			rmdir -- "$destdir$path" 2>/dev/null || info "keeping non-empty $path"
-		fi
-	done < <(printf '%s\n' "${dirs[@]}" | awk '{ print gsub("/", "/"), $0 }' | sort -rn | cut -d' ' -f2-)
-
-	if ((live)); then
-		if [[ -d /run/systemd/system ]]; then try systemctl daemon-reload; fi
-		cat <<EOF
-
-lindesk is uninstalled. Kept: /var/lib/lindesk (telemetry), the 'lindesk' group and any
-per-user data in ~/.local/state/lindesk. Remove them by hand if you no longer need them.
-Running session agents stop at your next logout.
-EOF
-	fi
-}
-
-if ((uninstall)); then
-	do_uninstall
-else
-	do_install
-fi
+do_install

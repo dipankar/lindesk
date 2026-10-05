@@ -217,6 +217,18 @@ pub fn validate(op: &ChangeOp, ctx: &GuardContext) -> Result<Risk, Rejection> {
                 ));
             }
         }
+        ChangeOp::ServiceState { unit, enabled, active } => {
+            let allowed = lindesk_core::conflicts::conflicting_units();
+            if !allowed.contains(&unit.as_str()) {
+                return Err(reject(
+                    Rule::ServiceNotAllowed,
+                    format!("{unit} is not a known conflicting priority daemon (allowed: {})", allowed.join(", ")),
+                ));
+            }
+            if enabled.is_none() && active.is_none() {
+                return Err(reject(Rule::ServiceNotAllowed, "service_state op changes nothing"));
+            }
+        }
         ChangeOp::CpuGovernor { governor } => {
             let avail = &ctx.hardware.features.governors_available;
             if !avail.contains(governor) {

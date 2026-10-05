@@ -10,12 +10,13 @@ use lindesk_core::config::Config;
 use lindesk_core::profile::{ProfileContext, ProfileSet};
 use lindesk_host::discovery::{self, DiscoveryOptions, RootOwned};
 use lindesk_plugin_api::{Hardware, Privilege, Resource};
-use lindesk_query::{Format, Lake};
 use lindesk_sys::requirements::{self, Component};
 use lindesk_sys::{Env, Roots, calibrate, doctor, hardware, psi, swap};
 
 use crate::backend::Local;
+
 use crate::ops::Scope;
+pub use lindesk_sys::telemetry::NOT_INSTALLED;
 
 /// The real machine.
 pub struct HostLocal {
@@ -83,12 +84,13 @@ impl HostLocal {
         hw
     }
 
-    fn lake(&self, scope: Scope) -> Result<Lake, String> {
+    /// The lake root of a scope (as the telemetry plugin and lindesk-data decide).
+    fn lake_root(&self, scope: Scope) -> Result<PathBuf, String> {
         let root = match scope {
             Scope::User => {
-                self.user_config().telemetry.dir.clone().unwrap_or_else(|| lindesk_query::default_root(false))
+                self.user_config().telemetry.dir.clone().unwrap_or_else(|| user_state_dir().join("telemetry"))
             }
-            Scope::System => lindesk_query::default_root(true),
+            Scope::System => PathBuf::from("/var/lib/lindesk/telemetry"),
         };
         if scope == Scope::System && std::fs::read_dir(&root).is_err() {
             return Err(format!(
@@ -97,7 +99,7 @@ impl HostLocal {
                 root.display()
             ));
         }
-        Lake::open(&root).map_err(|e| format!("opening the telemetry lake {}: {e}", root.display()))
+        Ok(root)
     }
 
     fn pressure(&self) -> Value {
@@ -192,9 +194,24 @@ impl Local for HostLocal {
         Ok(serde_json::to_value(&reqs.items)?)
     }
 
+    /// Runs `lindesk-data --root … query SQL --format json` (lindesk-mcp links no DuckDB).
+    /// [`NOT_INSTALLED`] when the optional lindesk-telemetry package isn't there.
     fn query(&self, scope: Scope, sql: &str) -> Result<Value, String> {
-        let lake = self.lake(scope)?;
-        let out = lake.query(sql, &Format::Json).map_err(|e| e.to_string())?;
+        let bin = lindesk_sys::telemetry::data_binary().ok_or_else(|| NOT_INSTALLED.to_string())?;
+        let root = self.lake_root(scope)?;
+        let o = std::process::Command::new(&bin)
+            .arg("--root")
+            .arg(&root)
+            .args(["query", sql, "--format", "json"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("running {}: {e}", bin.display()))?;
+        if !o.status.success() {
+            let err = String::from_utf8_lossy(&o.stderr);
+            let err = err.trim();
+            return Err(err.strip_prefix("lindesk-data: ").unwrap_or(err).to_string());
+        }
+        let out = String::from_utf8_lossy(&o.stdout);
         let out = out.trim();
         if out.is_empty() {
             return Ok(Value::Array(Vec::new()));

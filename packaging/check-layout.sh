@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Verify install.sh against packaging/expected-files.txt using stub binaries.
+# Verify install.sh against packaging/expected-files*.txt using stub binaries.
 #
 #   packaging/check-layout.sh                 # run all checks (no root, nothing touches /)
 #   packaging/check-layout.sh --stubs DIR     # only create stub binaries in DIR
-#   packaging/check-layout.sh --update        # regenerate expected-files.txt
+#   packaging/check-layout.sh --update        # regenerate the expected-files lists
 #
-# Checks: staged tree == expected list; a second run is idempotent; a modified config is
+# Two lists, one per package: expected-files.txt is the core (install.sh
+# --without-telemetry, the `lindesk` package) and expected-files-telemetry.txt the telemetry
+# component (install.sh --telemetry-only, the `lindesk-telemetry` package). The default
+# install is the core; --with-telemetry is both. Checks: each variant's staged tree == its list; switching between them in
+# place adds/removes exactly the telemetry files; a second run is idempotent; a modified config is
 # kept (the new default goes to .new); --uninstall leaves the destdir empty; a modified
 # config survives --uninstall; --dry-run writes nothing; non-default prefixes are rewritten;
 # the preflight passes, warns and fails on fake host trees, and the package scripts never
@@ -16,15 +20,24 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 INSTALL="$SCRIPT_DIR/install.sh"
 EXPECTED="$SCRIPT_DIR/expected-files.txt"
+EXPECTED_TELEMETRY="$SCRIPT_DIR/expected-files-telemetry.txt"
 
 # make_stubs DIR: dummy binaries. lindeskctl answers `completions <shell>` and `man <dir>`
 # like the real one is expected to, so the generated-file paths are exercised too.
 make_stubs() {
 	local dir=$1 b
 	mkdir -p "$dir"
-	for b in lindeskd lindesk-session lindesk-data lindesk-bench lindesk-mcp; do
+	for b in lindeskd lindesk-session lindesk-bench lindesk-mcp lindesk-telemetry-sink; do
 		printf '#!/bin/sh\n# stub %s\nexit 0\n' "$b" >"$dir/$b"
 	done
+	cat >"$dir/lindesk-data" <<'EOF'
+#!/bin/sh
+# stub lindesk-data
+case "$1" in
+man) mkdir -p "$2" && printf '.TH LINDESK-DATA 1\n' >"$2/lindesk-data.1" ;;
+esac
+exit 0
+EOF
 	cat >"$dir/lindeskctl" <<'EOF'
 #!/bin/sh
 # stub lindeskctl
@@ -62,27 +75,82 @@ bad() { printf 'FAIL %s\n' "$*"; fail=1; }
 
 quiet() { "$@" >"$work/log" 2>&1 || { cat "$work/log"; return 1; }; }
 
-quiet "$INSTALL" --destdir="$dest" --no-build
-listing "$dest" | grep -v ' /usr/share/lindesk/install-manifest.txt$' >"$work/actual"
+strip_manifest() { grep -v ' /usr/share/lindesk/install-manifest.txt$' || true; }
+
+# The two package layouts.
+quiet "$INSTALL" --destdir="$dest" --no-build --without-telemetry
+listing "$dest" | strip_manifest >"$work/core"
+rm -rf "${dest:?}"/*
+quiet "$INSTALL" --destdir="$dest" --no-build --no-manifest --telemetry-only
+listing "$dest" | strip_manifest >"$work/telemetry"
+rm -rf "${dest:?}"/*
 
 if [[ ${1:-} == --update ]]; then
 	{
-		echo "# Files and empty directories staged by: install.sh --destdir=DIR --no-build"
+		echo "# The lindesk (core) package: files and empty directories staged by"
+		echo "#   install.sh --destdir=DIR --no-build --without-telemetry"
 		echo "# with the stub binaries from check-layout.sh (mode, path; dirs end in /)."
 		echo "# The manifest (/usr/share/lindesk/install-manifest.txt) is omitted; it is"
 		echo "# skipped by --no-manifest, which packages use. Regenerate: check-layout.sh --update"
-		cat "$work/actual"
+		cat "$work/core"
 	} >"$EXPECTED"
-	echo "wrote $EXPECTED"
+	{
+		echo "# The lindesk-telemetry package: files staged by"
+		echo "#   install.sh --destdir=DIR --no-build --no-manifest --telemetry-only"
+		echo "# (mode, path). The default install.sh run installs both lists."
+		echo "# Regenerate: check-layout.sh --update"
+		cat "$work/telemetry"
+	} >"$EXPECTED_TELEMETRY"
+	echo "wrote $EXPECTED and $EXPECTED_TELEMETRY"
 	exit 0
 fi
 
-if diff -u <(grep -v '^#' "$EXPECTED") "$work/actual"; then ok "layout matches expected-files.txt"; else bad "layout differs from expected-files.txt"; fi
+if diff -u <(grep -v '^#' "$EXPECTED") "$work/core"; then ok "core layout matches expected-files.txt"; else bad "core layout differs from expected-files.txt"; fi
+if diff -u <(grep -v '^#' "$EXPECTED_TELEMETRY") "$work/telemetry"; then
+	ok "telemetry layout matches expected-files-telemetry.txt"
+else
+	bad "telemetry layout differs from expected-files-telemetry.txt"
+fi
+if grep -Eq 'lindesk-data|telemetry|compact' "$work/core"; then bad "the core package contains telemetry files"; else ok "the core package has no telemetry files"; fi
+
+# full: both lists, minus the directories that are empty only in the core layout.
+full_expected() {
+	grep -hv '^#' "$EXPECTED" "$EXPECTED_TELEMETRY" | LC_ALL=C sort -k2 |
+		awk '{ line[NR] = $0; path[NR] = $2 }
+			END {
+				for (i = 1; i <= NR; i++) {
+					keep = 1
+					if (path[i] ~ /\/$/) for (j = 1; j <= NR; j++) if (j != i && index(path[j], path[i]) == 1) keep = 0
+					if (keep) print line[i]
+				}
+			}'
+}
+full_expected >"$work/full-expected"
+
+quiet "$INSTALL" --destdir="$dest" --no-build
+listing "$dest" | strip_manifest >"$work/actual"
+if diff -u "$work/core" "$work/actual"; then ok "default install = core only"; else bad "default install differs from the core"; fi
+rm -rf "${dest:?}"/*
+quiet "$INSTALL" --destdir="$dest" --no-build --with-telemetry
+listing "$dest" | strip_manifest >"$work/actual"
+if diff -u "$work/full-expected" "$work/actual"; then ok "--with-telemetry = core + telemetry"; else bad "--with-telemetry differs from core + telemetry"; fi
 [[ -s $dest/usr/share/lindesk/install-manifest.txt ]] && ok "manifest written" || bad "manifest missing"
+
+# Switching in place: --without-telemetry removes exactly the telemetry files (and their
+# now-empty directories); --with-telemetry puts them back.
+quiet "$INSTALL" --destdir="$dest" --no-build --without-telemetry
+listing "$dest" | strip_manifest >"$work/switched"
+if diff -u "$work/core" "$work/switched"; then ok "--without-telemetry over a full install leaves the core layout"; else bad "--without-telemetry left a different tree"; fi
+quiet "$INSTALL" --destdir="$dest" --no-build --with-telemetry
+listing "$dest" | strip_manifest >"$work/switched"
+if diff -u "$work/actual" "$work/switched"; then ok "--with-telemetry restores the full layout"; else bad "--with-telemetry gave a different tree"; fi
+quiet "$INSTALL" --destdir="$dest" --no-build
+listing "$dest" | strip_manifest >"$work/switched"
+if diff -u "$work/actual" "$work/switched"; then ok "a plain re-run keeps installed telemetry"; else bad "a plain re-run dropped telemetry"; fi
 
 # Idempotent: same tree, no .new for an untouched config.
 quiet "$INSTALL" --destdir="$dest" --no-build
-listing "$dest" | grep -v ' /usr/share/lindesk/install-manifest.txt$' >"$work/actual2"
+listing "$dest" | strip_manifest >"$work/actual2"
 diff -q "$work/actual" "$work/actual2" >/dev/null && ok "second run is idempotent" || bad "second run changed the tree"
 
 # A modified config is preserved; the default goes to .new.
@@ -104,6 +172,12 @@ rm -rf "${dest:?}"/*
 quiet "$INSTALL" --destdir="$dest" --no-build
 quiet "$INSTALL" --destdir="$dest" --uninstall
 if [[ -z $(ls -A "$dest") ]]; then ok "uninstall leaves the destdir empty"; else bad "uninstall left: $(cd "$dest" && find . -mindepth 1)"; fi
+
+# Core-only install and uninstall.
+quiet "$INSTALL" --destdir="$dest" --no-build --without-telemetry
+quiet "$INSTALL" --destdir="$dest" --uninstall
+if [[ -z $(ls -A "$dest") ]]; then ok "core-only uninstall leaves the destdir empty"; else bad "core-only uninstall left files"; fi
+if "$INSTALL" --telemetry-only --no-build >/dev/null 2>&1; then bad "--telemetry-only on the live system"; else ok "--telemetry-only needs --destdir"; fi
 
 # Dry run touches nothing.
 quiet "$INSTALL" --destdir="$dest" --no-build --dry-run
@@ -221,7 +295,8 @@ rm -rf "${dest:?}"/*
 # Package scripts: a failing `lindeskctl doctor --preflight` never fails the transaction
 # and keeps lindeskd from starting. Run them with a stub PATH (lindeskctl at /usr/bin is
 # not ours to fake, so only syntax and the no-lindeskctl path are exercised here).
-for s in "$SCRIPT_DIR/debian/postinst" "$SCRIPT_DIR/aur/lindesk.install"; do
+for s in "$SCRIPT_DIR/debian/postinst" "$SCRIPT_DIR/aur/lindesk.install" "$SCRIPT_DIR/debian/telemetry/postinst" \
+	"$SCRIPT_DIR/debian/telemetry/prerm" "$SCRIPT_DIR/debian/telemetry/postrm" "$SCRIPT_DIR/aur/lindesk-telemetry.install"; do
 	sh -n "$s" && ok "${s#"$SCRIPT_DIR"/} parses (sh -n)" || bad "${s#"$SCRIPT_DIR"/} syntax"
 done
 if grep -q 'doctor --preflight --quiet' "$SCRIPT_DIR/debian/postinst" &&

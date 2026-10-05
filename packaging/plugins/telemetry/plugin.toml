@@ -1,0 +1,16 @@
+# The telemetry lake writer for lindeskd (system scope). Shipped by the optional
+# lindesk-telemetry package; without it lindesk runs without telemetry. Configure it with
+# [telemetry] and [plugins.telemetry] in /etc/lindesk/lindesk.toml.
+[plugin]
+name = "telemetry"
+version = "0.1.0"
+api = 1
+kinds = ["sink"]
+# /usr/lib/lindesk/lindesk-telemetry-sink, shared with ../telemetry-user.
+exec = "../../lindesk-telemetry-sink"
+privilege = "system"
+description = "Telemetry lake: pressure, per-unit usage, events and metrics as Vortex files, queried with lindesk-data"
+
+[timeouts]
+# sink.flush (only at shutdown) waits for the writer up to its flush_timeout (5 s).
+call_ms = 6000

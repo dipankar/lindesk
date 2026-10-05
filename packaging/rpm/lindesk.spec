@@ -28,7 +28,7 @@ BuildRequires:  make
 Requires:       dbus
 Requires:       polkit
 Recommends:     gnome-shell-extension-prefs
-Suggests:       duckdb
+Suggests:       lindesk-telemetry
 
 %description
 lindesk is a userspace resource governor that keeps the application you are
@@ -38,9 +38,22 @@ weights, uclamp and io.max, intervening only when the foreground suffers, and
 reverting every change on exit.
 
 This package contains the root broker (lindeskd), the per-user session agent
-(lindesk-session), the lindeskctl CLI, telemetry maintenance (lindesk-data),
-the benchmark tool, the MCP server for local AI agents (lindesk-mcp), the
-GNOME Shell extension and the KWin script.
+(lindesk-session), the lindeskctl CLI, the benchmark tool, the MCP server for
+local AI agents (lindesk-mcp), the GNOME Shell extension and the KWin script.
+Telemetry is the optional lindesk-telemetry package.
+
+%package        telemetry
+Summary:        Telemetry lake for lindesk (DuckDB + Vortex)
+Requires:       %{name} = %{version}-%{release}
+Suggests:       duckdb
+
+%description    telemetry
+lindesk's optional telemetry: pressure, per-unit usage, every decision and its
+reason, recorded into a hive-partitioned Vortex lake and queryable with SQL.
+Contains the telemetry plugin (lindesk-telemetry-sink, loaded by lindeskd and
+lindesk-session), lindesk-data (DuckDB: query, export, import, compaction,
+rollups, retention) and its hourly maintenance timers. Removing it leaves
+lindesk running without telemetry.
 
 %prep
 %autosetup -n %{name}-%{version}
@@ -48,7 +61,8 @@ GNOME Shell extension and the KWin script.
 %build
 %if %{undefined lindesk_bin_dir}
 cargo build --release --locked \
-    -p lindeskd -p lindesk-session -p lindeskctl -p lindesk-data -p lindesk-bench -p lindesk-mcp
+    -p lindeskd -p lindesk-session -p lindeskctl -p lindesk-bench -p lindesk-mcp \
+    -p lindesk-data -p lindesk-telemetry-sink
 %endif
 
 %install
@@ -57,15 +71,18 @@ export LINDESK_BIN_DIR=%{lindesk_bin_dir}
 %endif
 ./packaging/install.sh --destdir=%{buildroot} --prefix=%{_prefix} --sysconfdir=%{_sysconfdir} \
     --no-build --no-enable --no-manifest
-# Completions and man pages exist only if `lindeskctl completions|man` are supported.
+# Completions and man pages exist only if `lindeskctl completions|man` are supported;
+# lindesk-data.1 belongs to the telemetry subpackage.
 (cd %{buildroot} && find .%{_datadir}/bash-completion .%{_datadir}/zsh .%{_datadir}/fish \
-    .%{_mandir} -type f 2>/dev/null | sed 's|^\.||') > %{name}-generated.files || :
+    .%{_mandir} -type f ! -name 'lindesk-data.1*' 2>/dev/null | sed 's|^\.||') > %{name}-generated.files || :
+(cd %{buildroot} && find .%{_mandir} -type f -name 'lindesk-data.1*' 2>/dev/null | sed 's|^\.||') \
+    > %{name}-telemetry-generated.files || :
 
 %post
 %{_bindir}/systemd-sysusers %{_sysusersdir}/lindesk.conf >/dev/null 2>&1 || :
 %tmpfiles_create %{_tmpfilesdir}/lindesk.conf
-%systemd_post lindeskd.service lindesk-compact.timer
-%systemd_user_post lindesk-session.service lindesk-compact.timer lindesk-mcp.socket
+%systemd_post lindeskd.service
+%systemd_user_post lindesk-session.service lindesk-mcp.socket
 # Requirement check: never fails the transaction. On a hard failure (exit 1) lindeskd is
 # installed and enabled by the preset, but not started.
 lindesk_rc=0
@@ -88,7 +105,7 @@ if [ "$lindesk_rc" -eq 1 ]; then
 elif [ "$1" -eq 1 ] && [ -d /run/systemd/system ]; then
     # The preset enables lindeskd; start it on first install, and the session agent in
     # every graphical session that is already open.
-    systemctl start lindeskd.service lindesk-compact.timer >/dev/null 2>&1 || :
+    systemctl start lindeskd.service >/dev/null 2>&1 || :
     # tmo CMD...: run with a 15 s timeout when timeout(1) exists.
     tmo() { if command -v timeout >/dev/null 2>&1; then timeout 15 "$@"; else "$@"; fi; }
     # lindesk_start_sessions: start lindesk-session for every user logged in to a
@@ -122,8 +139,8 @@ fi
 :
 
 %preun
-%systemd_preun lindeskd.service lindesk-compact.timer
-%systemd_user_preun lindesk-session.service lindesk-compact.timer lindesk-mcp.socket lindesk-mcp.service
+%systemd_preun lindeskd.service
+%systemd_user_preun lindesk-session.service lindesk-mcp.socket lindesk-mcp.service
 if [ $1 -eq 0 ]; then
     # Undo every runtime change (the unit's ExecStopPost does this too under systemd).
     %{_bindir}/lindeskd --restore >/dev/null 2>&1 || :
@@ -131,8 +148,35 @@ fi
 
 %postun
 %systemd_postun_with_restart lindeskd.service
+%systemd_user_postun lindesk-session.service lindesk-mcp.socket lindesk-mcp.service
+
+%post telemetry
+%tmpfiles_create %{_tmpfilesdir}/lindesk-telemetry.conf
+%systemd_post lindesk-compact.timer
+%systemd_user_post lindesk-compact.timer
+if [ -d /run/systemd/system ]; then
+    systemctl start lindesk-compact.timer >/dev/null 2>&1 || :
+    # lindeskd loads the plugin on reload (SIGHUP); running session agents too.
+    if systemctl is-active --quiet lindeskd.service; then
+        systemctl reload-or-restart lindeskd.service >/dev/null 2>&1 || :
+    fi
+    for _u in $(loginctl list-users --no-legend 2>/dev/null | awk '{ print $2 }' | sort -u); do
+        timeout 15 systemctl --user -M "$_u@" reload lindesk-session.service >/dev/null 2>&1 || :
+    done
+fi
+:
+
+%preun telemetry
+%systemd_preun lindesk-compact.timer
+%systemd_user_preun lindesk-compact.timer
+
+%postun telemetry
 %systemd_postun lindesk-compact.timer
-%systemd_user_postun lindesk-session.service lindesk-compact.timer lindesk-mcp.socket lindesk-mcp.service
+%systemd_user_postun lindesk-compact.timer
+if [ "$1" -eq 0 ] && [ -d /run/systemd/system ]; then
+    # Run without the removed plugin.
+    systemctl try-restart lindeskd.service >/dev/null 2>&1 || :
+fi
 
 %files -f %{name}-generated.files
 %license %{_datadir}/licenses/%{name}/LICENSE-MIT
@@ -142,15 +186,10 @@ fi
 %{_bindir}/lindeskd
 %{_bindir}/lindesk-session
 %{_bindir}/lindeskctl
-%{_bindir}/lindesk-data
 %{_bindir}/lindesk-bench
 %{_bindir}/lindesk-mcp
 %{_unitdir}/lindeskd.service
-%{_unitdir}/lindesk-compact.service
-%{_unitdir}/lindesk-compact.timer
 %{_userunitdir}/lindesk-session.service
-%{_userunitdir}/lindesk-compact.service
-%{_userunitdir}/lindesk-compact.timer
 %{_userunitdir}/lindesk-mcp.service
 %{_userunitdir}/lindesk-mcp.socket
 %{_presetdir}/80-lindesk.preset
@@ -175,6 +214,23 @@ fi
 %dir %{_datadir}/kwin/scripts
 %{_datadir}/kwin/scripts/lindesk
 
+%files telemetry -f %{name}-telemetry-generated.files
+%{_bindir}/lindesk-data
+%{_prefix}/lib/lindesk/lindesk-telemetry-sink
+%{_prefix}/lib/lindesk/plugins/telemetry
+%{_prefix}/lib/lindesk/plugins/telemetry-user
+%{_unitdir}/lindesk-compact.service
+%{_unitdir}/lindesk-compact.timer
+%{_userunitdir}/lindesk-compact.service
+%{_userunitdir}/lindesk-compact.timer
+%{_presetdir}/81-lindesk-telemetry.preset
+%{_userpresetdir}/81-lindesk-telemetry.preset
+%{_tmpfilesdir}/lindesk-telemetry.conf
+
 %changelog
+* Mon Oct 05 2026 Dipankar Sarkar <me@dipankar.name> - 0.1.0-1
+- Split telemetry (lindesk-data, the telemetry plugin, compaction timers) into
+  the optional lindesk-telemetry subpackage
+
 * Sat Oct 03 2026 Dipankar Sarkar <me@dipankar.name> - 0.1.0-1
 - Initial package

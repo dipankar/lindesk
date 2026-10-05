@@ -18,7 +18,6 @@ lindesk-core.workspace = true
 lindesk-host.workspace = true
 lindesk-sys.workspace = true
 lindesk-ipc.workspace = true
-lindesk-query.workspace = true
 rmcp = { workspace = true, features = [
     "server",
     "macros",

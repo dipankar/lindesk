@@ -33,6 +33,16 @@ jobs:
           done
       - name: doctor smoke test
         run: cargo run -p lindeskctl -- doctor
+      # The core package links neither DuckDB nor Vortex/Arrow (docs/ARCHITECTURE.md,
+      # "Cargo feature hygiene"); only lindesk-data and lindesk-telemetry-sink may.
+      - name: Core binaries link no DuckDB or Vortex
+        run: |
+          for p in lindeskd lindesk-session lindeskctl lindesk-mcp lindesk-bench; do
+            if cargo tree -e normal -p "$p" --prefix none |
+              grep -E '^(duckdb|libduckdb-sys|vortex|vortex-[a-z-]+|arrow-[a-z]+|parquet|lindesk-store|lindesk-query) v'; then
+              echo "::error::$p depends on telemetry-only crates"; exit 1
+            fi
+          done
 
   packages:
     runs-on: ubuntu-24.04
@@ -45,45 +55,68 @@ jobs:
         run: |
           shellcheck packaging/install.sh packaging/build-packages.sh packaging/check-layout.sh \
             packaging/runit/lindeskd/run packaging/runit/lindeskd/finish packaging/openrc/lindeskd
-          shellcheck -s sh packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm
-          shellcheck -s bash packaging/aur/lindesk.install
+          shellcheck -s sh packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm \
+            packaging/debian/telemetry/postinst packaging/debian/telemetry/prerm packaging/debian/telemetry/postrm
+          shellcheck -s bash packaging/aur/lindesk.install packaging/aur/lindesk-telemetry.install
       - name: install.sh layout, idempotency and uninstall
         run: ./packaging/check-layout.sh
       # Build once on the runner; every package format stages these binaries through
       # install.sh. (Drop LINDESK_BIN_DIR to compile inside the Fedora/Arch containers.)
-      - name: Release binaries
-        run: cargo build --release --locked -p lindeskd -p lindesk-session -p lindeskctl -p lindesk-data -p lindesk-bench -p lindesk-mcp
+      - name: Release binaries (core, then telemetry)
+        run: |
+          cargo build --release --locked -p lindeskd -p lindesk-session -p lindeskctl -p lindesk-bench -p lindesk-mcp
+          cargo build --release --locked -p lindesk-data -p lindesk-telemetry-sink
+          ls -l target/release/lindesk*
       - name: Build .deb
         run: LINDESK_BIN_DIR=target/release ./packaging/build-packages.sh deb
       - name: Build RPM in Fedora
         run: docker run --rm -v "$PWD":/src -w /src -e LINDESK_BIN_DIR=/src/target/release fedora:latest ./packaging/build-packages.sh rpm
       - name: Build Arch package
         run: docker run --rm -v "$PWD":/src -w /src -e LINDESK_BIN_DIR=/src/target/release archlinux:latest ./packaging/build-packages.sh arch
-      - name: Install and remove the .deb in Ubuntu
+      - name: Install core, add and remove telemetry, purge (.deb in Ubuntu)
         run: |
           docker run --rm -v "$PWD/dist":/dist:ro ubuntu:24.04 sh -euxc '
             apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /dist/lindesk_*.deb
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get install -y -qq /dist/lindesk_*.deb
             lindeskctl --help >/dev/null
             lindesk-mcp --help >/dev/null
             getent group lindesk
-            test -d /var/lib/lindesk/telemetry
             test -d /var/lib/lindesk/changes
             test -f /usr/share/lindesk/profiles.d/00-balanced.toml
             test -f /usr/lib/systemd/user/lindesk-mcp.socket
             test -f /usr/share/man/man1/lindesk-mcp.1.gz
+            test ! -e /usr/bin/lindesk-data
             lindeskctl profile list --json >/dev/null
+            if lindeskctl query "select 1" 2>err; then exit 1; fi
+            grep -q "telemetry isn.t installed" err
+            lindeskctl doctor | grep -q "not installed"
+            apt-get install -y -qq /dist/lindesk-telemetry_*.deb
+            test -x /usr/lib/lindesk/lindesk-telemetry-sink
+            test -f /usr/lib/lindesk/plugins/telemetry/plugin.toml
+            test -f /usr/lib/lindesk/plugins/telemetry-user/plugin.toml
+            test -d /var/lib/lindesk/telemetry
+            test -f /usr/share/man/man1/lindesk-data.1.gz
+            lindeskctl query --backend native "select 1 as x" | grep -q 1
+            lindeskctl plugin list --system --all | grep -q telemetry
+            apt-get remove -y -qq lindesk-telemetry
+            test ! -e /usr/bin/lindesk-data
+            test -x /usr/bin/lindeskd
             apt-get purge -y -qq lindesk
             test ! -e /usr/bin/lindeskd'
       - name: Install and remove the RPM in Fedora
         run: |
           docker run --rm -v "$PWD/dist":/dist:ro fedora:latest sh -euxc '
-            dnf install -y -q $(ls /dist/lindesk-*.rpm | grep -v src.rpm)
+            dnf install -y -q $(ls /dist/lindesk-[0-9]*.rpm | grep -v src.rpm)
             lindeskctl --help >/dev/null
             lindesk-mcp --help >/dev/null
             getent group lindesk
             test -f /usr/share/lindesk/profiles.d/00-balanced.toml
-            dnf remove -y -q lindesk
+            test ! -e /usr/bin/lindesk-data
+            dnf install -y -q /dist/lindesk-telemetry-*.rpm
+            test -x /usr/bin/lindesk-data
+            test -f /usr/lib/lindesk/plugins/telemetry/plugin.toml
+            dnf remove -y -q lindesk-telemetry lindesk
             test ! -e /usr/bin/lindeskd'
       - uses: actions/upload-artifact@v4
         with:

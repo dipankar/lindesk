@@ -660,6 +660,10 @@ impl<H: Hooks> Loop<H> {
         for (k, v) in self.hooks.status_extra(&self.engine) {
             daemon.insert(k, v);
         }
+        let telemetry = super::setup::telemetry_status(
+            &self.engine,
+            &super::setup::default_telemetry_dir(self.engine.options().privilege),
+        );
         let system = pressure_json(&self.engine.system_pressure());
         let foreground = self.engine.foreground().and_then(|t| {
             let (cg, samples) = self.engine.target_pressure(t)?;
@@ -677,6 +681,9 @@ impl<H: Hooks> Loop<H> {
             (now - self.started).max(0) / 1000
         ));
         text.push_str(&format!("pressure:   {}\n", pressure_text(&self.engine.system_pressure())));
+        text.push_str(&super::setup::telemetry_text(&telemetry));
+        text.push('\n');
+        daemon.insert("telemetry".into(), telemetry);
         json!({
             "status": status,
             "daemon": daemon,

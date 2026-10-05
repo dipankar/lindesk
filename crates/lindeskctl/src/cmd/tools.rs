@@ -29,7 +29,6 @@ pub fn completions(shell: ShellArg, w: &mut dyn std::io::Write) {
 pub const DAEMON_PAGES: &[(&str, &str)] = &[
     ("lindeskd.8", include_str!("../../man/lindeskd.8")),
     ("lindesk-session.1", include_str!("../../man/lindesk-session.1")),
-    ("lindesk-data.1", include_str!("../../man/lindesk-data.1")),
     ("lindesk-mcp.1", include_str!("../../man/lindesk-mcp.1")),
 ];
 
@@ -141,6 +140,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let files = man(d.path()).unwrap();
         let names: Vec<String> = files.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert!(!names.iter().any(|n| n == "lindesk-data.1"), "lindesk-data ships its own page");
         for n in [
             "lindeskctl.1",
             "lindeskctl-doctor.1",
@@ -149,7 +149,6 @@ mod tests {
             "lindeskctl-data-delete.1",
             "lindeskd.8",
             "lindesk-session.1",
-            "lindesk-data.1",
             "lindesk-mcp.1",
             "lindeskctl-profile.1",
             "lindeskctl-profile-use.1",

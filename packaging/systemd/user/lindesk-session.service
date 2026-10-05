@@ -8,6 +8,8 @@ After=graphical-session.target
 Type=dbus
 BusName=org.lindesk.QoS1
 ExecStart=/usr/bin/lindesk-session
+# SIGHUP re-reads the config and loads newly installed plugins (e.g. lindesk-telemetry).
+ExecReload=/bin/kill -HUP $MAINPID
 ExecStopPost=/usr/bin/lindesk-session --restore
 Restart=on-failure
 RestartSec=2s

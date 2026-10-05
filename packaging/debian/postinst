@@ -6,8 +6,8 @@
 # hard failure lindeskd is installed and enabled but not started.
 set -e
 
-SYSTEM_UNITS="lindeskd.service lindesk-compact.timer"
-USER_UNITS="lindesk-session.service lindesk-compact.timer"
+SYSTEM_UNITS="lindeskd.service"
+USER_UNITS="lindesk-session.service"
 
 # tmo CMD...: run with a 15 s timeout when timeout(1) exists.
 tmo() { if command -v timeout >/dev/null 2>&1; then timeout 15 "$@"; else "$@"; fi; }
@@ -111,6 +111,9 @@ configure | abort-upgrade | abort-deconfigure | abort-remove)
 		echo "lindesk:   gnome-extensions enable lindesk@lindesk.org   (on Wayland, log out and back in first)"
 		echo "lindesk: KDE: enable 'lindesk' in System Settings > Window Management > KWin Scripts"
 		echo "lindesk: AI agents (MCP): claude mcp add lindesk -- lindesk-mcp"
+		if [ ! -x /usr/bin/lindesk-data ]; then
+			echo "lindesk: telemetry (SQL over what lindesk records) is optional: apt install lindesk-telemetry"
+		fi
 	fi
 	;;
 esac

@@ -659,15 +659,10 @@ pub fn desktop(env: &Env) -> Desktop {
     Desktop { kind, session, name }
 }
 
-/// Daemons that also adjust priorities, cgroups or CPU weights.
-/// (auto-cpufreq only tunes frequency governors and is deliberately not listed.)
-pub const KNOWN_CONFLICTS: &[(&str, &[&str], &[&str])] = &[
-    ("system76-scheduler", &["com.system76.Scheduler.service", "system76-scheduler.service"], &["system76-scheduler"]),
-    ("ananicy-cpp", &["ananicy-cpp.service"], &["ananicy-cpp"]),
-    ("ananicy", &["ananicy.service"], &["ananicy"]),
-    ("uresourced", &["uresourced.service"], &["uresourced"]),
-    ("gamemode", &["gamemoded.service"], &["gamemoded"]),
-];
+/// Daemons that also adjust priorities, cgroups or CPU weights (`lindesk_core::conflicts`;
+/// gamemode is listed but compatible). auto-cpufreq only tunes frequency governors and is
+/// deliberately not listed.
+pub const KNOWN_CONFLICTS: &[(&str, &[&str], &[&str])] = lindesk_core::conflicts::PRIORITY_DAEMONS;
 
 fn conflicts(roots: &Roots) -> Vec<Conflict> {
     let unit_dirs = [

@@ -157,23 +157,41 @@ fn telemetry_finding(system: bool) -> (Finding, serde_json::Value) {
     let config = paths::load_config(&paths::config_path(system)).ok();
     let root = paths::lake_root(None, system, config.as_ref());
     let enabled = config.as_ref().is_none_or(|c| c.telemetry.enabled);
+    let installed = lindesk_sys::telemetry::installed();
     let check = if system { "Telemetry (system)" } else { "Telemetry" };
     let size = paths::dir_size(&root);
     let max = config.as_ref().map(|c| c.telemetry.retention.max_size).unwrap_or(2 << 30);
-    let info = json!({"dir": root, "bytes": size, "enabled": enabled, "max_size": max, "exists": root.is_dir()});
-    let f = if !enabled {
+    let info = json!({
+        "installed": installed, "dir": root, "bytes": size, "enabled": enabled, "max_size": max, "exists": root.is_dir()
+    });
+    let f = if !installed {
+        let left = if root.is_dir() && size > 0 {
+            format!("; {} left in {}", bytes(size), tilde(&root))
+        } else {
+            String::new()
+        };
+        finding(
+            Severity::Info,
+            check,
+            format!("not installed (optional){left}"),
+            Some(
+                "to record history: sudo apt install lindesk-telemetry (or ./packaging/install.sh --with-telemetry)"
+                    .into(),
+            ),
+        )
+    } else if !enabled {
         finding(Severity::Info, check, "disabled (telemetry.enabled = false)", None)
     } else if !root.is_dir() {
-        finding(Severity::Info, check, format!("no data yet ({})", tilde(&root)), None)
+        finding(Severity::Info, check, format!("installed, no data yet ({})", tilde(&root)), None)
     } else if max > 0 && size > max + max / 10 {
         finding(
             Severity::Warn,
             check,
-            format!("{} in {} (over max_size {})", bytes(size), tilde(&root), bytes(max)),
+            format!("installed, {} in {} (over max_size {})", bytes(size), tilde(&root), bytes(max)),
             Some("lindesk-compact.timer prunes it; run now: lindeskctl data prune".into()),
         )
     } else {
-        finding(Severity::Ok, check, format!("{} in {}", bytes(size), tilde(&root)), None)
+        finding(Severity::Ok, check, format!("installed, {} in {}", bytes(size), tilde(&root)), None)
     };
     (f, info)
 }
@@ -224,7 +242,7 @@ pub fn service_findings(p: &Probe) -> (Vec<Finding>, serde_json::Value) {
     v.push(user);
     let mut tele = json!({"user": user_info});
     let sys_root = paths::lake_root(None, true, None);
-    if std::fs::read_dir(&sys_root).is_ok() {
+    if lindesk_sys::telemetry::installed() && std::fs::read_dir(&sys_root).is_ok() {
         let (f, info) = telemetry_finding(true);
         v.push(f);
         tele["system"] = info;

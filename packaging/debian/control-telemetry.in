@@ -1,0 +1,21 @@
+Package: lindesk-telemetry
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Dipankar Sarkar <me@dipankar.name>
+Installed-Size: @INSTALLED_SIZE@
+Depends: lindesk (= @VERSION@)@SHLIBS_DEPENDS@
+Suggests: duckdb
+Section: admin
+Priority: optional
+Homepage: https://github.com/dipankar/lindesk
+Description: telemetry lake for lindesk (DuckDB + Vortex)
+ lindesk is a userspace resource governor that keeps the application you are
+ using responsive while background work runs. This optional package adds its
+ telemetry: pressure, per-unit usage, every decision and its reason, recorded
+ into a hive-partitioned Vortex lake and queryable with SQL.
+ .
+ It contains the telemetry plugin (lindesk-telemetry-sink, loaded by lindeskd
+ and lindesk-session, writing at idle I/O priority), lindesk-data (DuckDB:
+ query, export, import, compaction, rollups, retention) and its hourly
+ maintenance timers. lindeskctl query/data/simulate and lindesk-mcp use it when
+ it is installed. Removing it leaves lindesk running without telemetry.

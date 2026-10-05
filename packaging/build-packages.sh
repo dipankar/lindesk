@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Build lindesk packages into dist/.
+# Build lindesk packages into dist/: for each format two packages, `lindesk` (the core:
+# lindeskd, lindesk-session, lindeskctl, lindesk-mcp, lindesk-bench; no DuckDB or Vortex)
+# and `lindesk-telemetry` (lindesk-data, the telemetry plugin, the compaction timers;
+# depends on lindesk).
 #
 #   packaging/build-packages.sh deb      # .deb with dpkg-deb (Debian/Ubuntu host, or a container)
 #   packaging/build-packages.sh rpm      # .rpm with rpmbuild (Fedora container)
 #   packaging/build-packages.sh arch     # .pkg.tar.zst with makepkg (Arch container)
 #   packaging/build-packages.sh all
 #
-# Every format stages files with packaging/install.sh --destdir, so the layout is identical.
+# Every format stages files with packaging/install.sh --destdir (--without-telemetry for the
+# core, --telemetry-only for lindesk-telemetry), so the layout is identical.
 # rpm and arch run natively when rpmbuild/makepkg exist, or inside fedora:latest /
 # archlinux:latest via docker otherwise. CI runs them in those containers directly:
 #   docker run --rm -v "$PWD":/src -w /src fedora:latest ./packaging/build-packages.sh rpm
@@ -25,7 +29,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 PKG=$ROOT/packaging
 DIST=${LINDESK_DIST:-$ROOT/dist}
-BINARIES=(lindeskd lindesk-session lindeskctl lindesk-data lindesk-bench lindesk-mcp)
+BINARIES=(lindeskd lindesk-session lindeskctl lindesk-bench lindesk-mcp lindesk-data lindesk-telemetry-sink)
 DEB_IMAGE=${LINDESK_DEB_IMAGE:-debian:stable-slim}
 RPM_IMAGE=${LINDESK_RPM_IMAGE:-fedora:latest}
 ARCH_IMAGE=${LINDESK_ARCH_IMAGE:-archlinux:latest}
@@ -132,38 +136,57 @@ build_deb() {
 		fi
 	fi
 	resolve_bins
-	local arch work stage f size shlibs="" elves=()
+	local arch work
 	arch=$(dpkg --print-architecture 2>/dev/null || dpkg-architecture -qDEB_HOST_ARCH)
 	scratch work
-	stage=$work/root
+	mkdir -p "$DIST"
+	DEBS=()
+	deb_package lindesk "$work" "$arch" --without-telemetry
+	deb_package lindesk-telemetry "$work" "$arch" --telemetry-only
+	finish "${DEBS[@]}"
+}
 
+# deb_package NAME WORK ARCH INSTALL_OPT: stage NAME with install.sh INSTALL_OPT and build
+# it into $DIST; appends the .deb to DEBS.
+deb_package() {
+	local name=$1 work=$2 arch=$3 opt=$4 stage f size shlibs="" elves=() scripts control
+	stage=$work/$name
+	if [[ $name == lindesk ]]; then
+		scripts=$PKG/debian
+		control=$PKG/debian/control.in
+	else
+		scripts=$PKG/debian/telemetry
+		control=$PKG/debian/control-telemetry.in
+	fi
 	LINDESK_BIN_DIR=$BIN_DIR "$PKG/install.sh" --destdir="$stage" --prefix=/usr --sysconfdir=/etc \
-		--no-build --no-enable --no-manifest >"$work/install.log" || { cat "$work/install.log"; exit 1; }
-	install -D -m 0644 "$PKG/debian/copyright" "$stage/usr/share/doc/lindesk/copyright"
+		--no-build --no-enable --no-manifest "$opt" >"$work/$name-install.log" ||
+		{ cat "$work/$name-install.log"; exit 1; }
+	install -D -m 0644 "$PKG/debian/copyright" "$stage/usr/share/doc/$name/copyright"
 
 	install -d -m 0755 "$stage/DEBIAN"
-	for f in postinst prerm postrm; do install -m 0755 "$PKG/debian/$f" "$stage/DEBIAN/$f"; done
-	(cd "$stage" && find etc -type f | sort | sed 's|^|/|') >"$stage/DEBIAN/conffiles"
+	for f in postinst prerm postrm; do install -m 0755 "$scripts/$f" "$stage/DEBIAN/$f"; done
+	if [[ -d $stage/etc ]]; then
+		(cd "$stage" && find etc -type f | sort | sed 's|^|/|') >"$stage/DEBIAN/conffiles"
+	fi
 	(cd "$stage" && find usr -type f -print0 | sort -z | xargs -0 md5sum) >"$stage/DEBIAN/md5sums"
 	size=$(du -sk --exclude=DEBIAN "$stage" | cut -f1)
 
 	# Shared-library dependencies of the real (ELF) binaries; stubs have none.
-	for f in "$stage"/usr/bin/*; do is_elf "$f" && elves+=("$f"); done
+	while IFS= read -r -d '' f; do is_elf "$f" && elves+=("$f"); done < <(find "$stage/usr" -type f -perm -0100 -print0)
 	if ((${#elves[@]})) && have dpkg-shlibdeps; then
-		mkdir -p "$work/shlibs/debian"
-		printf 'Source: lindesk\n\nPackage: lindesk\nArchitecture: any\n' >"$work/shlibs/debian/control"
-		shlibs=$(cd "$work/shlibs" && dpkg-shlibdeps -O "${elves[@]}" 2>/dev/null |
+		mkdir -p "$work/shlibs-$name/debian"
+		printf 'Source: lindesk\n\nPackage: %s\nArchitecture: any\n' "$name" >"$work/shlibs-$name/debian/control"
+		shlibs=$(cd "$work/shlibs-$name" && dpkg-shlibdeps -O "${elves[@]}" 2>/dev/null |
 			sed -n 's/^shlibs:Depends=//p') || shlibs=""
 	fi
 
-	sed -e "s/@VERSION@/$DEB_VERSION/" -e "s/@ARCH@/$arch/" -e "s/@INSTALLED_SIZE@/$size/" \
+	sed -e "s/@VERSION@/$DEB_VERSION/g" -e "s/@ARCH@/$arch/" -e "s/@INSTALLED_SIZE@/$size/" \
 		-e "s/@SHLIBS_DEPENDS@/${shlibs:+, $shlibs}/" \
-		"$PKG/debian/control.in" >"$stage/DEBIAN/control"
+		"$control" >"$stage/DEBIAN/control"
 
-	mkdir -p "$DIST"
-	local out=$DIST/lindesk_${DEB_VERSION}_${arch}.deb
-	dpkg-deb --build --root-owner-group -Zxz "$stage" "$out" >/dev/null
-	finish "$out"
+	local deb=$DIST/${name}_${DEB_VERSION}_${arch}.deb
+	dpkg-deb --build --root-owner-group -Zxz "$stage" "$deb" >/dev/null
+	DEBS+=("$deb")
 }
 
 # ── rpm ──────────────────────────────────────────────────────────────────────────────────
@@ -207,10 +230,9 @@ build_arch() {
 	# The archlinux image ships makepkg (part of pacman) but not fakeroot/base-devel.
 	if ! have makepkg || ! have fakeroot || { [[ -z ${LINDESK_BIN_DIR:-} ]] && ! have cargo; }; then
 		if can_install_deps && have pacman; then
-			local deps=(base-devel namcap)
-			# The PKGBUILD's depends (makepkg checks them) and, for a real build, makedepends.
-			# shellcheck disable=SC1091,SC2154
-			mapfile -t -O 2 deps < <(source "$PKG/aur/PKGBUILD"; printf '%s\n' "${depends[@]}")
+			# The split packages' runtime depends (makepkg checks them) and, for a real
+			# build, the PKGBUILD's makedepends.
+			local deps=(base-devel namcap dbus polkit systemd gcc-libs glibc)
 			# shellcheck disable=SC1091,SC2154
 			[[ -z ${LINDESK_BIN_DIR:-} ]] &&
 				mapfile -t -O "${#deps[@]}" deps < <(source "$PKG/aur/PKGBUILD"; printf '%s\n' "${makedepends[@]}")
@@ -224,7 +246,7 @@ build_arch() {
 	fi
 	local work as=()
 	scratch work
-	cp "$PKG/aur/PKGBUILD" "$PKG/aur/lindesk.install" "$work/"
+	cp "$PKG/aur/PKGBUILD" "$PKG/aur/lindesk.install" "$PKG/aur/lindesk-telemetry.install" "$work/"
 	# makepkg refuses to run as root.
 	if [[ $(id -u) -eq 0 ]]; then
 		id builder >/dev/null 2>&1 || useradd -m builder
@@ -235,9 +257,9 @@ build_arch() {
 
 	# Build the local tree instead of the release tarball named in the PKGBUILD.
 	source_tarball "$work/lindesk-$ARCH_VERSION.tar.gz" "lindesk-$ARCH_VERSION"
-	# shellcheck disable=SC2016  # $pkgname/$pkgver are for makepkg
+	# shellcheck disable=SC2016  # $pkgbase/$pkgver are for makepkg
 	sed -i -e "s/^pkgver=.*/pkgver=$ARCH_VERSION/" \
-		-e 's|^source=.*|source=("$pkgname-$pkgver.tar.gz")|' "$work/PKGBUILD"
+		-e 's|^source=.*|source=("$pkgbase-$pkgver.tar.gz")|' "$work/PKGBUILD"
 	if [[ -n ${LINDESK_BIN_DIR:-} ]]; then
 		# Prebuilt binaries: skip cargo; install.sh picks them up from LINDESK_BIN_DIR.
 		printf '\nmakedepends=()\nprepare() { :; }\nbuild() { :; }\ncheck() { :; }\n' >>"$work/PKGBUILD"
@@ -250,18 +272,21 @@ build_arch() {
 		cat "$work/makepkg.log"
 		exit 1
 	}
-	local pkg
-	pkg=$(find "$work/out" -name 'lindesk-*.pkg.tar.*' ! -name '*-debug-*' | head -n1)
-	[[ -n $pkg ]] || die "makepkg produced no package"
+	local pkgs=() pkg out=()
+	mapfile -t pkgs < <(find "$work/out" -name 'lindesk-*.pkg.tar.*' ! -name '*-debug-*' | sort)
+	((${#pkgs[@]} == 2)) || die "makepkg produced ${#pkgs[@]} packages, expected lindesk and lindesk-telemetry"
 	if have namcap; then
 		info "namcap"
 		namcap "$PKG/aur/PKGBUILD" || true
-		namcap "$pkg" || true
+		for pkg in "${pkgs[@]}"; do namcap "$pkg" || true; done
 	fi
 	mkdir -p "$DIST"
-	cp -f "$pkg" "$DIST/"
+	for pkg in "${pkgs[@]}"; do
+		cp -f "$pkg" "$DIST/"
+		out+=("$DIST/${pkg##*/}")
+	done
 	cp -f "$work/SRCINFO" "$DIST/.SRCINFO"
-	finish "$DIST/${pkg##*/}" "$DIST/.SRCINFO"
+	finish "${out[@]}" "$DIST/.SRCINFO"
 }
 
 case ${1:-} in

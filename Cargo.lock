@@ -2338,7 +2338,6 @@ dependencies = [
  "libc",
  "lindesk-ipc",
  "lindesk-plugin-api",
- "lindesk-store",
  "lindesk-sys",
  "serde",
  "serde_json",
@@ -2357,7 +2356,6 @@ dependencies = [
  "lindesk-core",
  "lindesk-host",
  "lindesk-plugin-api",
- "lindesk-store",
  "lindesk-sys",
  "rustix 1.1.5",
  "serde",
@@ -2411,6 +2409,7 @@ dependencies = [
  "clap",
  "humantime",
  "lindesk-core",
+ "lindesk-plugin-api",
  "lindesk-query",
  "lindesk-store",
  "rustix 1.1.5",
@@ -2467,7 +2466,6 @@ dependencies = [
  "lindesk-host",
  "lindesk-ipc",
  "lindesk-plugin-api",
- "lindesk-query",
  "lindesk-sys",
  "rmcp",
  "schemars",
@@ -2580,6 +2578,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "lindesk-telemetry-sink"
+version = "0.1.0"
+dependencies = [
+ "lindesk-core",
+ "lindesk-host",
+ "lindesk-plugin",
+ "lindesk-plugin-api",
+ "lindesk-store",
+ "lindesk-sys",
+ "rustix 1.1.5",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lindeskctl"
 version = "0.1.0"
 dependencies = [
@@ -2598,7 +2613,6 @@ dependencies = [
  "lindesk-host",
  "lindesk-ipc",
  "lindesk-plugin-api",
- "lindesk-query",
  "lindesk-store",
  "lindesk-sys",
  "ratatui",

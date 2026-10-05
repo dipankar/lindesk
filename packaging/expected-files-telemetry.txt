@@ -1,0 +1,16 @@
+# The lindesk-telemetry package: files staged by
+#   install.sh --destdir=DIR --no-build --no-manifest --telemetry-only
+# (mode, path). The default install.sh run installs both lists.
+# Regenerate: check-layout.sh --update
+755 /usr/bin/lindesk-data
+755 /usr/lib/lindesk/lindesk-telemetry-sink
+644 /usr/lib/lindesk/plugins/telemetry-user/plugin.toml
+644 /usr/lib/lindesk/plugins/telemetry/plugin.toml
+644 /usr/lib/systemd/system-preset/81-lindesk-telemetry.preset
+644 /usr/lib/systemd/system/lindesk-compact.service
+644 /usr/lib/systemd/system/lindesk-compact.timer
+644 /usr/lib/systemd/user-preset/81-lindesk-telemetry.preset
+644 /usr/lib/systemd/user/lindesk-compact.service
+644 /usr/lib/systemd/user/lindesk-compact.timer
+644 /usr/lib/tmpfiles.d/lindesk-telemetry.conf
+644 /usr/share/man/man1/lindesk-data.1.gz

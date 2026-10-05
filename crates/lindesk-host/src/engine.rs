@@ -256,6 +256,8 @@ pub struct Engine {
     prev_step: Option<TimestampMs>,
     last_now: TimestampMs,
     state_dirty: bool,
+    /// Observe-only (`set_paused`): sensing and policy run, nothing is applied.
+    paused: bool,
 }
 
 impl std::fmt::Debug for Engine {
@@ -290,6 +292,7 @@ impl Engine {
             queues,
             overrides,
             applied: AppliedState::default(),
+            paused: false,
             targets: BTreeMap::new(),
             explicit: BTreeMap::new(),
             foreground: None,
@@ -345,9 +348,40 @@ impl Engine {
         Ok(())
     }
 
-    /// True when actions are recorded but never applied.
+    /// True when actions are recorded but never applied (`[general] dry_run`, or paused).
     pub fn dry_run(&self) -> bool {
-        self.config.general.dry_run
+        self.config.general.dry_run || self.paused
+    }
+
+    /// True while paused (see [`Engine::set_paused`]).
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Pause: revert every setting lindesk applied, then keep sensing, classifying and
+    /// deciding while applying nothing (as in dry-run; action events say "paused: ").
+    /// Resume: forget what was only recorded while paused, so the next step applies the
+    /// current decisions for real. Returns the restore actions of a pause.
+    pub fn set_paused(&mut self, paused: bool) -> Vec<ActionReport> {
+        if paused == self.paused {
+            return Vec::new();
+        }
+        let mut reports = Vec::new();
+        if paused {
+            reports = self.restore_all();
+            self.paused = true;
+        } else {
+            self.paused = false;
+            if !self.config.general.dry_run {
+                self.applied = AppliedState::default();
+                self.state_dirty = true;
+                self.autosave();
+            }
+        }
+        for st in self.targets.values_mut() {
+            st.dirty = true;
+        }
+        reports
     }
 
     /// A handle for pushing events from other threads (D-Bus handlers, adapters).
@@ -883,7 +917,8 @@ impl Engine {
                     report.outcome = ActionOutcome::DryRun;
                     self.applied.record_apply(&target, &setting, None, &provenance, now);
                     // Telemetry must not claim a dry-run action really happened.
-                    provenance.reason = format!("dry run: {}", provenance.reason);
+                    let why = if self.paused && !self.config.general.dry_run { "paused" } else { "dry run" };
+                    provenance.reason = format!("{why}: {}", provenance.reason);
                     cx.host_events.push(Event::ActionApplied { ts: now, target: target.clone(), setting, provenance });
                     self.after_change(&target, now);
                     cx.actions.push(report);

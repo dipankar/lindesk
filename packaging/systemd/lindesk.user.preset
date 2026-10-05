@@ -1,6 +1,5 @@
-# Enable the per-user lindesk session agent and its maintenance timer by default.
+# Enable the per-user lindesk session agent by default.
 enable lindesk-session.service
-enable lindesk-compact.timer
 # The MCP HTTP endpoint is opt-in: systemctl --user enable --now lindesk-mcp.socket
 # (stdio clients such as `claude mcp add lindesk -- lindesk-mcp` need no unit).
 disable lindesk-mcp.socket

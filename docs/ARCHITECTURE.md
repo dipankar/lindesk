@@ -10,7 +10,53 @@ when you change one of these contracts.
 | `lindeskd` | root, system service | Single "brain". Probe, PSI triggers, plugin host (system plugins), policy, actuation of system units, iocost. Sends per-uid desired state to session agents. |
 | `lindesk-session` | user, `systemd --user` service | Foreground adapters (X11, COSMIC built in; GNOME/KWin push over D-Bus), maps pid/app_id → user unit, applies user-unit settings via user systemd, hosts user plugins, writes the user's telemetry store. Runs the whole pipeline locally (user scope only) when no broker exists. |
 | `lindeskctl` | user/root CLI | doctor, status/watch, explain, run/set, plugin tooling, simulate, query/data, bench. |
-| `lindesk-data` | oneshot (timer) | Telemetry compaction, rollups, retention. |
+| `lindesk-mcp` | user, stdio or socket | MCP server for local agents (CONTROL-PLANE.md). |
+| `lindesk-bench` | user CLI | Foreground latency probe, A/B harness. |
+| `lindesk-telemetry-sink` | plugin process of each daemon | *lindesk-telemetry.* The `telemetry` sink plugin: writes the Vortex lake. |
+| `lindesk-data` | CLI and oneshot (timer) | *lindesk-telemetry.* The lake's reader and maintainer (DuckDB): query, export, import-bench, compaction, rollups, retention, delete. |
+
+## Packages and what links what
+
+Two packages. **`lindesk`** (core) is everything above except the last two rows and links
+**no DuckDB, no Vortex, no Arrow**. **`lindesk-telemetry`** (optional, `Depends: lindesk`)
+ships `lindesk-data`, `lindesk-telemetry-sink` with two manifests
+(`/usr/lib/lindesk/plugins/telemetry/`, `privilege = "system"`, for `lindeskd`;
+`.../telemetry-user/`, `privilege = "user"`, for `lindesk-session`; both run
+`/usr/lib/lindesk/lindesk-telemetry-sink`), the `lindesk-compact` system and user units
+and timers, their presets and tmpfiles, and `lindesk-data(1)`. The layout is defined once
+in `packaging/install.sh` (default and `--without-telemetry` = core, `--with-telemetry` = both,
+`--telemetry-only` = the telemetry package) and checked by `packaging/check-layout.sh` against
+`expected-files.txt` / `expected-files-telemetry.txt`.
+
+Telemetry is a plugin like any other: the daemons discover `telemetry` from the plugin
+directories, and a daemon without it runs exactly the same pipeline with no sink (the engine
+then builds no records at all). The core tools reach the lake only by running
+`lindesk-data` (found through `$LINDESK_DATA`, next to their own executable, or on `PATH`;
+`lindesk_sys::telemetry`); without it they report `telemetry isn't installed: sudo apt
+install lindesk-telemetry (or ./packaging/install.sh --with-telemetry)`, and
+`lindeskctl doctor`/`status` and the daemons' status (`daemon.telemetry`) say "not
+installed". The contract with `lindesk-data` is its command line: `--root`, `--config`,
+`--backend`, `--json` reports, `query SQL --format json`, `export --table T --from MS --to
+MS` (JSON lines, `ts` in epoch ms), `import-bench RESULTS.json`, `shell`; errors are
+`lindesk-data: <message>` on stderr with exit 1.
+
+### Cargo feature hygiene
+
+Which binary links what (normal dependencies; dev-dependencies never reach a binary). CI
+fails when a core binary's `cargo tree -e normal` contains a crate of the last four columns.
+
+| Binary (package) | lindesk-store | lindesk-query | vortex / arrow | duckdb (bundled) | Notes |
+|---|---|---|---|---|---|
+| `lindeskd` (core) | – | – | – | – | zbus, tokio; built-in plugins have no sink |
+| `lindesk-session` (core) | – | – | – | – | + x11rb, wayland (adapters) |
+| `lindeskctl` (core) | – | – | – | – | + ratatui (`watch`); `query`/`data`/`simulate` run `lindesk-data` |
+| `lindesk-mcp` (core) | – | – | – | – | + rmcp, axum; `query`/`recommendations` run `lindesk-data` |
+| `lindesk-bench` (core) | – | – | – | – | stores runs with `lindesk-data import-bench` |
+| `lindesk-telemetry-sink` (telemetry) | ✓ | – | ✓ | – | `lindesk-plugin` SDK; writer only |
+| `lindesk-data` (telemetry) | ✓ | ✓ | ✓ | ✓ | the only DuckDB user |
+
+There is no `embedded-telemetry` feature: an in-process sink would put Vortex back into the
+daemons and give telemetry two code paths; the external plugin is the only one.
 
 ## Crates
 
@@ -20,9 +66,11 @@ when you change one of these contracts.
 | `lindesk-core` | plugin-api | Pure: config, resolver, safety caps, reconciler state, cgroup path parsing, clocks. |
 | `lindesk-sys` | core | Probe, cgroupfs, procfs, PSI, syscalls, block devices, iocost. Every function takes explicit roots (`/sys`, `/proc`) so tests run on fixtures. |
 | `lindesk-host` | core | Plugin discovery/supervision, stdio transport, the `Engine` pipeline, conformance tests, scaffolding templates. |
-| `lindesk-builtins` | core, sys, store | Built-in plugins (`policy/`, `classifier/`, `sensors/`, `actuators/`, `adapters/`, `sinks/`). |
-| `lindesk-store` | plugin-api, arrow, vortex | Telemetry *writer* only (Vortex files, async low-priority writer thread). No DuckDB. |
-| `lindesk-query` | duckdb | Telemetry *reader and maintainer*: query, catalog, compact, rollup, prune, delete. |
+| `lindesk-builtins` | core, sys, host | Built-in plugins (`policy/`, `classifier/`, `sensors/`, `actuators/`, `adapters/`). No sink: telemetry is the external `telemetry` plugin. |
+| `lindesk-store` | plugin-api, arrow, vortex | Telemetry *writer* only (Vortex files, async low-priority writer thread). No DuckDB. Linked by `lindesk-telemetry-sink` and `lindesk-data` only. |
+| `lindesk-query` | duckdb | Telemetry *reader and maintainer*: query, catalog, compact, rollup, prune, delete. Linked by `lindesk-data` only. |
+| `lindesk-telemetry-sink` | plugin (SDK), store, sys | The `telemetry` plugin binary (lindesk-telemetry package). |
+| `lindesk-data` | query, store | The lake tool binary (lindesk-telemetry package). |
 | `lindesk-ipc` | zbus | D-Bus interfaces (below) and polkit checks. |
 | `lindesk-plugin` | plugin-api | Rust SDK for external plugins. |
 
@@ -32,7 +80,8 @@ when you change one of these contracts.
 |---|---|---|
 | Config | `/etc/lindesk/lindesk.toml` | `$XDG_CONFIG_HOME/lindesk/lindesk.toml` |
 | Classifier rules | `/usr/share/lindesk/rules.d/*.toml`, then `/etc/lindesk/rules.d/*.toml` | then `$XDG_CONFIG_HOME/lindesk/rules.d/*.toml` |
-| Plugins | `/usr/lib/lindesk/plugins/<name>/plugin.toml`, `/etc/lindesk/plugins/<name>/` (must be root-owned, not group/world-writable) | `$XDG_DATA_HOME/lindesk/plugins/<name>/`, then the system dirs (only `privilege = "user"` plugins load) |
+| Plugins | `/usr/lib/lindesk/plugins/<name>/plugin.toml`, `/etc/lindesk/plugins/<name>/` (must be root-owned, not group/world-writable), then `[general] plugin_dirs` | `$XDG_DATA_HOME/lindesk/plugins/<name>/`, then the system dirs (only `privilege = "user"` plugins load), then `[general] plugin_dirs` |
+| Telemetry plugin | `/usr/lib/lindesk/plugins/telemetry/` | `/usr/lib/lindesk/plugins/telemetry-user/` (same binary, `/usr/lib/lindesk/lindesk-telemetry-sink`) |
 | Applied state | `/run/lindesk/state.json` | `$XDG_RUNTIME_DIR/lindesk/state.json` |
 | Telemetry | `/var/lib/lindesk/telemetry/` (0750 root:lindesk) | `$XDG_STATE_HOME/lindesk/telemetry/` (0700) |
 | DuckDB catalog | `/var/lib/lindesk/catalog.duckdb` | `$XDG_STATE_HOME/lindesk/catalog.duckdb` |
@@ -213,8 +262,9 @@ Startup: open the system change store and `recover()` interrupted changesets (be
 config is read), requirements check (failures exit 78), probe, warn about running
 conflicting daemons, iocost (below), load a saved calibration into `HostCaps`, select the
 profile, engine with `psi`, `cgroup-stat`, `rules`, `threshold`, the `relay` actuator, the
-backend's actuators (normally `systemd` on the system bus, then `proc`), `parquet-store`
-and discovered system plugins; load `state.json`; first step; `sd_notify(READY=1)` after
+backend's actuators (normally `systemd` on the system bus, then `proc`) and discovered
+system plugins (with lindesk-telemetry installed, `telemetry`; the lake directory is then
+made 0750 group `lindesk`); load `state.json`; first step; `sd_notify(READY=1)` after
 the bus name is owned. The engine asks the available actuators whose caps cover the
 target's kind and the knob in priority order and moves on to the next one when an actuator
 answers `Unsupported` (the relay for anything but user units, `systemd` for units of
@@ -251,8 +301,8 @@ Modes (a pure state machine in `lindesk-session/src/mode.rs`):
 | connected | `RegisterSession` succeeded | `broker` relay policy (priority 50, provenance plugin `broker` with reason `<plugin>: <reason>`, shown by explain as `broker: <plugin>: <reason>`; the broker's level) |
 | standalone | no broker, it vanished, registration failed, or `--standalone` | `psi` (2 s trigger windows unless configured), `threshold` |
 
-Both modes run `cgroup-stat`, `rules`, the `systemd` actuator on the user manager,
-`parquet-store` into the user lake and user plugins. `threshold` and `psi` are registered once
+Both modes run `cgroup-stat`, `rules`, the `systemd` actuator on the user manager and
+user plugins (with lindesk-telemetry installed, `telemetry` into the user lake). `threshold` and `psi` are registered once
 behind a gate (the `Registry` can't unregister); a gate that reopens re-initialises its plugin.
 Switching is declarative: the engine reverts whatever the newly active policies don't ask for,
 so nothing stale survives a switch. The agent follows `NameOwnerChanged` for
@@ -276,9 +326,9 @@ when something could not be restored; aborts after 25 s. Works without a running
 Nothing has to exist besides the binaries:
 
 * a missing config file means the defaults (not dry-run, `threshold` on, `iocost = "auto"`,
-  telemetry on with the default retention);
-* the state directory, the telemetry lake (system: 0750, group `lindesk` when it exists,
-  else root) and the runtime rule directory are created;
+  telemetry on with the default retention when the `telemetry` plugin is installed);
+* the state directory, the telemetry lake when the plugin is installed (system: 0750,
+  group `lindesk` when it exists, else root) and the runtime rule directory are created;
 * when `/usr/share/lindesk/rules.d` is missing (e.g. a cargo build) the rules shipped in
   `packaging/config/rules.d` are compiled into the binaries, written to
   `<state-dir>/rules.d.builtin` and used in its place (then `/etc/lindesk/rules.d`, then the
@@ -360,14 +410,21 @@ they use the generic `Hardware`, `Profiles` and `Calibrated` commands and `Reloa
 * The state directory must be on tmpfs (the defaults `/run/lindesk`, `$XDG_RUNTIME_DIR/lindesk`
   are): the applied state is rewritten on every change, and on a saturated ext4 disk a
   rename-over can stall the engine thread for seconds.
-* Sinks run on the engine thread, but `parquet-store` (which writes Vortex; the name is kept
-  for config compatibility) only enqueues into a bounded queue: a writer thread at idle I/O
-  priority and nice 10 encodes, fsyncs and renames, dropping the oldest rows (counted in the
-  `telemetry_dropped_rows` metric) when it cannot keep up. Flush and shutdown wait at most
-  `flush_timeout` (default 5 s). The daemons add no flush of their own: at shutdown the
-  engine thread runs `Engine::shutdown` (restore, one `flush()` per sink, plugin shutdown)
-  and nothing else touches the sink. Steps or bookkeeping slower than 1 s are logged as
-  `slow engine step` with per-stage timings.
+* Sinks run on the engine thread. For an external sink (`telemetry`) `record` is a
+  `sink.record` *notification*: the host serialises it into a bounded per-plugin queue
+  (`external::STDIN_QUEUE` lines) drained by a writer thread that owns the child's stdin,
+  so a plugin that stops reading can never block a step: requests then fail as timeouts and
+  notifications are dropped (`PluginStats::dropped`). The `telemetry` plugin itself only
+  parses and enqueues on its main thread; its writer thread at idle I/O priority and nice 10
+  encodes, fsyncs and renames, dropping the oldest rows (counted in the
+  `telemetry_dropped_rows` metric) when it cannot keep up. `sink.flush` (only at shutdown,
+  manifest `call_ms = 6000`) waits at most `flush_timeout` (default 5 s). The daemons add
+  no flush of their own: at shutdown the engine thread runs `Engine::shutdown` (restore,
+  one `flush()` per sink, plugin shutdown). `[telemetry]` keys are applied to
+  `[plugins.telemetry.config]` (`dir`, `flush`, `mode`); `[plugins.parquet-store]` (the
+  former built-in sink) is folded into it; `enabled = false` keeps the plugin from starting.
+  Status JSON `daemon.telemetry` is `{installed, enabled, state, dir}`. Steps or bookkeeping
+  slower than 1 s are logged as `slow engine step` with per-stage timings.
 
 ### Logging
 

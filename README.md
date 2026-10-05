@@ -79,12 +79,15 @@ There are SDKs for [Rust](crates/lindesk-plugin) and [Python](sdk/python), and
 [example plugins](examples/plugins). The protocol is specified as
 [JSON Schema](docs/src/reference/protocol.md) (`lindeskctl plugin schema`).
 
-## Telemetry you can query with DuckDB
+## Optional: telemetry & DuckDB queries
 
-Pressure, per-unit usage, every decision and its reason are written to a hive-partitioned
-[Vortex](https://vortex.dev) lake, read through DuckDB's `vortex` extension (with a pure-Rust
-fallback when it is unavailable). The lake is compacted hourly, rolled up into 1m and 1h
-tables, and pruned by retention. Data can be deleted on demand.
+With the optional `lindesk-telemetry` package, pressure, per-unit usage, every decision and
+its reason are written to a hive-partitioned [Vortex](https://vortex.dev) lake, read through
+DuckDB's `vortex` extension (with a pure-Rust fallback when it is unavailable). The lake is
+compacted hourly, rolled up into 1m and 1h tables, and pruned by retention. Data can be
+deleted on demand. The writer is just another plugin (`telemetry`), so the core package
+links neither DuckDB nor Vortex and stays small; without telemetry lindesk works the same,
+minus the history.
 
 ```bash
 lindeskctl query "select resource, avg(some_avg10) from pressure group by 1"
@@ -115,10 +118,11 @@ lindeskctl changes apply --sysctl vm.swappiness=10 --ttl 10m -m "less swapping" 
 
 ## Quick start
 
+Install **`lindesk`**: the daemons, CLI, MCP server and bench, a few MB each.
+
 ```bash
-# Debian/Ubuntu/Pop!_OS
-sudo apt install ./lindesk_*.deb
-# Fedora:  sudo dnf install ./lindesk-*.rpm      Arch:  makepkg -si (packaging/aur)
+sudo apt install ./lindesk_*_amd64.deb        # Debian/Ubuntu/Pop!_OS
+# Fedora:  sudo dnf install ./lindesk-0*.rpm      Arch:  makepkg -si (packaging/aur)
 # Anything else:
 ./packaging/install.sh
 
@@ -130,6 +134,29 @@ lindeskctl explain firefox
 lindeskctl calibrate     # optional: measure this machine's latency baseline (â‰ˆ15 s)
 ```
 
+Optional add-on: **`lindesk-telemetry`** records history you can query with SQL (DuckDB +
+Vortex; much larger). It is never pulled in automatically, and it is picked up without
+configuration:
+
+```bash
+sudo apt install ./lindesk-telemetry_*_amd64.deb   # or: ./packaging/install.sh --with-telemetry
+```
+
+## Other priority daemons (conflicts)
+
+| Tool | What it changes | lindesk's stance |
+|---|---|---|
+| system76-scheduler | nice, I/O priority and scheduling policy of most processes; foreground boost; CFS tunables | conflict: stop it |
+| ananicy, ananicy-cpp | nice, I/O priority, scheduling policy, `oom_score_adj` per process name; can move processes out of their units into its own cgroups | conflict: stop it |
+| uresourced | `CPUWeight`, `IOWeight`, memory protection on the active user's units; optionally a focused-app boost | conflict: stop it |
+| gamemode | CPU governor, the game's nice and I/O priority, only while a game runs | not a conflict: keep it |
+
+Two daemons tuning the same knobs undo each other's work and stack their foreground boosts.
+`lindeskctl doctor` and the installer detect them; `sudo lindeskctl setup conflicts --disable`
+turns them off as a versioned change that `--restore` (or uninstalling lindesk) reverts.
+Packages never disable anything silently. Details and partial-coexistence options:
+[docs/src/guide/conflicts.md](docs/src/guide/conflicts.md).
+
 ## Components
 
 | | |
@@ -137,8 +164,10 @@ lindeskctl calibrate     # optional: measure this machine's latency baseline (â‰
 | `lindeskd` | privileged broker (system service): probe, PSI, policy, system units, iocost |
 | `lindesk-session` | per-user agent: foreground tracking, user units, user plugins |
 | `lindeskctl` | CLI: doctor, status/watch/events, explain, run/set/restore, profile, changes, hardware/swap/calibrate, mcp, plugin tooling, simulate, query/data, config, bench |
-| `lindesk-data` | telemetry maintenance (timer) |
 | `lindesk-mcp` | MCP server for local AI agents (stdio; optional user socket unit) |
+| `lindesk-bench` | foreground latency probe and A/B harness |
+| `lindesk-data` | *lindesk-telemetry*: the lake's query, export/import and maintenance tool (DuckDB; timer) |
+| `lindesk-telemetry-sink` | *lindesk-telemetry*: the `telemetry` plugin that writes the lake |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the contracts between them and
 [docs/CONTROL-PLANE.md](docs/CONTROL-PLANE.md) for profiles, changes and MCP.

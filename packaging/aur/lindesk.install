@@ -43,12 +43,12 @@ _lindesk_start_sessions() {
 }
 
 post_install() {
-  systemctl --global enable lindesk-session.service lindesk-compact.timer >/dev/null 2>&1 || true
+  systemctl --global enable lindesk-session.service >/dev/null 2>&1 || true
   _lindesk_preflight || return 0
   _lindesk_start_sessions
   cat <<'MSG'
-==> lindesk: enable the broker and its maintenance timer:
-      sudo systemctl enable --now lindeskd.service lindesk-compact.timer
+==> lindesk: enable the broker:
+      sudo systemctl enable --now lindeskd.service
     lindesk-session is enabled for every user and runs in open graphical sessions.
     What now: `lindeskctl` (what lindesk is doing), `lindeskctl watch` (live),
               `lindeskctl doctor` (what this machine supports).
@@ -57,6 +57,7 @@ post_install() {
     KDE:   enable "lindesk" in System Settings > Window Management > KWin Scripts
     AI agents (MCP): claude mcp add lindesk -- lindesk-mcp
            optional HTTP endpoint: systemctl --user enable --now lindesk-mcp.socket
+    Telemetry (SQL over what lindesk records) is optional: pacman -S lindesk-telemetry
 MSG
 }
 
@@ -69,9 +70,9 @@ post_upgrade() {
 
 pre_remove() {
   if [ -d /run/systemd/system ]; then
-    systemctl disable --now lindesk-compact.timer lindeskd.service >/dev/null 2>&1 || true
+    systemctl disable --now lindeskd.service >/dev/null 2>&1 || true
   fi
-  systemctl --global disable lindesk-session.service lindesk-compact.timer >/dev/null 2>&1 || true
+  systemctl --global disable lindesk-session.service >/dev/null 2>&1 || true
   systemctl --global disable lindesk-mcp.socket lindesk-mcp.service >/dev/null 2>&1 || true
   # Undo every runtime change (lindeskd.service's ExecStopPost does this too).
   /usr/bin/lindeskd --restore >/dev/null 2>&1 || echo "==> lindesk: warning: lindeskd --restore failed"

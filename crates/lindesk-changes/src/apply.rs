@@ -10,6 +10,7 @@ use toml_edit::DocumentMut;
 use crate::guard::resolve_device;
 use crate::model::{ChangeOp, Scope};
 use crate::roots::{ConfigPaths, Roots, atomic_write, io_err, read_opt, remove_opt, write_attr};
+use crate::service::Services;
 use crate::{ChangeError, Result};
 
 /// Reads and writes the thing an op changes. `write(op, v)` puts `v` (an op's
@@ -29,6 +30,8 @@ pub trait Applier: Send + Sync {
 pub struct RealApplier {
     pub roots: Roots,
     pub config_paths: ConfigPaths,
+    /// systemd access for `service_state` ops.
+    pub services: Services,
 }
 
 const PERSIST_HEADER: &str = "# Managed by lindesk (versioned changes). Don't edit by hand:\n\
@@ -36,7 +39,13 @@ const PERSIST_HEADER: &str = "# Managed by lindesk (versioned changes). Don't ed
 
 impl RealApplier {
     pub fn new(roots: Roots, config_paths: ConfigPaths) -> Self {
-        RealApplier { roots, config_paths }
+        RealApplier { roots, config_paths, services: Services::default() }
+    }
+
+    /// Use another service runner (tests, fixtures).
+    pub fn with_services(mut self, services: Services) -> Self {
+        self.services = services;
+        self
     }
 
     /// The host for a daemon of `scope`.
@@ -284,6 +293,19 @@ impl Applier for RealApplier {
             }
             ChangeOp::CpuEpp { .. } => self.read_per_policy("energy_performance_preference"),
             ChangeOp::CpuGovernor { .. } => self.read_per_policy("scaling_governor"),
+            ChangeOp::ServiceState { unit, enabled, active } => {
+                if !self.services.installed(unit)? {
+                    return Err(ChangeError::Apply(format!("{unit} is not installed")));
+                }
+                let mut m = serde_json::Map::new();
+                if enabled.is_some() {
+                    m.insert("enabled".into(), json!(self.services.is_enabled(unit)?));
+                }
+                if active.is_some() {
+                    m.insert("active".into(), json!(self.services.is_active(unit)?));
+                }
+                Ok(Value::Object(m))
+            }
         }
     }
 
@@ -350,6 +372,23 @@ impl Applier for RealApplier {
             }
             ChangeOp::CpuEpp { .. } => self.write_per_policy("energy_performance_preference", v),
             ChangeOp::CpuGovernor { .. } => self.write_per_policy("scaling_governor", v),
+            ChangeOp::ServiceState { unit, .. } => {
+                // Disable before stopping and start after enabling, so the unit is never
+                // left running-but-disabled when a step fails (rollback restores the rest).
+                let enabled = v.get("enabled").and_then(Value::as_bool);
+                let active = v.get("active").and_then(Value::as_bool);
+                if let Some(e) = enabled
+                    && self.services.is_enabled(unit)? != e
+                {
+                    self.services.set_enabled(unit, e)?;
+                }
+                if let Some(a) = active
+                    && self.services.is_active(unit)? != a
+                {
+                    self.services.set_active(unit, a)?;
+                }
+                Ok(())
+            }
         }
     }
 

@@ -50,8 +50,8 @@ Telemetry                22.0 KiB in ~/.local/state/lindesk/telemetry
    hardware in one line.
 2. **System**: what the kernel, cgroups, PSI, I/O stack, filesystems and desktop support,
    the hardware (CPU topology including hybrid P/E cores, memory and swap, storage,
-   power, virtualization), and conflicting daemons (system76-scheduler, ananicy-cpp,
-   uresourced, gamemode). It ends with the **responsiveness level**:
+   power, virtualization), and conflicting daemons (system76-scheduler, ananicy(-cpp),
+   uresourced; see [Other priority daemons](conflicts.md); gamemode is shown as compatible). It ends with the **responsiveness level**:
 
    | Level | Means |
    |---|---|

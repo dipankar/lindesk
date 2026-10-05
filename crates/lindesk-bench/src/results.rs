@@ -209,6 +209,19 @@ pub struct PhaseResult {
     /// Seconds spent at each lindesk level (from the timeline).
     #[serde(default)]
     pub levels: BTreeMap<String, u32>,
+    /// The phase as flat named measurements (`crate::lake::phase_metrics`); what
+    /// `lindesk-data import-bench` stores in `bench_samples`.
+    #[serde(default)]
+    pub metrics: Vec<Metric>,
+}
+
+/// One summary measurement of a phase, e.g. `wakeup_overshoot_us` `{stat: p99}`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Metric {
+    pub name: String,
+    pub value: f64,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
 }
 
 /// Run configuration.
@@ -314,7 +327,7 @@ pub(crate) mod tests {
 
     pub fn phase(p: Phase, scale: f64) -> PhaseResult {
         let psi = PsiWindow { cpu: stall(3.0 * scale), io: stall(20.0 * scale), memory: stall(1.5 * scale) };
-        PhaseResult {
+        let mut r = PhaseResult {
             phase: p,
             started: "2026-10-04T12:00:00Z".into(),
             started_ms: 1_790_000_000_000,
@@ -352,7 +365,10 @@ pub(crate) mod tests {
                 level: Some("red".into()),
             }],
             levels: BTreeMap::from([("red".into(), 4), ("green".into(), 6)]),
-        }
+            metrics: Vec::new(),
+        };
+        r.metrics = crate::lake::phase_metrics(&r);
+        r
     }
 
     pub fn sample_results() -> Results {

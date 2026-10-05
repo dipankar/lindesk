@@ -48,6 +48,8 @@ impl Daemon for FakeDaemon {
 #[derive(Default)]
 struct FakeLocal {
     queries: Mutex<Vec<String>>,
+    /// Behave as if the lindesk-telemetry package weren't installed.
+    no_telemetry: bool,
 }
 
 impl Local for FakeLocal {
@@ -77,6 +79,9 @@ impl Local for FakeLocal {
         Ok(json!([{"id": "kernel", "title": "Kernel", "status": "pass", "detail": "6.8"}]))
     }
     fn query(&self, _scope: Scope, sql: &str) -> Result<Value, String> {
+        if self.no_telemetry {
+            return Err(crate::local::NOT_INSTALLED.to_string());
+        }
         self.queries.lock().unwrap().push(sql.to_string());
         if sql.contains("lvl = 'red'") {
             Ok(json!([{"hour": "2026-10-04T09:00Z", "red_s": 1500.0}]))
@@ -113,7 +118,11 @@ struct Harness {
 }
 
 async fn harness(daemon: Arc<FakeDaemon>) -> Harness {
-    let local = Arc::new(FakeLocal::default());
+    harness_with(daemon, FakeLocal::default()).await
+}
+
+async fn harness_with(daemon: Arc<FakeDaemon>, local: FakeLocal) -> Harness {
+    let local = Arc::new(local);
     let backends = Backends { daemon: daemon.clone(), local: local.clone() };
     let (server_io, client_io) = tokio::io::duplex(1 << 20);
     tokio::spawn(async move {
@@ -340,6 +349,23 @@ async fn recommendations_rank_fixture_inputs() {
     assert_eq!(recs[2]["proposed_ops"][0]["scheduler"], "bfq");
     assert_eq!(recs[0]["proposed_ops"][0]["name"], "latency");
     assert!(text(&r).starts_with("1. Under heavy pressure (RED) for 25 min"), "{}", text(&r));
+}
+
+#[tokio::test]
+async fn without_telemetry_query_fails_clearly_and_recommendations_skip_it() {
+    let h = harness_with(FakeDaemon::absent(), FakeLocal { no_telemetry: true, ..Default::default() }).await;
+    let r = h.call("query", json!({"sql": "select 1"})).await;
+    assert!(is_error(&r));
+    assert_eq!(data(&r)["error"], "telemetry_not_installed");
+    assert!(text(&r).starts_with("telemetry isn't installed: sudo apt install lindesk-telemetry"), "{}", text(&r));
+
+    let r = h.call("recommendations", json!({})).await;
+    assert!(!is_error(&r), "{r:?}");
+    assert_eq!(data(&r)["sources"]["telemetry"], "not installed");
+    let ids: Vec<&str> =
+        data(&r)["recommendations"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["swap.swap-on-a-hard-disk", "latency.storage.sda", "doctor.io-latency"]);
+    assert_eq!(data(&r)["errors"][0].as_str(), Some(crate::local::NOT_INSTALLED));
 }
 
 #[tokio::test]

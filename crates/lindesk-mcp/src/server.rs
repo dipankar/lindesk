@@ -293,6 +293,8 @@ impl LindeskMcp {
         }
     }
 
+    /// Telemetry evidence for `recommendations`: `None` (and one note) when the optional
+    /// lindesk-telemetry package isn't installed.
     async fn telemetry(&self) -> (Option<Telemetry>, Vec<String>) {
         let mut errors = Vec::new();
         for scope in [Scope::User, Scope::System] {
@@ -314,6 +316,7 @@ impl LindeskMcp {
                     }
                     return (Some(Telemetry { red_by_hour, throttled }), errors);
                 }
+                (Err(e), _) | (_, Err(e)) if e == crate::local::NOT_INSTALLED => return (None, vec![e]),
                 (Err(e), _) | (_, Err(e)) => errors.push(format!("{} lake: {e}", scope.as_str())),
             }
         }
@@ -681,6 +684,9 @@ impl LindeskMcp {
             Ok(other) => {
                 Ok(success("1 result", json!({"scope": scope, "rows": [other], "row_count": 1, "truncated": false})))
             }
+            Err(e) if e == crate::local::NOT_INSTALLED => {
+                Ok(failure(e.clone(), json!({"error": "telemetry_not_installed", "message": e})))
+            }
             Err(e) => Ok(failure(format!("query failed: {e}"), json!({"error": "query_failed", "message": e}))),
         }
     }
@@ -997,9 +1003,9 @@ impl LindeskMcp {
         }
         if a.include_telemetry.unwrap_or(true) {
             let (t, errs) = self.telemetry().await;
+            sources.insert("telemetry".into(), json!(if t.is_some() { "lake" } else { "not installed" }));
             inputs.telemetry = t;
             errors.extend(errs);
-            sources.insert("telemetry".into(), json!("lake"));
         }
 
         let recs = recommend::recommend(&inputs);

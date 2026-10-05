@@ -5,7 +5,7 @@ Maintainer: Dipankar Sarkar <me@dipankar.name>
 Installed-Size: @INSTALLED_SIZE@
 Depends: dbus, systemd | systemd-standalone-sysusers, polkitd | policykit-1@SHLIBS_DEPENDS@
 Recommends: gnome-shell-extension-prefs
-Suggests: duckdb
+Suggests: lindesk-telemetry
 Section: admin
 Priority: optional
 Homepage: https://github.com/dipankar/lindesk
@@ -17,6 +17,7 @@ Description: macOS-style QoS for the Linux desktop
  reverting every change on exit.
  .
  This package contains the root broker (lindeskd), the per-user session agent
- (lindesk-session), the lindeskctl CLI, telemetry maintenance (lindesk-data),
- the benchmark tool, the MCP server for local AI agents (lindesk-mcp), the
- GNOME Shell extension and the KWin script.
+ (lindesk-session), the lindeskctl CLI, the benchmark tool, the MCP server for
+ local AI agents (lindesk-mcp), the GNOME Shell extension and the KWin script.
+ Telemetry (a DuckDB-queryable lake of what lindesk saw and did) is the optional
+ lindesk-telemetry package.

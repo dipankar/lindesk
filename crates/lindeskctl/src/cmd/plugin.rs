@@ -33,7 +33,6 @@ pub const BUILTINS: &[(&str, &str)] = &[
     ("proc", "actuator"),
     ("x11", "adapter"),
     ("cosmic", "adapter"),
-    ("parquet-store", "sink"),
 ];
 
 pub fn run(ui: &Ui, cmd: &PluginCmd) -> Result<()> {

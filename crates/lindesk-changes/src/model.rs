@@ -50,6 +50,8 @@ pub enum Origin {
     Dbus,
     /// The daemon itself (dead-man reverts, recovery).
     Daemon,
+    /// The installer, a package script or the uninstaller.
+    Install,
 }
 
 impl fmt::Display for Origin {
@@ -59,6 +61,7 @@ impl fmt::Display for Origin {
             Origin::Mcp => "mcp",
             Origin::Dbus => "dbus",
             Origin::Daemon => "daemon",
+            Origin::Install => "install",
         })
     }
 }
@@ -139,6 +142,16 @@ pub enum ChangeOp {
     CpuEpp { preference: String },
     /// `scaling_governor` on every cpufreq policy.
     CpuGovernor { governor: String },
+    /// Enable/disable and start/stop the systemd unit of a conflicting priority daemon
+    /// (allow-listed: `lindesk_core::conflicts::conflicting_units`; system scope). Unset
+    /// fields are left alone. The previous state is recorded, so a revert restores it.
+    ServiceState {
+        unit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active: Option<bool>,
+    },
 }
 
 fn is_false(b: &bool) -> bool {
@@ -158,6 +171,7 @@ impl ChangeOp {
             ChangeOp::Zswap { .. } => "zswap",
             ChangeOp::CpuEpp { .. } => "cpu_epp",
             ChangeOp::CpuGovernor { .. } => "cpu_governor",
+            ChangeOp::ServiceState { .. } => "service_state",
         }
     }
 
@@ -190,7 +204,7 @@ impl ChangeOp {
             | ChangeOp::ConfigUnset { .. }
             | ChangeOp::ProfileUse { .. }
             | ChangeOp::ClassOverride { .. } => Risk::Low,
-            ChangeOp::Sysctl { .. } | ChangeOp::Zswap { .. } => Risk::Medium,
+            ChangeOp::Sysctl { .. } | ChangeOp::Zswap { .. } | ChangeOp::ServiceState { .. } => Risk::Medium,
             ChangeOp::IoScheduler { .. } | ChangeOp::CpuEpp { .. } | ChangeOp::CpuGovernor { .. } => Risk::High,
         }
     }
@@ -232,6 +246,16 @@ impl ChangeOp {
             }
             ChangeOp::CpuEpp { .. } => vec!["cpufreq:energy_performance_preference".into()],
             ChangeOp::CpuGovernor { .. } => vec!["cpufreq:scaling_governor".into()],
+            ChangeOp::ServiceState { unit, enabled, active } => {
+                let mut k = Vec::new();
+                if enabled.is_some() {
+                    k.push(format!("service:{unit}:enabled"));
+                }
+                if active.is_some() {
+                    k.push(format!("service:{unit}:active"));
+                }
+                k
+            }
         }
     }
 
@@ -260,6 +284,16 @@ impl ChangeOp {
             }
             ChangeOp::CpuEpp { preference } => json!(preference),
             ChangeOp::CpuGovernor { governor } => json!(governor),
+            ChangeOp::ServiceState { enabled, active, .. } => {
+                let mut m = serde_json::Map::new();
+                if let Some(e) = enabled {
+                    m.insert("enabled".into(), json!(e));
+                }
+                if let Some(a) = active {
+                    m.insert("active".into(), json!(a));
+                }
+                Value::Object(m)
+            }
         }
     }
 
@@ -306,6 +340,11 @@ impl ChangeOp {
             ChangeOp::CpuGovernor { governor } => {
                 ChangeOp::CpuGovernor { governor: uniform(v).unwrap_or_else(|| governor.clone()) }
             }
+            ChangeOp::ServiceState { unit, .. } => ChangeOp::ServiceState {
+                unit: unit.clone(),
+                enabled: v.get("enabled").and_then(Value::as_bool),
+                active: v.get("active").and_then(Value::as_bool),
+            },
         }
     }
 }
@@ -343,6 +382,16 @@ impl fmt::Display for ChangeOp {
             ChangeOp::Zswap { .. } => write!(f, "zswap {}", self.target_value()),
             ChangeOp::CpuEpp { preference } => write!(f, "cpufreq EPP = {preference}"),
             ChangeOp::CpuGovernor { governor } => write!(f, "cpufreq governor = {governor}"),
+            ChangeOp::ServiceState { unit, enabled, active } => {
+                let mut parts = Vec::new();
+                if let Some(e) = enabled {
+                    parts.push(if *e { "enable" } else { "disable" });
+                }
+                if let Some(a) = active {
+                    parts.push(if *a { "start" } else { "stop" });
+                }
+                write!(f, "service {unit}: {}", parts.join(", "))
+            }
         }
     }
 }
@@ -477,6 +526,7 @@ pub enum Rule {
     Zswap,
     NotAvailable,
     TtlRequired,
+    ServiceNotAllowed,
 }
 
 /// A guardrail refusal.

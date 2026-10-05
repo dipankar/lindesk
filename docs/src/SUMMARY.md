@@ -5,6 +5,7 @@
 # User guide
 - [Installation](guide/install.md)
 - [doctor: what your system supports](guide/doctor.md)
+- [Other priority daemons (conflicts)](guide/conflicts.md)
 - [Everyday use](guide/usage.md)
 - [Configuration](guide/configuration.md)
 - [CPU profiles](guide/profiles.md)

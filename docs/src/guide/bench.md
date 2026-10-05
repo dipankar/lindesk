@@ -159,12 +159,14 @@ systemctl --user list-units 'lindesk-bench*'        # no units
 
 ## Results in the telemetry lake
 
-Unless you pass `--no-lake`, `run` also stores the results in the `bench_runs` and
-`bench_samples` tables of your telemetry lake (`--lake DIR` to pick another one). Each
-phase becomes one sample per metric, for example `wakeup_overshoot_us` with
-`labels['stat'] = 'p99'`. The per-second system PSI timeline is stored with
-`labels['series'] = 'timeline'`. The results JSON is written either way, so the bench works
-without the lake.
+The results JSON is the primary output; each phase carries its flat summary in `metrics`
+(for example `wakeup_overshoot_us` with `labels.stat = "p99"`). When the optional
+lindesk-telemetry package is installed, `run` also stores the results in the `bench_runs`
+and `bench_samples` tables of your telemetry lake by running `lindesk-data import-bench
+<results.json>` (`--lake DIR` picks another lake, `--no-lake` skips it): one sample per
+metric, plus the per-second system PSI timeline with `labels['series'] = 'timeline'`.
+lindesk-bench links no lake code itself. Without telemetry it says so and keeps the JSON,
+which `lindesk-data import-bench` can store later.
 
 ```console
 $ lindeskctl query "select run_id, label, ts from bench_runs order by ts desc"

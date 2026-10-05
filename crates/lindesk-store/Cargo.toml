@@ -1,6 +1,6 @@
 [package]
 name = "lindesk-store"
-description = "lindesk telemetry writer: buffered, hive-partitioned Parquet"
+description = "lindesk telemetry writer: buffered, hive-partitioned Vortex files"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

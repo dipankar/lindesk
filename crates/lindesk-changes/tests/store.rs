@@ -506,3 +506,54 @@ fn changeset_json_shape() {
         e => panic!("{e:?}"),
     }
 }
+
+#[test]
+fn service_state_round_trip_with_a_fake_runner() {
+    let fx = Fx::new();
+    let svc = Arc::new(FakeServices::with(&[("com.system76.Scheduler.service", true, true)]));
+    let applier = fx.applier().with_services(Services::new(svc.clone()));
+    let store = fx.store_with(Scope::System, Arc::new(applier));
+    let ctx = fx.ctx(Scope::System, Origin::Install);
+    let off = ChangeOp::ServiceState {
+        unit: "com.system76.Scheduler.service".into(),
+        enabled: Some(false),
+        active: Some(false),
+    };
+
+    let plan = store.plan(std::slice::from_ref(&off), &ctx);
+    assert!(plan.is_ok(), "{:?}", plan.rejections);
+    assert_eq!(plan.risk, Risk::Medium);
+    assert_eq!(plan.ops[0].current, json!({"enabled": true, "active": true}));
+    assert!(svc.calls.lock().unwrap().is_empty(), "planning changes nothing");
+
+    let cs = store.apply(&plan, Author::new(0, Origin::Install), "disable system76-scheduler", None).unwrap();
+    assert_eq!(cs.ops[0].previous, json!({"enabled": true, "active": true}));
+    assert_eq!(svc.state("com.system76.Scheduler.service"), Some((false, false)));
+    assert_eq!(
+        *svc.calls.lock().unwrap(),
+        ["disable com.system76.Scheduler.service", "stop com.system76.Scheduler.service"]
+    );
+    assert_eq!(cs.author.origin, Origin::Install);
+
+    // revert-all (what uninstall does) brings back the recorded state.
+    let rv = store.revert_to(0, Author::new(0, Origin::Install)).unwrap().unwrap();
+    assert_eq!(
+        rv.ops[0].op,
+        ChangeOp::ServiceState {
+            unit: "com.system76.Scheduler.service".into(),
+            enabled: Some(true),
+            active: Some(true)
+        }
+    );
+    assert_eq!(svc.state("com.system76.Scheduler.service"), Some((true, true)));
+
+    // Only known conflicting daemons, and only installed ones.
+    for (unit, rule) in [("sshd.service", Rule::ServiceNotAllowed), ("gamemoded.service", Rule::ServiceNotAllowed)] {
+        let p = store.plan(&[ChangeOp::ServiceState { unit: unit.into(), enabled: Some(false), active: None }], &ctx);
+        assert_eq!(p.rejections[0].rule, rule, "{unit}");
+    }
+    let p = store.plan(&[ChangeOp::ServiceState { unit: "ananicy.service".into(), enabled: None, active: None }], &ctx);
+    assert!(!p.is_ok());
+    let user = store.plan(std::slice::from_ref(&off), &fx.ctx(Scope::User, Origin::Cli));
+    assert_eq!(user.rejections[0].rule, Rule::Scope);
+}

@@ -128,7 +128,8 @@ pub struct RunArgs {
     /// Run probe and load directly, without systemd-run scopes.
     #[arg(long)]
     pub no_scope: bool,
-    /// Don't store the results in the telemetry lake.
+    /// Don't store the results in the telemetry lake (which needs lindesk-data, from the
+    /// optional lindesk-telemetry package; the results JSON is written either way).
     #[arg(long)]
     pub no_lake: bool,
     /// Telemetry lake root [default: $XDG_STATE_HOME/lindesk/telemetry].
@@ -319,7 +320,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
     eprintln!("lindesk-bench: results: {}", json_path.display());
     eprintln!("lindesk-bench: table:   {}", md_path.display());
     if !args.no_lake {
-        match crate::lake::store(&results, args.lake.as_deref()) {
+        match crate::lake::store(&json_path, args.lake.as_deref()) {
             Ok(msg) => eprintln!("lindesk-bench: {msg}"),
             Err(e) => eprintln!("lindesk-bench: not stored in the telemetry lake: {e:#}"),
         }
@@ -726,7 +727,7 @@ fn run_phase(ctx: &Ctx<'_>, phase: Phase, ld: &Lindesk, state: LindeskState, run
             *levels.entry(l.clone()).or_insert(0) += 1;
         }
     }
-    Ok(PhaseResult {
+    let mut result = PhaseResult {
         phase,
         started: started.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         started_ms: started.timestamp_millis(),
@@ -736,7 +737,10 @@ fn run_phase(ctx: &Ctx<'_>, phase: Phase, ld: &Lindesk, state: LindeskState, run
         load: load_report,
         timeline,
         levels,
-    })
+        metrics: Vec::new(),
+    };
+    result.metrics = crate::lake::phase_metrics(&result);
+    Ok(result)
 }
 
 fn host_info(scratch: &Path, mi: &MemInfo) -> HostInfo {

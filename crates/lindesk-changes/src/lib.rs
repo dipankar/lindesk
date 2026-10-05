@@ -28,8 +28,10 @@
 pub mod apply;
 pub mod diff;
 pub mod guard;
+pub mod install_state;
 pub mod model;
 pub mod roots;
+pub mod service;
 pub mod store;
 pub mod toml_doc;
 
@@ -41,6 +43,7 @@ pub use model::{
     Author, ChangeOp, ChangeSet, OpRecord, Origin, Plan, PlannedOp, Rejection, Risk, Rule, Scope, Status, keys_overlap,
 };
 pub use roots::{ConfigPaths, Roots};
+pub use service::{FakeServices, ServiceRunner, Services, Systemctl};
 pub use store::ChangeStore;
 
 #[derive(Debug, thiserror::Error)]

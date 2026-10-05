@@ -5,13 +5,55 @@ a [Vortex](https://vortex.dev) lake that any DuckDB client can read with the `vo
 extension. Window titles and command lines are never
 stored. The tables are described in [Telemetry schema](../reference/schema.md).
 
+## Installing it
+
+Telemetry is an optional add-on: the **`lindesk-telemetry`** package
+(`./packaging/install.sh --with-telemetry` from source). It is never installed
+automatically. The core `lindesk` package links neither
+DuckDB nor Vortex; telemetry is a plugin like any other:
+
+* **`telemetry`**, an external sink plugin (`/usr/lib/lindesk/lindesk-telemetry-sink`,
+  stdio protocol, built on the Rust SDK). Two manifests point at the same binary:
+  `/usr/lib/lindesk/plugins/telemetry/` (`privilege = "system"`, loaded by `lindeskd`, writes
+  the system lake) and `/usr/lib/lindesk/plugins/telemetry-user/` (`privilege = "user"`,
+  loaded by `lindesk-session`, writes your lake). `lindeskctl plugin list` shows it.
+* **`lindesk-data`**, the lake tool (DuckDB): what `lindeskctl query`, `data`, `simulate`,
+  `lindesk-mcp`'s `query`/`recommendations` and `lindesk-bench` run as a subprocess.
+* the hourly `lindesk-compact` timers (system and user).
+
+Recording never slows the desktop down: the daemons send each step's records as a
+`sink.record` *notification* through a bounded queue to a writer thread, so a plugin that
+falls behind loses batches (counted as `dropped` in its stats, `lindeskctl plugin list --json`) but
+never stalls the engine. The plugin answers at once and encodes, fsyncs and renames on its
+own thread at idle I/O priority and nice 10, dropping the oldest rows when it can't keep up
+(the `telemetry_dropped_rows` metric).
+
+Without the package, `lindeskctl doctor` and `lindeskctl status` say `telemetry: not
+installed`, the commands below print `telemetry isn't installed: sudo apt install
+lindesk-telemetry (or ./packaging/install.sh --with-telemetry)` and exit 1, and nothing else
+changes. Configure it with `[telemetry]` and `[plugins.telemetry]` (the built-in sink's old
+name, `[plugins.parquet-store]`, still works):
+
+```toml
+[telemetry]
+enabled = true          # false: the plugin isn't even started
+flush = "60s"
+# dir = "/srv/lindesk-telemetry"
+
+[plugins.telemetry.config]
+queue_rows = 100000     # bounded queue; the oldest rows are dropped beyond it
+flush_timeout = "5s"
+```
+
 | Lake | Where | Who can read it |
 |---|---|---|
 | yours | `~/.local/state/lindesk/telemetry` (`$XDG_STATE_HOME`) | you |
 | system | `/var/lib/lindesk/telemetry` | root and the `lindesk` group (`--system`) |
 
 `telemetry.dir` in the config moves it; `--lake DIR` (or `LINDESK_TELEMETRY_DIR`) points
-any command at another lake.
+any command at another lake. `lindesk-data` takes the same as `--root DIR`; its
+`export --table T --from … --to …` prints a table's rows as JSON lines (`ts` in epoch ms)
+and `import-bench RESULTS.json` stores a benchmark run.
 
 ## Query
 

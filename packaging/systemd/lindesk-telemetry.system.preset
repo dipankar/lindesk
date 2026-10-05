@@ -1,0 +1,2 @@
+# lindesk-telemetry: hourly compaction, rollups and retention of the system lake.
+enable lindesk-compact.timer

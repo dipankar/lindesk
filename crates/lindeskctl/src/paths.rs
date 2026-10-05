@@ -52,7 +52,16 @@ pub fn lake_root(explicit: Option<&Path>, system: bool, config: Option<&Config>)
     if let Some(dir) = config.and_then(|c| c.telemetry.dir.clone()) {
         return dir;
     }
-    lindesk_store::layout::default_root(system)
+    default_lake_root(system)
+}
+
+/// `/var/lib/lindesk/telemetry`, or `$XDG_STATE_HOME/lindesk/telemetry` (as the telemetry
+/// plugin and lindesk-data decide).
+pub fn default_lake_root(system: bool) -> PathBuf {
+    if system {
+        return PathBuf::from("/var/lib/lindesk/telemetry");
+    }
+    xdg("XDG_STATE_HOME", ".local/state").unwrap_or_else(|| PathBuf::from("/tmp")).join("lindesk/telemetry")
 }
 
 /// Is the effective uid root?

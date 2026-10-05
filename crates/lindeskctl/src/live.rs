@@ -290,6 +290,9 @@ pub struct Envelope {
     pub profile: Option<crate::cmd::profile::ProfileState>,
     /// Changes that auto-revert unless confirmed (filled by the caller from `ListChanges`).
     pub pending: Vec<crate::cmd::changes::Pending>,
+    /// `daemon.telemetry`: whether the optional telemetry plugin runs (absent from older
+    /// daemons).
+    pub telemetry: Option<Value>,
 }
 
 fn requirement_line(v: &Value) -> String {
@@ -324,6 +327,7 @@ pub fn parse_envelope(raw: &Value) -> Envelope {
     if let Some(d) = raw.get("daemon") {
         e.mode = d.get("mode").and_then(Value::as_str).map(str::to_string);
         e.uptime = d.get("uptime_s").and_then(Value::as_f64).map(|s| Duration::from_secs_f64(s.max(0.0)));
+        e.telemetry = d.get("telemetry").filter(|t| t.is_object()).cloned();
     }
     e.epoch = raw.get("epoch").and_then(|x| x.get("active")).and_then(Value::as_bool);
     if let Some(fg) = raw.get("pressure").and_then(|p| p.get("foreground")).filter(|v| v.is_object()) {

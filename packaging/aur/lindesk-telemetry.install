@@ -1,0 +1,47 @@
+# pacman install hooks for lindesk-telemetry. The systemd alpm hooks create the lake
+# directory (tmpfiles.d) and reload the units; these functions enable the maintenance
+# timers and make the running daemons load (or drop) the telemetry plugin. Best effort.
+
+# _lindesk_reload: lindeskd and running session agents re-read their plugins (SIGHUP).
+_lindesk_reload() {
+  [ -d /run/systemd/system ] || return 0
+  if systemctl is-active --quiet lindeskd.service; then
+    systemctl reload-or-restart lindeskd.service >/dev/null 2>&1 || true
+  fi
+  command -v loginctl >/dev/null 2>&1 || return 0
+  for _u in $(loginctl list-users --no-legend 2>/dev/null | awk '{ print $2 }' | sort -u); do
+    timeout 15 systemctl --user -M "$_u@" reload lindesk-session.service >/dev/null 2>&1 || true
+  done
+  return 0
+}
+
+post_install() {
+  systemctl --global enable lindesk-compact.timer >/dev/null 2>&1 || true
+  if [ -d /run/systemd/system ]; then
+    systemctl enable --now lindesk-compact.timer >/dev/null 2>&1 || true
+  fi
+  _lindesk_reload
+  cat <<'MSG'
+==> lindesk-telemetry: recording into /var/lib/lindesk/telemetry and ~/.local/state/lindesk/telemetry.
+    Try: lindeskctl query "select resource, avg(some_avg10) from pressure group by 1"
+MSG
+}
+
+post_upgrade() {
+  _lindesk_reload
+}
+
+pre_remove() {
+  if [ -d /run/systemd/system ]; then
+    systemctl disable --now lindesk-compact.timer >/dev/null 2>&1 || true
+  fi
+  systemctl --global disable lindesk-compact.timer >/dev/null 2>&1 || true
+}
+
+post_remove() {
+  if [ -d /run/systemd/system ]; then
+    # Run without the removed plugin (session agents drop it at their next start).
+    systemctl try-restart lindeskd.service >/dev/null 2>&1 || true
+  fi
+  echo "==> lindesk-telemetry: the recorded telemetry in /var/lib/lindesk/telemetry was kept."
+}

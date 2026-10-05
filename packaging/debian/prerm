@@ -5,9 +5,9 @@ set -e
 if [ "$1" = remove ] || [ "$1" = deconfigure ]; then
 	if [ -d /run/systemd/system ]; then
 		if command -v deb-systemd-invoke >/dev/null 2>&1; then
-			deb-systemd-invoke stop lindesk-compact.timer lindeskd.service >/dev/null || true
+			deb-systemd-invoke stop lindeskd.service >/dev/null || true
 		else
-			systemctl stop lindesk-compact.timer lindeskd.service >/dev/null 2>&1 || true
+			systemctl stop lindeskd.service >/dev/null 2>&1 || true
 		fi
 	fi
 	# lindeskd.service's ExecStopPost already restores; this also covers non-systemd hosts

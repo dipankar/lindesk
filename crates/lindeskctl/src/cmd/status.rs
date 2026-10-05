@@ -265,11 +265,45 @@ pub fn render(
             s.push_str(&format!("  {}\n", ui.dim("details: lindeskctl plugin list")));
         }
     }
+    if with_plugins && let Some(t) = &env.telemetry {
+        s.push_str(&format!("  {}\n", telemetry_line(ui, t)));
+    }
     if !env.requirements.is_empty() {
         s.push('\n');
         for r in &env.requirements {
             s.push_str(&format!("{}\n", ui.dim(format!("⚠ {r}"))));
         }
+    }
+    s
+}
+
+/// `telemetry: …` from the daemon's `daemon.telemetry`: not installed (with the install
+/// command), disabled, or installed with the lake's size when it's readable.
+pub fn telemetry_line(ui: &Ui, t: &serde_json::Value) -> String {
+    let label = ui.dim("telemetry:");
+    if t["enabled"].as_bool() == Some(false) {
+        return format!("{label} {}", ui.dim("disabled ([telemetry] enabled = false)"));
+    }
+    if t["installed"].as_bool() != Some(true) {
+        return format!(
+            "{label} {} {}",
+            ui.dim("not installed (optional)"),
+            ui.dim(
+                "→ to record history: sudo apt install lindesk-telemetry (or ./packaging/install.sh --with-telemetry)"
+            )
+        );
+    }
+    let mut s = format!("{label} installed");
+    if let Some(dir) = t["dir"].as_str().map(Path::new) {
+        if std::fs::read_dir(dir).is_ok() {
+            s.push_str(&format!(", {} in {}", ui::bytes(crate::paths::dir_size(dir)), crate::cmd::doctor::tilde(dir)));
+        } else {
+            s.push_str(&format!(", {}", crate::cmd::doctor::tilde(dir)));
+        }
+    }
+    match t["state"].as_str() {
+        Some("running") | None => {}
+        Some(other) => s.push_str(&format!(" ({})", state_colored(ui, other))),
     }
     s
 }
@@ -539,9 +573,14 @@ pub mod tests {
                 ttl_until: st.now + 8 * 60_000 + 30_000,
                 description: "shorter epochs".into(),
             }],
+            telemetry: Some(json!({"installed": false, "enabled": true})),
             ..Default::default()
         };
         let s = render(&Ui::plain(), Daemon::Session, &st, &env, None, true);
+        assert!(
+            s.contains("  telemetry: not installed (optional) → to record history: sudo apt install lindesk-telemetry"),
+            "{s}"
+        );
         assert!(s.contains("lindesk-session · connected · profile auto→battery · 32×CPU · 62 GiB"), "{s}");
         assert!(s.contains("↺ change #7 reverts in 8m — shorter epochs  keep it: lindeskctl changes confirm 7"), "{s}");
         assert!(s.contains("⚡ interaction epoch"), "{s}");
@@ -552,6 +591,25 @@ pub mod tests {
         assert!(s.contains("PROTECTED  1\n  gnome"), "{s}");
         assert!(s.contains("rustc") && s.contains("-31%") && s.contains("-45%") && s.contains("6s"), "{s}");
         assert!(s.contains("cpu.weight 20"), "{s}");
+    }
+
+    #[test]
+    fn telemetry_lines() {
+        let ui = Ui::plain();
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("f.vortex"), vec![0u8; 2048]).unwrap();
+        let t = json!({"installed": true, "enabled": true, "state": "running", "dir": d.path()});
+        let l = telemetry_line(&ui, &t);
+        assert!(l.starts_with("telemetry: installed, 2.0 KiB in "), "{l}");
+        let l = telemetry_line(
+            &ui,
+            &json!({"installed": true, "enabled": true, "state": "backoff", "dir": "/nonexistent"}),
+        );
+        assert_eq!(l, "telemetry: installed, /nonexistent (backoff)");
+        assert_eq!(
+            telemetry_line(&ui, &json!({"enabled": false})),
+            "telemetry: disabled ([telemetry] enabled = false)"
+        );
     }
 
     #[test]

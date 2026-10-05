@@ -1,0 +1,56 @@
+#!/bin/sh
+# lindesk-telemetry postinst: lake directory, timers, and make the running daemons load
+# the telemetry plugin. Never fails the transaction.
+set -e
+
+# tmo CMD...: run with a 15 s timeout when timeout(1) exists.
+tmo() { if command -v timeout >/dev/null 2>&1; then timeout 15 "$@"; else "$@"; fi; }
+
+# reload_sessions: every running lindesk-session re-reads its plugins (SIGHUP), so the
+# user lakes start recording without a logout. Best effort.
+reload_sessions() {
+	command -v loginctl >/dev/null 2>&1 || return 0
+	for _u in $(loginctl list-users --no-legend 2>/dev/null | awk '{ print $2 }' | sort -u); do
+		[ -n "$_u" ] || continue
+		tmo systemctl --user -M "$_u@" reload lindesk-session.service >/dev/null 2>&1 || true
+	done
+	return 0
+}
+
+case "$1" in
+configure | abort-upgrade | abort-deconfigure | abort-remove)
+	if command -v systemd-tmpfiles >/dev/null 2>&1; then
+		systemd-tmpfiles ${DPKG_ROOT:+--root="$DPKG_ROOT"} --create lindesk-telemetry.conf || true
+	fi
+	if command -v deb-systemd-helper >/dev/null 2>&1; then
+		deb-systemd-helper unmask lindesk-compact.timer >/dev/null || true
+		if deb-systemd-helper --quiet was-enabled lindesk-compact.timer; then
+			deb-systemd-helper enable lindesk-compact.timer >/dev/null || true
+		else
+			deb-systemd-helper update-state lindesk-compact.timer >/dev/null || true
+		fi
+	elif command -v systemctl >/dev/null 2>&1; then
+		systemctl enable lindesk-compact.timer >/dev/null 2>&1 || true
+	fi
+	if [ -z "$2" ] && command -v systemctl >/dev/null 2>&1; then
+		systemctl --global enable lindesk-compact.timer >/dev/null 2>&1 || true
+	fi
+	if [ -d /run/systemd/system ]; then
+		systemctl --system daemon-reload >/dev/null || true
+		systemctl start lindesk-compact.timer >/dev/null 2>&1 || true
+		# lindeskd discovers the plugin on reload (SIGHUP); best effort.
+		if systemctl is-active --quiet lindeskd.service; then
+			systemctl reload-or-restart lindeskd.service >/dev/null 2>&1 || true
+		fi
+		reload_sessions
+	fi
+	if [ -z "$2" ]; then
+		echo "lindesk-telemetry: recording into /var/lib/lindesk/telemetry and each user's ~/.local/state/lindesk/telemetry."
+		echo "lindesk-telemetry: try: lindeskctl query \"select resource, avg(some_avg10) from pressure group by 1\""
+		echo "lindesk-telemetry: a session agent that was not running picks it up when it starts"
+		echo "lindesk-telemetry:   (or now: systemctl --user reload lindesk-session)"
+	fi
+	;;
+esac
+
+exit 0

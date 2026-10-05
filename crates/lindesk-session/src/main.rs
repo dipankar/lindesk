@@ -31,7 +31,6 @@ use lindesk_builtins::classifier::RulesClassifier;
 use lindesk_builtins::env::{Mode as EnvMode, SysEnvironment};
 use lindesk_builtins::policy::{RelayFeed, RelayPolicy, ThresholdPolicy, relay};
 use lindesk_builtins::sensors::{CgroupStatSensor, PsiSensor};
-use lindesk_builtins::sinks::ParquetSink;
 use lindesk_core::config::Config;
 use lindesk_host::{Engine, EngineOptions};
 use lindesk_ipc::{QOS_NAME, QOS_PATH};
@@ -274,11 +273,11 @@ fn run(cli: Cli, uid: u32) -> anyhow::Result<()> {
             let name = a.info().name;
             registered(&name, reg.register_actuator(a, 100 + n - i as i32));
         }
-        if config.telemetry.enabled {
-            registered(setup::PARQUET, reg.register_sink(Box::new(ParquetSink::new())));
-        }
     }
     setup::load_externals(&mut engine, Privilege::User);
+    if config.telemetry.enabled && !setup::telemetry_loaded(&engine) {
+        tracing::info!("{}", setup::TELEMETRY_NOT_INSTALLED);
+    }
     match engine.load_state(&state_path) {
         Ok(0) => {}
         Ok(n) => tracing::info!("recovered {n} applied settings from {}", state_path.display()),

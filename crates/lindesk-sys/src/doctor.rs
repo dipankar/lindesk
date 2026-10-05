@@ -258,13 +258,20 @@ pub fn findings(p: &Probe) -> Vec<Finding> {
     }
     for c in &p.conflicts {
         let unit = c.unit.clone().unwrap_or_else(|| format!("{}.service", c.name));
+        if !lindesk_core::conflicts::is_conflict(&c.name) {
+            let state = if c.running { "running (compatible)" } else { "installed (compatible)" };
+            push(Info, &c.name, state.into(), Some("coexists with lindesk: temporary, per-game changes"));
+            continue;
+        }
         if c.running {
+            let how = format!(
+                "sudo lindeskctl setup conflicts --disable (a revertible change; or systemctl disable --now {unit}). \
+                 Why: {CONFLICTS_GUIDE}"
+            );
             let r = if c.name == "system76-scheduler" {
-                format!(
-                    "system76-scheduler active: disable its foreground boost or stop it (systemctl disable --now {unit})"
-                )
+                format!("system76-scheduler active: disable its foreground boost or stop it: {how}")
             } else {
-                format!("{} active: it also adjusts priorities; stop it (systemctl disable --now {unit})", c.name)
+                format!("{} active: it also adjusts priorities; stop it: {how}", c.name)
             };
             push(Warn, &c.name, "running".into(), Some(r.as_str()));
         } else {
@@ -277,6 +284,9 @@ pub fn findings(p: &Probe) -> Vec<Finding> {
     push(sev, "Backend", backend.to_string(), None);
     out
 }
+
+/// Why the other priority daemons conflict, and how to coexist.
+pub const CONFLICTS_GUIDE: &str = "https://github.com/dipankar/lindesk/blob/main/docs/src/guide/conflicts.md";
 
 /// The hardware section: `CPU`, `Memory`, one `Storage` line per managed disk, `Power` and
 /// `Virtualized`, with the hardware-specific advice.

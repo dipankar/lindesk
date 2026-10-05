@@ -24,7 +24,19 @@ a views-only database that any DuckDB client can open read-only. It runs from
 .I lindesk\-compact.timer
 (system and user instances) and only touches partitions older than the current hour,
 under the lake's lock. The same operations are available as
-.BR "lindeskctl data" .
+.B "lindeskctl data"
+and
+.BR "lindeskctl query" ,
+which run this program.
+.PP
+.B lindesk\-data
+and the lake writer (the
+.B telemetry
+plugin) ship in the optional
+.B lindesk\-telemetry
+package; the core
+.B lindesk
+package links neither DuckDB nor Vortex.
 .SH COMMANDS
 .TP
 .B maintain
@@ -69,6 +81,30 @@ only counts them.
 .TP
 .B purge \-\-yes
 Remove all telemetry.
+.TP
+.BI "export \-\-table " T " \fR[\fB\-\-from\fR " TIME "\fR] [\fB\-\-to\fR " TIME "\fR] [\fB\-\-format\fR jsonl|json]"
+Print the rows of one table in a time window, with
+.B ts
+as epoch milliseconds (what
+.B "lindeskctl simulate"
+replays).
+.TP
+.BI import\-bench " RESULTS.json"
+Store a
+.B lindesk\-bench
+results file in
+.B bench_runs
+and
+.BR bench_samples .
+.B lindesk\-bench run
+does this itself when
+.B lindesk\-data
+is installed.
+.TP
+.B shell
+Open the
+.B duckdb
+CLI read-only on the catalog (regenerating it if needed).
 .SH OPTIONS
 .TP
 .BI \-\-root " DIR"

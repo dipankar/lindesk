@@ -1,24 +1,23 @@
-//! Storing results in the telemetry lake (`bench_runs` / `bench_samples`) through
-//! lindesk-store. Optional: the results JSON is the primary output, and builds without the
-//! `lake` feature skip this.
+//! The flat per-phase summary (`metrics` in the results JSON, the rows of `bench_samples`)
+//! and storing results in the telemetry lake.
+//!
+//! The results JSON is the primary output. lindesk-bench links no lake code: when
+//! `lindesk-data` (the optional lindesk-telemetry package) is installed it runs
+//! `lindesk-data import-bench <results.json>`, which stores the run in `bench_runs` /
+//! `bench_samples`; without it the results stay in the JSON (importable later the same way).
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 
-use crate::results::{PhaseResult, Results};
+use crate::results::{Metric, PhaseResult};
 
-/// One summary measurement of a phase.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Metric {
-    pub name: &'static str,
-    pub value: f64,
-    pub labels: BTreeMap<String, String>,
-}
-
-fn m(name: &'static str, value: f64, labels: &[(&str, &str)]) -> Metric {
-    Metric { name, value, labels: labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect() }
+fn m(name: &str, value: f64, labels: &[(&str, &str)]) -> Metric {
+    Metric {
+        name: name.to_string(),
+        value,
+        labels: labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+    }
 }
 
 /// Flattens a phase into named metrics (the rows of `bench_samples`).
@@ -72,81 +71,32 @@ pub fn phase_metrics(p: &PhaseResult) -> Vec<Metric> {
     out
 }
 
-#[cfg(feature = "lake")]
-pub fn store(r: &Results, root: Option<&Path>) -> Result<String> {
-    use anyhow::Context;
-    use lindesk_store::{BenchPhase, BenchRun, BenchSample, Store, StoreOptions, layout};
-
-    let root = root.map_or_else(|| layout::default_root(false), Path::to_path_buf);
-    let started_ms = r.phases.first().map_or_else(lindesk_store::wall_clock_ms, |p| p.started_ms);
-    let run = BenchRun {
-        run_id: r.run_id.clone(),
-        ts: started_ms,
-        label: r.label.clone(),
-        host: r.host.hostname.clone(),
-        kernel: r.host.kernel.clone(),
-        config: serde_json::json!({ "config": r.config, "host": r.host }),
-        notes: None,
-    };
-    let mut samples = Vec::new();
-    for p in &r.phases {
-        let phase = match p.phase {
-            crate::results::Phase::Off => BenchPhase::LindeskOff,
-            crate::results::Phase::On => BenchPhase::LindeskOn,
-        };
-        for x in phase_metrics(p) {
-            samples.push(BenchSample {
-                ts: p.started_ms,
-                run_id: r.run_id.clone(),
-                phase,
-                metric: x.name.into(),
-                value: x.value,
-                iteration: None,
-                labels: x.labels,
-            });
-        }
-        // The once-a-second timeline, as a series.
-        for (i, t) in p.timeline.iter().enumerate() {
-            let ts = p.started_ms + (t.t_s * 1000.0) as i64;
-            for (res, s) in [("cpu", &t.psi.cpu), ("io", &t.psi.io), ("memory", &t.psi.memory)] {
-                if let Some(s) = s {
-                    let mut labels = BTreeMap::from([
-                        ("series".to_string(), "timeline".to_string()),
-                        ("scope".into(), "system".into()),
-                        ("resource".into(), res.into()),
-                    ]);
-                    if let Some(l) = &t.level {
-                        labels.insert("level".into(), l.clone());
-                    }
-                    samples.push(BenchSample {
-                        ts,
-                        run_id: r.run_id.clone(),
-                        phase,
-                        metric: "psi_some_pct".into(),
-                        value: s.some_pct,
-                        iteration: Some(i as u32),
-                        labels,
-                    });
-                }
-            }
-        }
-    }
-    let mut store = Store::open(&root, StoreOptions::user()).with_context(|| format!("opening {}", root.display()))?;
-    store.append_bench(&run, &samples);
-    let rep = store.flush_wait(lindesk_store::wall_clock_ms(), std::time::Duration::from_secs(10))?;
-    if rep.deferred_rows > 0 {
-        anyhow::bail!(
-            "the lake at {} is locked by maintenance; {} rows not written",
-            root.display(),
-            rep.deferred_rows
+/// Stores the results file at `json` through `lindesk-data import-bench` (into `root`, else
+/// the user's lake). Returns lindesk-data's summary line.
+pub fn store(json: &Path, root: Option<&Path>) -> Result<String> {
+    let Some(bin) = lindesk_sys::telemetry::data_binary() else {
+        bail!(
+            "{}\n  results kept in {}; import them later with: lindesk-data import-bench {}",
+            lindesk_sys::telemetry::NOT_INSTALLED,
+            json.display(),
+            json.display()
         );
+    };
+    let mut c = std::process::Command::new(&bin);
+    if let Some(r) = root {
+        c.arg("--root").arg(r);
     }
-    Ok(format!("stored run {} ({} rows) in the telemetry lake at {}", r.run_id, rep.rows, root.display()))
-}
-
-#[cfg(not(feature = "lake"))]
-pub fn store(_: &Results, _: Option<&Path>) -> Result<String> {
-    anyhow::bail!("built without the `lake` feature")
+    let o = c
+        .arg("import-bench")
+        .arg(json)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| anyhow!("running {}: {e}", bin.display()))?;
+    if !o.status.success() {
+        let err = String::from_utf8_lossy(&o.stderr);
+        bail!("{}", err.trim().strip_prefix("lindesk-data: ").unwrap_or(err.trim()));
+    }
+    Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
 #[cfg(test)]
@@ -167,23 +117,36 @@ mod tests {
         assert_eq!(get("level_seconds", "level", "red"), Some(4.0));
     }
 
-    #[cfg(feature = "lake")]
+    /// Both halves in one test: they set LINDESK_DATA, which tests in other threads would see.
     #[test]
-    fn stores_into_a_lake() {
+    fn stores_through_lindesk_data_or_explains() {
+        use lindesk_sys::telemetry::DATA_ENV;
         let t = tempfile::tempdir().unwrap();
-        let root = t.path().join("telemetry");
-        let msg = store(&sample_results(), Some(&root)).unwrap();
-        assert!(msg.contains("rows"), "{msg}");
-        let has_files = |table: &str| {
-            fn walk(d: &Path) -> bool {
-                std::fs::read_dir(d).into_iter().flatten().flatten().any(|e| {
-                    let p = e.path();
-                    if p.is_dir() { walk(&p) } else { p.extension().is_some_and(|x| x == "vortex") }
-                })
+        let json = t.path().join("bench-results.json");
+        std::fs::write(&json, serde_json::to_string(&sample_results()).unwrap()).unwrap();
+        // SAFETY: only this test in this binary reads or writes LINDESK_DATA.
+        unsafe { std::env::set_var(DATA_ENV, "/nonexistent/lindesk-data") };
+        let e = store(&json, None).unwrap_err().to_string();
+        assert!(e.starts_with("telemetry isn't installed"), "{e}");
+        assert!(e.contains(&format!("lindesk-data import-bench {}", json.display())), "{e}");
+
+        // The workspace's lindesk-data, when this test runs from `cargo test --workspace`.
+        let exe = std::env::current_exe().unwrap();
+        let data = exe.parent().and_then(Path::parent).map(|d| d.join("lindesk-data"));
+        match data.filter(|d| d.is_file()) {
+            Some(d) => {
+                unsafe { std::env::set_var(DATA_ENV, &d) };
+                let root = t.path().join("telemetry");
+                let msg = store(&json, Some(&root));
+                unsafe { std::env::remove_var(DATA_ENV) };
+                let msg = msg.unwrap();
+                assert!(msg.starts_with("stored run") && msg.contains("rows"), "{msg}");
+                assert!(root.join("bench_runs").is_dir() && root.join("bench_samples").is_dir());
             }
-            walk(&root.join(table))
-        };
-        assert!(has_files("bench_runs"));
-        assert!(has_files("bench_samples"));
+            None => {
+                unsafe { std::env::remove_var(DATA_ENV) };
+                eprintln!("lindesk-data not built next to this test; skipped the import half");
+            }
+        }
     }
 }

@@ -12,7 +12,7 @@ writing one. It takes about ten minutes, and the tutorials link back here.
 | **classifier** | `classifier.classify {proc}` per new or changed unit | a class with a confidence and a reason, or `null` (no opinion) | `rules` (TOML globs) |
 | **policy** | `policy.evaluate {snapshot}` every tick | intents, optionally a level, metrics | `threshold` |
 | **actuator** | `actuator.read/apply/reset` | the current value / nothing | systemd, cgroup v2, cgroup v1, per-process |
-| **sink** | `sink.record {records}`, a notification | nothing | `parquet-store` (the telemetry lake, Vortex files) |
+| **sink** | `sink.record {records}`, a notification | nothing | `telemetry` (external, from lindesk-telemetry: the Vortex lake writer) |
 
 One process may serve several kinds. The [focus-logger](https://github.com/dipankar/lindesk/tree/main/examples/plugins/python/focus-logger)
 example is both an adapter and a sink.

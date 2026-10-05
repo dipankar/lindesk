@@ -1,9 +1,9 @@
 #!/bin/sh
-# lindesk postrm: drop enablement links; purge also removes telemetry.
+# lindesk postrm: drop enablement links; purge also removes /var/lib/lindesk.
 set -e
 
-SYSTEM_UNITS="lindeskd.service lindesk-compact.timer"
-USER_UNITS="lindesk-session.service lindesk-compact.timer lindesk-mcp.socket lindesk-mcp.service"
+SYSTEM_UNITS="lindeskd.service"
+USER_UNITS="lindesk-session.service lindesk-mcp.socket lindesk-mcp.service"
 
 case "$1" in
 remove)

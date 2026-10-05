@@ -28,6 +28,7 @@ pub mod requirements;
 pub mod roots;
 pub mod swap;
 pub mod syscalls;
+pub mod telemetry;
 
 mod util;
 

@@ -2,7 +2,9 @@
 //!
 //! lindesk keeps its telemetry in a hive-partitioned [Vortex](https://vortex.dev) lake that
 //! DuckDB queries through its `vortex` extension. This crate is the *write* side, linked by
-//! the daemons. It depends on arrow-rs and the `vortex` crate only, never on DuckDB. Reading, compaction, rollups, retention and deletion live
+//! the `telemetry` sink plugin (`lindesk-telemetry-sink`) and `lindesk-data`, never by the
+//! daemons. It depends on arrow-rs and the `vortex` crate only, never on DuckDB. Reading,
+//! compaction, rollups, retention and deletion live
 //! in `lindesk-query`.
 //!
 //! * [`schema`]: every table's columns ([`TABLES`], [`schema()`]).

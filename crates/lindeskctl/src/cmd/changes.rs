@@ -17,7 +17,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::bus::{self, Daemon};
-use crate::cli::{ChangesCmd, OnOff, OpsArgs};
+use crate::cli::{ChangesCmd, LocalStore, OnOff, OpsArgs, StoreScope};
 use crate::ui::{self, Exit, Table, Ui, Usage, out};
 
 /// Default ttl for high-risk changes made from the CLI without `--ttl`.
@@ -29,10 +29,173 @@ pub fn run(ui: &Ui, cmd: &ChangesCmd) -> Result<()> {
         ChangesCmd::Show { id } => show(ui, *id),
         ChangesCmd::Diff { a, b } => diff(ui, *a, *b),
         ChangesCmd::Plan(ops) => plan_cmd(ui, ops),
-        ChangesCmd::Apply { ops, ttl, message, yes } => apply_cmd(ui, ops, *ttl, message.as_deref(), *yes),
+        ChangesCmd::Apply { ops, ttl, message, yes, offline: true, local } => {
+            apply_offline(ui, ops, *ttl, message.as_deref(), *yes, local)
+        }
+        ChangesCmd::Apply { ops, ttl, message, yes, .. } => apply_cmd(ui, ops, *ttl, message.as_deref(), *yes),
         ChangesCmd::Confirm { id } => confirm(ui, *id),
         ChangesCmd::Revert { id } => revert(ui, *id),
         ChangesCmd::RevertTo { to, yes } => revert_to(ui, *to, *yes),
+        ChangesCmd::RevertAll { scope, yes, local } => revert_all(ui, *scope, *yes, local),
+    }
+}
+
+// ------------------------------------------------------------------------ offline store
+
+fn scope_of(s: StoreScope) -> Scope {
+    match s {
+        StoreScope::System => Scope::System,
+        StoreScope::User => Scope::User,
+    }
+}
+
+/// The change store of `scope`, opened directly (no daemon) with the real applier, or one
+/// rooted at `--root` (fixture trees). System scope needs root unless `--store` points
+/// elsewhere.
+pub fn open_local(scope: Scope, local: &LocalStore, what: &str) -> Result<ChangeStore> {
+    let dir = match &local.store {
+        Some(d) => d.clone(),
+        None => {
+            if scope == Scope::System {
+                crate::paths::require_root(what)?;
+            }
+            store_dir(scope).ok_or_else(|| anyhow!("no change store for {scope} scope (HOME unset?)"))?
+        }
+    };
+    let roots = local.root.as_ref().map_or_else(lindesk_changes::Roots::host, lindesk_changes::Roots::under);
+    let applier = lindesk_changes::RealApplier::new(roots, lindesk_changes::ConfigPaths::host(scope));
+    Ok(ChangeStore::open(&dir, scope)
+        .with_context(|| format!("opening the change store {}", dir.display()))?
+        .with_applier(std::sync::Arc::new(applier)))
+}
+
+fn local_ctx(scope: Scope, local: &LocalStore, origin: lindesk_changes::Origin) -> lindesk_changes::GuardContext {
+    let roots = local.root.as_ref().map_or_else(lindesk_changes::Roots::host, lindesk_changes::Roots::under);
+    let hw = lindesk_sys::hardware::detect(&lindesk_sys::Roots::host());
+    lindesk_changes::GuardContext::new(scope, origin, roots, lindesk_changes::ConfigPaths::host(scope), hw)
+}
+
+/// `changes apply --offline`: plan and apply through the store on disk.
+fn apply_offline(
+    ui: &Ui,
+    args: &OpsArgs,
+    ttl: Option<Duration>,
+    message: Option<&str>,
+    yes: bool,
+    local: &LocalStore,
+) -> Result<()> {
+    let ops = build_ops(args, ui.system)?;
+    let scope = ops.first().map_or(Scope::User, ChangeOp::scope);
+    if ops.iter().any(|o| o.scope() != scope) {
+        bail!("--offline applies one scope at a time; split the ops");
+    }
+    if ttl.is_some_and(|t| !t.is_zero()) {
+        ui.warn("--ttl needs the daemon's dead-man switch; ignored with --offline");
+    }
+    let store = open_local(scope, local, "applying a system change offline")?;
+    store.recover()?;
+    let plan = store.plan(&ops, &local_ctx(scope, local, lindesk_changes::Origin::Cli));
+    if !ui.json {
+        out(render_plan(ui, &plan).trim_end());
+    }
+    if !plan.is_ok() {
+        if ui.json {
+            ui.print_json(&plan)?;
+        }
+        return Err(Exit(1).into());
+    }
+    if !yes {
+        if !ui.stdin_tty {
+            return Err(Usage("not a terminal: pass --yes to apply without confirmation".into()).into());
+        }
+        if !ui::confirm("Apply this change?") {
+            ui.info("nothing changed");
+            return Err(Exit(1).into());
+        }
+    }
+    let description = message.map(str::to_string).unwrap_or_else(|| default_description(&ops));
+    let author =
+        lindesk_changes::Author::new(crate::paths::uid(), lindesk_changes::Origin::Cli).with_client("lindeskctl");
+    let cs = store.apply(&plan, author, &description, None)?;
+    if ui.json {
+        ui.print_json(&cs)?;
+    } else {
+        out(&applied_message(ui, &cs, now_ms()));
+    }
+    if cs.status == Status::Failed { Err(Exit(1).into()) } else { Ok(()) }
+}
+
+/// `changes revert-all`: revert every effective changeset of a scope, offline.
+fn revert_all(ui: &Ui, scope: StoreScope, yes: bool, local: &LocalStore) -> Result<()> {
+    let scope = scope_of(scope);
+    let store = open_local(scope, local, "reverting every system change")?;
+    let recovered = store.recover()?;
+    let effective: Vec<ChangeSet> = store.history(usize::MAX)?.into_iter().filter(ChangeSet::is_effective).collect();
+    if effective.is_empty() {
+        if ui.json {
+            return ui.print_json(&json!({"scope": scope, "recovered": recovered.len(), "reverted": []}));
+        }
+        out(&ui.dim(format!("no {scope} changes in effect; nothing to revert")));
+        return Ok(());
+    }
+    if !ui.json {
+        let now = now_ms();
+        let mut s = format!(
+            "{}
+",
+            ui.bold(format!("revert all {} {scope} change(s) still in effect:", effective.len()))
+        );
+        for c in &effective {
+            s.push_str(&format!(
+                "  #{:<4} {}  {}
+",
+                c.id,
+                status_colored(ui, c, now),
+                c.description
+            ));
+        }
+        out(s.trim_end());
+    }
+    if !yes {
+        if !ui.stdin_tty {
+            return Err(Usage("not a terminal: pass --yes to revert without confirmation".into()).into());
+        }
+        if !ui::confirm("Revert all of them?") {
+            ui.info("nothing changed");
+            return Err(Exit(1).into());
+        }
+    }
+    let author =
+        lindesk_changes::Author::new(crate::paths::uid(), lindesk_changes::Origin::Cli).with_client("revert-all");
+    let cs = store.revert_to(0, author)?;
+    let ids: Vec<u64> = effective.iter().map(|c| c.id).collect();
+    if ui.json {
+        return ui.print_json(
+            &json!({"scope": scope, "recovered": recovered.len(), "reverted": ids, "by": cs.as_ref().map(|c| c.id)}),
+        );
+    }
+    match cs {
+        Some(c) if c.status == Status::Failed => {
+            out(&format!(
+                "{} reverting failed and was rolled back: {}",
+                ui.fail_mark(),
+                c.error.clone().unwrap_or_default()
+            ));
+            Err(Exit(1).into())
+        }
+        Some(c) => {
+            out(&format!(
+                "{} reverted {} change(s) {}",
+                ui.ok_mark(),
+                ids.len(),
+                ui.dim(format!("(as change #{})", c.id))
+            ));
+            Ok(())
+        }
+        None => {
+            out(&ui.dim("nothing to revert"));
+            Ok(())
+        }
     }
 }
 
@@ -293,6 +456,7 @@ pub fn op_target(op: &ChangeOp) -> (&'static str, String) {
         ChangeOp::Zswap { .. } => ("zswap", "parameters".into()),
         ChangeOp::CpuEpp { .. } => ("cpu_epp", "all CPUs".into()),
         ChangeOp::CpuGovernor { .. } => ("governor", "all CPUs".into()),
+        ChangeOp::ServiceState { unit, .. } => ("service", unit.clone()),
     }
 }
 
@@ -967,6 +1131,11 @@ pub fn command_line_tail(ops: &[ChangeOp], system: bool) -> String {
             }
             ChangeOp::CpuEpp { preference } => parts.push(format!("--epp {}", quote(preference))),
             ChangeOp::CpuGovernor { governor } => parts.push(format!("--governor {}", quote(governor))),
+            ChangeOp::ServiceState { .. } => {
+                // No flag for it: `lindeskctl setup conflicts` makes these; fall back to JSON.
+                let json = serde_json::to_string(ops).unwrap_or_default();
+                return format!("- <<< {}", quote(&json));
+            }
         }
     }
     if persist {

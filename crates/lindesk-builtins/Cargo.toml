@@ -1,6 +1,6 @@
 [package]
 name = "lindesk-builtins"
-description = "Built-in lindesk plugins: sensors, adapters, classifiers, policies, actuators and sinks"
+description = "Built-in lindesk plugins: sensors, adapters, classifiers, policies and actuators"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +16,6 @@ cosmic = ["dep:wayland-client", "dep:wayland-protocols", "dep:cosmic-protocols"]
 [dependencies]
 lindesk-plugin-api.workspace = true
 lindesk-core.workspace = true
-lindesk-store.workspace = true
 lindesk-sys.workspace = true
 lindesk-host.workspace = true
 zbus = { workspace = true, features = ["tokio", "blocking-api"] }

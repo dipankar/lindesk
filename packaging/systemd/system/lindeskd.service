@@ -10,6 +10,8 @@ NotifyAccess=main
 BusName=org.lindesk.Broker1
 ExecStart=/usr/bin/lindeskd
 # Undo every runtime change even if the daemon crashed.
+# SIGHUP re-reads the config and loads newly installed plugins (e.g. lindesk-telemetry).
+ExecReload=/bin/kill -HUP $MAINPID
 ExecStopPost=/usr/bin/lindeskd --restore
 Restart=on-failure
 RestartSec=2s

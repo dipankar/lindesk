@@ -1,21 +1,32 @@
-//! `lindeskctl query` and `lindeskctl data …`: the telemetry lake through lindesk-query.
+//! `lindeskctl query` and `lindeskctl data …`: the telemetry lake through `lindesk-data`
+//! (the optional lindesk-telemetry package; see [`crate::telemetry`]).
 
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 use lindesk_core::config::Config;
-use lindesk_query::{CATALOG_HINT, DeleteRequest, Format, Lake, QueryError};
 use serde_json::json;
 
 use crate::cli::{BackendArg, DataCmd, QueryArgs, QueryFormat};
 use crate::cmd::doctor::tilde;
 use crate::paths;
+use crate::telemetry::{self, CATALOG_HINT, Data};
 use crate::ui::{Table, Ui, bytes, confirm, out};
 
 fn config(ui: &Ui) -> Option<Config> {
     paths::load_config(&paths::config_path(ui.system)).ok()
+}
+
+/// A lake: where it is and the `lindesk-data` that reads it.
+pub struct Lake {
+    root: PathBuf,
+    pub data: Data,
+}
+
+impl Lake {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 }
 
 /// The lake for the scope (or an explicit directory), read with the default backend.
@@ -23,49 +34,42 @@ pub fn open_lake(ui: &Ui, explicit: Option<&Path>) -> Result<Lake> {
     open_lake_with(ui, explicit, BackendArg::Auto)
 }
 
-/// [`open_lake`] with a backend choice (`--backend`).
+/// [`open_lake`] with a backend choice (`--backend`). Fails with the not-installed message
+/// (exit 1) without `lindesk-data`.
 pub fn open_lake_with(ui: &Ui, explicit: Option<&Path>, backend: BackendArg) -> Result<Lake> {
     let root = paths::lake_root(explicit, ui.system, config(ui).as_ref());
+    let data = Data::new(ui, &root, &paths::config_path(ui.system), backend)?;
     if ui.system && root.exists() && std::fs::read_dir(&root).is_err() {
         bail!(
             "can't read the system lake at {}: it's readable by root and the lindesk group.\n  Join the group: sudo usermod -aG lindesk $USER (then log out and in), or use sudo.",
             root.display()
         );
     }
-    Ok(Lake::open(&root)?.with_backend(backend.into()))
-}
-
-fn query_error(e: QueryError, lake: &Lake) -> anyhow::Error {
-    match e {
-        QueryError::Refused(m) => {
-            anyhow!("{m}\n  lindeskctl query is read-only; to delete rows use: lindeskctl data delete --where …")
-        }
-        QueryError::DuckDb(d) => {
-            let m = d.to_string();
-            let hint = if m.contains("does not exist") || m.contains("not found") {
-                "\n  Tables: pressure, units, events, metrics, bench_runs, bench_samples, pressure_1m, pressure_1h, units_1m, units_1h. Columns: lindeskctl query \"describe units\""
-            } else {
-                ""
-            };
-            anyhow!("{m}{hint}")
-        }
-        QueryError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied => {
-            anyhow!("permission denied reading {} ({io})", lake.root().display())
-        }
-        other => anyhow!(other),
-    }
+    Ok(Lake { root, data })
 }
 
 pub fn query(ui: &Ui, a: &QueryArgs) -> Result<()> {
     let lake = open_lake_with(ui, a.lake.as_deref(), a.backend)?;
     let fmt = if ui.json && a.format == QueryFormat::Table { QueryFormat::Json } else { a.format };
-    let format = match fmt {
-        QueryFormat::Table => Format::Table,
-        QueryFormat::Csv => Format::Csv,
-        QueryFormat::Json => Format::Json,
+    let mut args = vec!["query".to_string(), a.sql.clone(), "--format".into()];
+    let parquet = match fmt {
+        QueryFormat::Table => {
+            args.push("table".into());
+            None
+        }
+        QueryFormat::Csv => {
+            args.push("csv".into());
+            None
+        }
+        QueryFormat::Json => {
+            args.push("json".into());
+            None
+        }
         QueryFormat::Parquet => {
             let out = a.out.clone().ok_or_else(|| crate::ui::Usage("--format parquet needs --out FILE".into()))?;
-            Format::Parquet(std::path::absolute(out)?)
+            let out = std::path::absolute(out)?;
+            args.extend(["parquet".into(), "--output".into(), out.display().to_string()]);
+            Some(out)
         }
     };
     if !lake.root().is_dir() {
@@ -76,9 +80,10 @@ pub fn query(ui: &Ui, a: &QueryArgs) -> Result<()> {
             )),
         );
     }
-    let result = lake.query(&a.sql, &format).map_err(|e| query_error(e, &lake))?;
-    match (&format, &a.out) {
-        (Format::Parquet(p), _) => ui.info(format!("{} wrote {}", ui.ok_mark(), p.display())),
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let result = lake.data.output(&args)?;
+    match (&parquet, &a.out) {
+        (Some(p), _) => ui.info(format!("{} wrote {}", ui.ok_mark(), p.display())),
         (_, Some(path)) => {
             std::fs::write(path, &result).with_context(|| format!("writing {}", path.display()))?;
             ui.info(format!("{} wrote {}", ui.ok_mark(), path.display()));
@@ -121,7 +126,7 @@ pub fn parse_time(s: &str, now: i64) -> Result<i64> {
     Ok(now - d.as_millis() as i64)
 }
 
-fn print_stats(ui: &Ui, s: &lindesk_query::LakeStats) {
+fn print_stats(ui: &Ui, s: &telemetry::LakeStats) {
     let mut t =
         Table::new(&["TABLE", "KIND", "PARTITIONS", "FILES", "ROWS", "SIZE", "OLDEST", "NEWEST"]).right(&[2, 3, 4, 5]);
     for x in &s.tables {
@@ -199,9 +204,10 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
         DataCmd::Catalog(l) => {
             require_write(ui, "regenerating the system catalog")?;
             let lake = open_lake_with(ui, l.lake.as_deref(), l.backend)?;
-            let p = lake.catalog().map_err(|e| {
+            let (c, _) = lake.data.json::<telemetry::Catalog>(&["catalog"]).map_err(|e| {
                 anyhow!("{e}\n  The catalog needs the DuckDB vortex extension: lindeskctl data install-extension")
             })?;
+            let p = c.catalog;
             if ui.json {
                 return ui.print_json(&json!({"catalog": p, "client_setup": CATALOG_HINT}));
             }
@@ -219,9 +225,9 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
             require_write(ui, "compacting the system lake")?;
             let lake = open_lake_with(ui, l.lake.as_deref(), l.backend)?;
             must_exist(&lake)?;
-            let r = lake.compact(now())?;
+            let (r, raw) = lake.data.json::<telemetry::CompactReport>(&["compact"])?;
             if ui.json {
-                return ui.print_json(&r);
+                return ui.print_json(&raw);
             }
             out(&format!(
                 "{} compacted {} partitions: {} → {} files, {} → {}; rollups refreshed for {} hours",
@@ -239,10 +245,10 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
             require_write(ui, "pruning the system lake")?;
             let lake = open_lake_with(ui, l.lake.as_deref(), l.backend)?;
             must_exist(&lake)?;
-            let retention = config(ui).unwrap_or_default().telemetry.retention;
-            let r = lake.prune(&retention, now())?;
+            // Retention comes from the scope's config (lindesk-data --config).
+            let (r, raw) = lake.data.json::<telemetry::PruneReport>(&["prune"])?;
             if ui.json {
-                return ui.print_json(&r);
+                return ui.print_json(&raw);
             }
             out(&format!("{} pruned: {} → {}", ui.ok_mark(), bytes(r.bytes_before), bytes(r.bytes_after)));
             for t in &r.tables {
@@ -258,9 +264,9 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
         }
         DataCmd::Stats(l) => {
             let lake = open_lake_with(ui, l.lake.as_deref(), l.backend)?;
-            let s = lake.stats()?;
+            let (s, raw) = lake.data.json::<telemetry::LakeStats>(&["stats"])?;
             if ui.json {
-                return ui.print_json(&s);
+                return ui.print_json(&raw);
             }
             print_stats(ui, &s);
             Ok(())
@@ -268,16 +274,17 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
         DataCmd::InstallExtension(l) => {
             require_write(ui, "installing the DuckDB vortex extension for the system lake")?;
             let lake = open_lake_with(ui, l.lake.as_deref(), BackendArg::Extension)?;
-            lake.install_extension().map_err(|e| {
+            let ext_dir = lake.root().parent().unwrap_or(lake.root()).join("duckdb-ext");
+            lake.data.output(&["install-extension"]).map_err(|e| {
                 anyhow!("{e}\n  It downloads once from DuckDB's extension repository; without it lindesk uses its built-in Vortex reader.")
             })?;
             if ui.json {
-                return ui.print_json(&json!({"installed": true, "dir": lake.extension_dir()}));
+                return ui.print_json(&json!({"installed": true, "dir": ext_dir}));
             }
             out(&format!(
                 "{} DuckDB vortex extension installed in {} (queries and the catalog work offline now)",
                 ui.ok_mark(),
-                tilde(lake.extension_dir())
+                tilde(&ext_dir)
             ));
             Ok(())
         }
@@ -288,18 +295,23 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
             let lake = open_lake_with(ui, l.lake.as_deref(), l.backend)?;
             must_exist(&lake)?;
             let n = now();
-            let mut req = DeleteRequest {
-                predicate: predicate.clone(),
-                tables: tables.clone(),
-                since: since.as_deref().map(|s| parse_time(s, n)).transpose()?,
-                until: until.as_deref().map(|s| parse_time(s, n)).transpose()?,
-                dry_run: true,
-            };
-            let count = lake.delete(&req).map_err(|e| query_error(e, &lake))?;
+            let mut args: Vec<String> = vec!["delete".into(), "--where".into(), predicate.clone()];
+            for t in tables {
+                args.extend(["--table".into(), t.clone()]);
+            }
+            if let Some(s) = since {
+                args.extend(["--since".into(), parse_time(s, n)?.to_string()]);
+            }
+            if let Some(u) = until {
+                args.extend(["--until".into(), parse_time(u, n)?.to_string()]);
+            }
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            // Without --yes lindesk-data only counts.
+            let (count, raw) = lake.data.json::<telemetry::DeleteReport>(&argv)?;
             let total = count.rows();
             if *dry_run || total == 0 {
                 if ui.json {
-                    return ui.print_json(&count);
+                    return ui.print_json(&raw);
                 }
                 if total == 0 {
                     out("no matching rows");
@@ -319,10 +331,11 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
                 out("nothing deleted");
                 return Ok(());
             }
-            req.dry_run = false;
-            let r = lake.delete(&req).map_err(|e| query_error(e, &lake))?;
+            let mut argv = argv;
+            argv.push("--yes");
+            let (r, raw) = lake.data.json::<telemetry::DeleteReport>(&argv)?;
             if ui.json {
-                return ui.print_json(&r);
+                return ui.print_json(&raw);
             }
             let rewritten: usize = r.tables.iter().map(|t| t.partitions_rewritten + t.partitions_removed).sum();
             out(&format!("{} deleted {} rows ({rewritten} partitions rewritten)", ui.ok_mark(), r.rows()));
@@ -340,43 +353,18 @@ pub fn data(ui: &Ui, cmd: &DataCmd) -> Result<()> {
                 out("nothing removed");
                 return Ok(());
             }
-            let r = lake.purge()?;
+            let (r, raw) = lake.data.json::<telemetry::PurgeReport>(&["purge", "--yes"])?;
             if ui.json {
-                return ui.print_json(&r);
+                return ui.print_json(&raw);
             }
             out(&format!("{} removed {} files ({})", ui.ok_mark(), r.files, bytes(r.bytes)));
             Ok(())
         }
-        DataCmd::Shell(l) => shell(ui, l.lake.as_deref(), l.backend),
+        DataCmd::Shell(l) => {
+            let lake = open_lake_with(ui, l.lake.as_deref(), l.backend)?;
+            Err(lake.data.exec(&["shell"]))
+        }
     }
-}
-
-fn shell(ui: &Ui, explicit: Option<&Path>, backend: BackendArg) -> Result<()> {
-    let lake = open_lake_with(ui, explicit, backend)?;
-    let Some(duckdb) = paths::which("duckdb") else {
-        bail!(
-            "the duckdb CLI isn't installed. Get it from https://duckdb.org/docs/installation (one static binary; e.g. `curl https://install.duckdb.org | sh`),\n  or query without it: lindeskctl query \"select …\""
-        );
-    };
-    let catalog: PathBuf = lake.catalog_path().to_path_buf();
-    if !catalog.exists() {
-        lake.catalog().with_context(|| {
-            format!(
-                "{} doesn't exist and couldn't be generated (run lindeskctl data catalog{})",
-                catalog.display(),
-                if ui.system { " as root" } else { "" }
-            )
-        })?;
-    }
-    ui.info(ui.dim(format!(
-        "opening {} read-only; tables are views over the Vortex lake (.tables lists them)",
-        tilde(&catalog)
-    )));
-    // DuckDB doesn't autoload the extension the views need.
-    let ext_dir = lake.extension_dir().to_string_lossy().replace('\'', "''");
-    let init = format!("SET extension_directory = '{ext_dir}'; {CATALOG_HINT}");
-    let err = Command::new(duckdb).arg("-readonly").arg("-cmd").arg(init).arg(&catalog).exec();
-    Err(anyhow!("running duckdb: {err}"))
 }
 
 #[cfg(test)]

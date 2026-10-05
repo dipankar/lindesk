@@ -135,6 +135,45 @@ fn apply_change_revert() {
 }
 
 #[test]
+fn pause_reverts_everything_and_resume_reapplies() {
+    let w = world();
+    let mut e = engine(&w);
+    e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).unwrap();
+    e.registry_mut().register_policy(Box::new(throttle_policy(Arc::new(Mutex::new(20)))), 0).unwrap();
+    w.sensor.set_pressure(Resource::Io, 80.0);
+    assert_eq!(e.step(1000).actions[0].outcome, ActionOutcome::Applied);
+
+    let restored = e.set_paused(true);
+    assert!(e.paused() && e.dry_run());
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].outcome, ActionOutcome::Reverted);
+    // Still sensing and deciding, applying nothing.
+    let r = e.step(2000);
+    assert_eq!(r.level, Level::Yellow);
+    assert!(r.actions.iter().all(|a| a.outcome == ActionOutcome::DryRun), "{r}");
+    assert!(r.events.iter().any(|ev| matches!(ev, Event::ActionApplied { provenance, .. }
+        if provenance.reason.starts_with("paused: "))));
+    assert!(e.set_paused(true).is_empty(), "idempotent");
+
+    assert!(e.set_paused(false).is_empty());
+    assert!(!e.paused() && !e.dry_run());
+    let r = e.step(3000);
+    assert_eq!(r.actions.len(), 1, "{r}");
+    assert_eq!(r.actions[0].outcome, ActionOutcome::Applied);
+    let calls = lock(&w.act.log).calls.clone();
+    assert_eq!(
+        calls,
+        vec![
+            format!("read cpu.weight {}", cargo()),
+            format!("apply cpu.weight=20 {}", cargo()),
+            format!("reset cpu.weight {} to cpu.weight=100", cargo()),
+            format!("read cpu.weight {}", cargo()),
+            format!("apply cpu.weight=20 {}", cargo()),
+        ]
+    );
+}
+
+#[test]
 fn dry_run_records_but_never_applies() {
     let w = world();
     let mut config = Config::default();

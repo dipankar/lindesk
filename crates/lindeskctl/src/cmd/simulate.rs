@@ -1,6 +1,7 @@
 //! `lindeskctl simulate`: replay recorded telemetry through a policy on simulated time.
 //!
-//! The recorded `pressure`, `units` and `events` rows of a window are read from the lake.
+//! The recorded `pressure`, `units` and `events` rows of a window are read from the lake
+//! with `lindesk-data export` (the optional lindesk-telemetry package).
 //! A [`MemoryEnvironment`] is rebuilt from the recorded units, a replay sensor feeds the
 //! samples and usage back in timestamp order, focus/interaction events are pushed at their
 //! recorded times, recorded classes are pinned, and a recording actuator accepts every
@@ -10,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use lindesk_builtins::policy::ThresholdPolicy;
 use lindesk_core::config::{Config, merge_json};
 use lindesk_host::{ActionOutcome, Engine, EngineOptions, MemoryEnvironment};
@@ -19,12 +20,11 @@ use lindesk_plugin_api::{
     PluginResult, Privilege, QosClass, Resource, Sample, Scope, Sensor, SensorInput, SensorOutput, Setting, Target,
     TargetUsage, TimestampMs, Usage,
 };
-use lindesk_query::{Format, Lake};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cli::SimulateArgs;
-use crate::cmd::data::{open_lake, parse_time};
+use crate::cmd::data::{Lake, open_lake, parse_time};
 use crate::cmd::doctor::tilde;
 use crate::paths;
 use crate::ui::{self, Ui, badge, duration_ms, out, setting_short};
@@ -45,14 +45,6 @@ pub struct Recording {
     pub levels: Vec<(TimestampMs, Level, Level)>,
     /// cgroup path of each target, from per-cgroup pressure rows.
     pub cgroups: BTreeMap<Target, String>,
-}
-
-fn rows(lake: &Lake, sql: &str) -> Result<Vec<Value>> {
-    let s = lake.query(sql, &Format::Json).map_err(|e| anyhow!("reading the lake: {e}"))?;
-    if s.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    serde_json::from_str(&s).context("parsing query output")
 }
 
 fn i(v: &Value, k: &str) -> i64 {
@@ -92,17 +84,22 @@ fn resource(s: &str) -> Option<Resource> {
 
 /// Read a window from the lake.
 pub fn load(lake: &Lake, from: TimestampMs, to: TimestampMs) -> Result<Recording> {
-    let window = format!("epoch_ms(ts) >= {from} and epoch_ms(ts) < {to}");
+    let export = |table: &str| lake.data.export(table, from, to).map_err(|e| anyhow!("reading the lake: {e}"));
+    Ok(from_rows(&export("pressure")?, &export("units")?, &export("events")?, from, to))
+}
+
+/// Build a recording from exported rows (`ts` in epoch ms, ordered by `ts`).
+pub fn from_rows(
+    pressure: &[Value],
+    units: &[Value],
+    events: &[Value],
+    from: TimestampMs,
+    to: TimestampMs,
+) -> Recording {
     let mut rec = Recording { from, to, ..Default::default() };
-    for r in rows(
-        lake,
-        &format!(
-            "select epoch_ms(ts) as ts, scope, resource, some_avg10, full_avg10, some_delta_us, full_delta_us, interval_ms \
-             from pressure where {window} order by ts"
-        ),
-    )? {
-        let Some(res) = s(&r, "resource").and_then(resource) else { continue };
-        let scope = match s(&r, "scope") {
+    for r in pressure {
+        let Some(res) = s(r, "resource").and_then(resource) else { continue };
+        let scope = match s(r, "scope") {
             Some("system") | None => Scope::System,
             Some(p) => Scope::Cgroup(p.to_string()),
         };
@@ -110,54 +107,43 @@ pub fn load(lake: &Lake, from: TimestampMs, to: TimestampMs) -> Result<Recording
             rec.cgroups.entry(lindesk_host::env::target_for_cgroup(p)).or_insert_with(|| p.clone());
         }
         rec.samples.push(Sample {
-            ts: i(&r, "ts"),
+            ts: i(r, "ts"),
             scope,
             resource: res,
-            some_avg10: f(&r, "some_avg10").unwrap_or(0.0) as f32,
-            full_avg10: f(&r, "full_avg10").map(|x| x as f32),
-            some_delta_us: i(&r, "some_delta_us").max(0) as u64,
-            full_delta_us: r
-                .get("full_delta_us")
-                .filter(|x| !x.is_null())
-                .map(|_| i(&r, "full_delta_us").max(0) as u64),
-            interval_ms: i(&r, "interval_ms").clamp(0, u32::MAX as i64) as u32,
+            some_avg10: f(r, "some_avg10").unwrap_or(0.0) as f32,
+            full_avg10: f(r, "full_avg10").map(|x| x as f32),
+            some_delta_us: i(r, "some_delta_us").max(0) as u64,
+            full_delta_us: r.get("full_delta_us").filter(|x| !x.is_null()).map(|_| i(r, "full_delta_us").max(0) as u64),
+            interval_ms: i(r, "interval_ms").clamp(0, u32::MAX as i64) as u32,
         });
     }
-    for r in rows(
-        lake,
-        &format!(
-            "select epoch_ms(ts) as ts, manager, uid, unit, class, foreground, cpu_usage_us, io_rbytes, io_wbytes, \
-             io_rios, io_wios, mem_current, interval_ms from units where {window} order by ts"
-        ),
-    )? {
-        let target = unflatten(s(&r, "manager"), r.get("uid").and_then(Value::as_i64), s(&r, "unit").unwrap_or(""));
-        let class = s(&r, "class").and_then(|c| c.parse().ok());
+    for r in units {
+        let target = unflatten(s(r, "manager"), r.get("uid").and_then(Value::as_i64), s(r, "unit").unwrap_or(""));
+        let class = s(r, "class").and_then(|c| c.parse().ok());
         let usage = Usage {
-            cpu_usage_us: i(&r, "cpu_usage_us").max(0) as u64,
-            io_rbytes: i(&r, "io_rbytes").max(0) as u64,
-            io_wbytes: i(&r, "io_wbytes").max(0) as u64,
-            io_rios: i(&r, "io_rios").max(0) as u64,
-            io_wios: i(&r, "io_wios").max(0) as u64,
-            mem_current: i(&r, "mem_current").max(0) as u64,
-            interval_ms: i(&r, "interval_ms").clamp(0, u32::MAX as i64) as u32,
+            cpu_usage_us: i(r, "cpu_usage_us").max(0) as u64,
+            io_rbytes: i(r, "io_rbytes").max(0) as u64,
+            io_wbytes: i(r, "io_wbytes").max(0) as u64,
+            io_rios: i(r, "io_rios").max(0) as u64,
+            io_wios: i(r, "io_wios").max(0) as u64,
+            mem_current: i(r, "mem_current").max(0) as u64,
+            interval_ms: i(r, "interval_ms").clamp(0, u32::MAX as i64) as u32,
         };
         let fg = r.get("foreground").and_then(Value::as_bool).unwrap_or(false);
-        rec.units.push((i(&r, "ts"), target, class, fg, usage));
+        rec.units.push((i(r, "ts"), target, class, fg, usage));
     }
-    for r in rows(
-        lake,
-        &format!(
-            "select epoch_ms(ts) as ts, kind, payload from events where kind in ('focus', 'interaction', 'level') and {window} order by ts"
-        ),
-    )? {
-        let Some(payload) = s(&r, "payload").and_then(|p| serde_json::from_str::<Event>(p).ok()) else { continue };
+    for r in events {
+        if !matches!(s(r, "kind"), Some("focus" | "interaction" | "level")) {
+            continue;
+        }
+        let Some(payload) = s(r, "payload").and_then(|p| serde_json::from_str::<Event>(p).ok()) else { continue };
         match payload {
             Event::LevelChanged { ts, from, to, .. } => rec.levels.push((ts, from, to)),
             e @ (Event::Focus { .. } | Event::Interaction { .. }) => rec.inputs.push(e),
             _ => {}
         }
     }
-    Ok(rec)
+    rec
 }
 
 impl Recording {
@@ -792,10 +778,7 @@ pub fn run(ui: &Ui, a: &SimulateArgs) -> Result<()> {
     }
     let config_path = a.config.clone().unwrap_or_else(|| paths::config_path(ui.system));
     let config = paths::load_config(&config_path)?;
-    let lake = match &a.lake {
-        Some(l) => Lake::open(l)?,
-        None => open_lake(ui, config.telemetry.dir.as_deref())?,
-    };
+    let lake = open_lake(ui, a.lake.as_deref().or(config.telemetry.dir.as_deref()))?;
     if !lake.root().is_dir() {
         bail!(
             "no telemetry at {} to replay. lindesk records it while running (telemetry.enabled = true).",
@@ -835,37 +818,25 @@ pub fn run(ui: &Ui, a: &SimulateArgs) -> Result<()> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use lindesk_plugin_api::{Provenance, Record};
-    use lindesk_store::{Store, StoreOptions};
-    use std::path::Path;
+    use lindesk_plugin_api::Provenance;
 
     const T0: i64 = 1_791_000_000_000;
     pub const BATCH: &str = "lindesk-run-make-1.scope";
     pub const FF: &str = "app-gnome-org.mozilla.firefox-7.scope";
 
-    fn usage(cpu: u64, io: u64) -> Usage {
-        Usage {
-            cpu_usage_us: cpu,
-            io_rbytes: io,
-            io_wbytes: io,
-            io_rios: 10,
-            io_wios: 10,
-            mem_current: 1 << 28,
-            interval_ms: 1000,
-        }
-    }
-
-    /// 2 minutes of telemetry: calm for 30s, heavy I/O pressure for 60s, calm again.
-    pub fn write_lake(root: &Path) {
-        let mut store = Store::open(root, StoreOptions::user()).unwrap();
-        let mut recs = Vec::new();
-        let ff = Target::user_unit(1000, FF);
-        let batch = Target::user_unit(1000, BATCH);
-        recs.push(Record::Event(Event::Focus {
+    /// 2 minutes of telemetry as `lindesk-data export` prints it: calm for 30s, heavy I/O
+    /// pressure for 60s, calm again. Returns (pressure, units, events) rows.
+    pub fn rows() -> (Vec<Value>, Vec<Value>, Vec<Value>) {
+        let (mut pressure, mut units, mut events) = (Vec::new(), Vec::new(), Vec::new());
+        let event = |e: &Event| {
+            let v = serde_json::to_value(e).unwrap();
+            json!({"ts": v["ts"], "kind": v["kind"], "payload": v.to_string()})
+        };
+        events.push(event(&Event::Focus {
             ts: T0,
             pid: Some(4242),
             app_id: Some("org.mozilla.firefox".into()),
-            target: Some(ff.clone()),
+            target: Some(Target::user_unit(1000, FF)),
             source: "gnome".into(),
         }));
         for s in 0..120 {
@@ -873,48 +844,37 @@ pub mod tests {
             let hot = (30..90).contains(&s);
             for r in Resource::ALL {
                 let pct = if hot && r == Resource::Io { 60.0 } else { 1.0 };
-                recs.push(Record::Pressure(Sample {
-                    ts,
-                    scope: Scope::System,
-                    resource: r,
-                    some_avg10: pct,
-                    full_avg10: (r != Resource::Cpu).then_some(pct / 2.0),
-                    some_delta_us: (pct as u64) * 10_000,
-                    full_delta_us: (r != Resource::Cpu).then_some((pct as u64) * 5_000),
-                    interval_ms: 1000,
+                let partial = r != Resource::Cpu;
+                pressure.push(json!({
+                    "ts": ts, "scope": "system", "resource": r.as_str(),
+                    "some_avg10": pct, "full_avg10": partial.then_some(pct / 2.0),
+                    "some_delta_us": (pct as u64) * 10_000, "full_delta_us": partial.then_some((pct as u64) * 5_000),
+                    "interval_ms": 1000, "date": "2026-10-04", "hour": 10,
                 }));
             }
-            recs.push(Record::Unit {
-                ts,
-                target: ff.clone(),
-                class: QosClass::Interactive,
-                foreground: true,
-                usage: usage(200_000, 1 << 20),
-                applied: vec![],
-            });
-            recs.push(Record::Unit {
-                ts,
-                target: batch.clone(),
-                class: QosClass::Batch,
-                foreground: false,
-                usage: usage(900_000, 50 << 20),
-                applied: vec![],
-            });
+            for (unit, class, fg, cpu, io) in
+                [(FF, "interactive", true, 200_000u64, 1u64 << 20), (BATCH, "batch", false, 900_000, 50 << 20)]
+            {
+                units.push(json!({
+                    "ts": ts, "manager": "user", "uid": 1000, "unit": unit, "class": class, "foreground": fg,
+                    "cpu_usage_us": cpu, "io_rbytes": io, "io_wbytes": io, "io_rios": 10, "io_wios": 10,
+                    "mem_current": 1u64 << 28, "interval_ms": 1000,
+                }));
+            }
         }
-        recs.push(Record::Event(Event::LevelChanged {
+        events.push(event(&Event::LevelChanged {
             ts: T0 + 33_000,
             from: Level::Green,
             to: Level::Yellow,
             policy: "threshold".into(),
         }));
-        recs.push(Record::Event(Event::ActionApplied {
+        events.push(event(&Event::ActionApplied {
             ts: T0 + 33_000,
-            target: batch,
+            target: Target::user_unit(1000, BATCH),
             setting: Setting::IoWeight { value: 1 },
             provenance: Provenance { plugin: "threshold".into(), ..Default::default() },
         }));
-        store.append(&recs);
-        store.flush(T0 + 200_000).unwrap();
+        (pressure, units, events)
     }
 
     pub fn opts() -> SimOptions {
@@ -938,11 +898,8 @@ pub mod tests {
 
     #[test]
     fn replays_a_synthetic_lake() {
-        let d = tempfile::tempdir().unwrap();
-        let root = d.path().join("telemetry");
-        write_lake(&root);
-        let lake = Lake::open(&root).unwrap();
-        let rec = load(&lake, T0 - 1000, T0 + 130_000).unwrap();
+        let (p, u, e) = rows();
+        let rec = from_rows(&p, &u, &e, T0 - 1000, T0 + 130_000);
         assert_eq!(rec.samples.len(), 360);
         assert_eq!(rec.units.len(), 240);
         assert_eq!(rec.inputs.len(), 1);
@@ -971,15 +928,6 @@ pub mod tests {
         assert!(text.contains("no differences"), "{text}");
         assert!(text.contains("would have throttled") && text.contains(BATCH), "{text}");
         assert!(text.contains("recorded"), "{text}");
-    }
-
-    /// `LINDESK_DEMO_LAKE=/tmp/lake cargo test -p lindeskctl -- --ignored write_demo_lake`
-    /// writes the synthetic lake used by the tests, for trying `simulate`/`query` by hand.
-    #[test]
-    #[ignore]
-    fn write_demo_lake() {
-        let root = std::env::var("LINDESK_DEMO_LAKE").expect("set LINDESK_DEMO_LAKE");
-        write_lake(Path::new(&root));
     }
 
     #[test]

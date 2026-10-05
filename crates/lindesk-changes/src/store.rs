@@ -737,6 +737,7 @@ fn same_place(a: &ChangeOp, b: &ChangeOp) -> bool {
         }
         (Zswap { .. }, Zswap { .. }) => a.keys() == b.keys(),
         (CpuEpp { .. }, CpuEpp { .. }) | (CpuGovernor { .. }, CpuGovernor { .. }) => true,
+        (ServiceState { .. }, ServiceState { .. }) => a.keys() == b.keys(),
         _ => false,
     }
 }
@@ -748,6 +749,7 @@ fn runtime_diff_block(op: &ChangeOp, current: &Value, target: &Value) -> String 
         ChangeOp::Zswap { .. } => "/sys/module/zswap/parameters".into(),
         ChangeOp::CpuEpp { .. } => "/sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference".into(),
         ChangeOp::CpuGovernor { .. } => "/sys/devices/system/cpu/cpufreq/policy*/scaling_governor".into(),
+        ChangeOp::ServiceState { unit, .. } => format!("/systemd/{unit}"),
         _ => op.kind().into(),
     };
     let lines = |v: &Value| -> Vec<String> {

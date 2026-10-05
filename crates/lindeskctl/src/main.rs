@@ -10,6 +10,7 @@ mod hints;
 mod live;
 mod paths;
 mod procs;
+mod telemetry;
 mod ui;
 
 use std::process::ExitCode;
@@ -47,6 +48,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::Config(c) => cmd::config::run(&ui, c),
         Cmd::Profile(p) => cmd::profile::run(&ui, p),
         Cmd::Changes(c) => cmd::changes::run(&ui, c),
+        Cmd::Setup(c) => cmd::setup::run(&ui, c),
         Cmd::Calibrate { quick, force } => cmd::hw::calibrate_cmd(&ui, *quick, *force),
         Cmd::Hardware => cmd::hw::hardware_cmd(&ui),
         Cmd::Swap => cmd::hw::swap_cmd(&ui),

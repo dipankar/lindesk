@@ -31,7 +31,11 @@ on the session bus.
 It tracks the foreground application and user input (built-in COSMIC and X11 adapters; the
 GNOME Shell extension and the KWin script push over D-Bus), maps processes and app ids to
 systemd user units, applies settings to those units through the user manager, hosts user
-plugins and writes the user's telemetry lake. Without a
+plugins and, with the optional
+.B lindesk\-telemetry
+package (the
+.B telemetry
+plugin), writes the user's telemetry lake. Without a
 .BR lindeskd (8)
 broker it runs the whole pipeline locally, limited to the user's own units.
 .PP
@@ -61,7 +65,10 @@ Applied-state directory (default
 .TP
 .BI \-\-telemetry\-dir " DIR"
 Telemetry lake (default
-.IR $XDG_STATE_HOME/lindesk/telemetry ).
+.IR $XDG_STATE_HOME/lindesk/telemetry )
+for the
+.B telemetry
+plugin, when installed.
 .TP
 .B \-\-dry\-run
 Observe only.

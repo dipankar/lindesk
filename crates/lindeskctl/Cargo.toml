@@ -15,8 +15,6 @@ lindesk-host.workspace = true
 lindesk-sys.workspace = true
 lindesk-ipc.workspace = true
 lindesk-changes.workspace = true
-lindesk-query.workspace = true
-lindesk-store.workspace = true
 # Only the threshold policy is needed (simulate's baseline); skip the desktop adapters.
 lindesk-builtins = { path = "../lindesk-builtins", version = "0.1.0", default-features = false }
 anyhow.workspace = true
@@ -38,4 +36,7 @@ crossterm = "0.28"
 
 [dev-dependencies]
 lindesk-sys = { workspace = true, features = ["fixtures"] }
+# Only to write a small lake for the query/data end-to-end test (which runs the
+# workspace's lindesk-data); never linked into lindeskctl.
+lindesk-store.workspace = true
 tempfile.workspace = true

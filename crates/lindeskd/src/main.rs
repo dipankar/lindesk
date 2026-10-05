@@ -28,7 +28,6 @@ use lindesk_builtins::classifier::RulesClassifier;
 use lindesk_builtins::env::{Mode, SysEnvironment, UserWatch};
 use lindesk_builtins::policy::ThresholdPolicy;
 use lindesk_builtins::sensors::{CgroupStatSensor, PsiSensor};
-use lindesk_builtins::sinks::ParquetSink;
 use lindesk_changes::Scope as ChangeScope;
 use lindesk_core::config::Config;
 use lindesk_host::{Engine, EngineOptions};
@@ -182,6 +181,23 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 None
             }
         };
+    if rustix::process::geteuid().is_root() {
+        // The pre-lindesk state of the conflicting daemons, however lindesk got installed
+        // (install.sh and the packages normally wrote it already; never overwritten).
+        let path = lib.join("install-state.json");
+        let services = lindesk_changes::Systemctl::from_env();
+        match lindesk_changes::install_state::ensure(
+            &path,
+            "daemon",
+            env!("CARGO_PKG_VERSION"),
+            &services,
+            lindesk_core::clock::now_ms(),
+        ) {
+            Ok(true) => tracing::info!("recorded the install-time state in {}", path.display()),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("install-time state {}: {e}", path.display()),
+        }
+    }
     let prepare = {
         let (dry, tel, state) = (cli.dry_run, cli.telemetry_dir.clone(), cli.state_dir.clone());
         move |c: &mut Config| {
@@ -197,15 +213,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
     let signals = rt.block_on(async { Signals::install() })?;
     let rules_source = ensure_rules(&mut config, &cli.state_dir, Privilege::System);
-    if config.telemetry.enabled {
-        let dir = config.plugin(setup::PARQUET).config["dir"]
-            .as_str()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(TELEMETRY_DIR));
-        if let Err(e) = ensure_dir(&dir, 0o750, Some("lindesk")) {
-            tracing::warn!("telemetry directory {}: {e}", dir.display());
-        }
-    }
 
     let roots = Roots::host();
     let env_vars = Env::from_process();
@@ -269,6 +276,19 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let metrics = PolicyMetrics::default();
     let relay = register_builtins(&mut engine, &config, probe.backend(), &metrics);
     setup::load_externals(&mut engine, Privilege::System);
+    if setup::telemetry_loaded(&engine) {
+        // The plugin (lindesk-telemetry) creates the lake itself; group `lindesk` lets its
+        // members query the system lake.
+        let dir = config.plugin(setup::TELEMETRY).config["dir"]
+            .as_str()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(TELEMETRY_DIR));
+        if let Err(e) = ensure_dir(&dir, 0o750, Some("lindesk")) {
+            tracing::warn!("telemetry directory {}: {e}", dir.display());
+        }
+    } else if config.telemetry.enabled {
+        tracing::info!("{}", setup::TELEMETRY_NOT_INSTALLED);
+    }
     match engine.load_state(&state_path) {
         Ok(0) => {}
         Ok(n) => tracing::info!("recovered {n} applied settings from {}", state_path.display()),
@@ -369,9 +389,6 @@ fn register_builtins(engine: &mut Engine, config: &Config, backend: Backend, met
     for (i, a) in acts.into_iter().enumerate() {
         let name = a.info().name;
         registered(&name, reg.register_actuator(a, 100 + n - i as i32));
-    }
-    if config.telemetry.enabled {
-        registered(setup::PARQUET, reg.register_sink(Box::new(ParquetSink::new())));
     }
     table
 }

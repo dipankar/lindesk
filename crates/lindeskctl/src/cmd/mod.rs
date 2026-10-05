@@ -10,6 +10,7 @@ pub mod hw;
 pub mod mcp;
 pub mod plugin;
 pub mod profile;
+pub mod setup;
 pub mod simulate;
 pub mod status;
 pub mod tools;

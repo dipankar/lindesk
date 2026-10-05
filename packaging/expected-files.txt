@@ -1,4 +1,5 @@
-# Files and empty directories staged by: install.sh --destdir=DIR --no-build
+# The lindesk (core) package: files and empty directories staged by
+#   install.sh --destdir=DIR --no-build --without-telemetry
 # with the stub binaries from check-layout.sh (mode, path; dirs end in /).
 # The manifest (/usr/share/lindesk/install-manifest.txt) is omitted; it is
 # skipped by --no-manifest, which packages use. Regenerate: check-layout.sh --update
@@ -8,19 +9,14 @@
 755 /etc/lindesk/rules.d/
 644 /etc/xdg/autostart/lindesk-session.desktop
 755 /usr/bin/lindesk-bench
-755 /usr/bin/lindesk-data
 755 /usr/bin/lindesk-mcp
 755 /usr/bin/lindesk-session
 755 /usr/bin/lindeskctl
 755 /usr/bin/lindeskd
 755 /usr/lib/lindesk/plugins/
 644 /usr/lib/systemd/system-preset/80-lindesk.preset
-644 /usr/lib/systemd/system/lindesk-compact.service
-644 /usr/lib/systemd/system/lindesk-compact.timer
 644 /usr/lib/systemd/system/lindeskd.service
 644 /usr/lib/systemd/user-preset/80-lindesk.preset
-644 /usr/lib/systemd/user/lindesk-compact.service
-644 /usr/lib/systemd/user/lindesk-compact.timer
 644 /usr/lib/systemd/user/lindesk-mcp.service
 644 /usr/lib/systemd/user/lindesk-mcp.socket
 644 /usr/lib/systemd/user/lindesk-session.service

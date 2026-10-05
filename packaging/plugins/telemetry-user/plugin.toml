@@ -1,0 +1,15 @@
+# The telemetry lake writer for lindesk-session (each user's own lake). Same binary as
+# ../telemetry; lindeskd skips this manifest and lindesk-session skips that one, so each
+# daemon loads exactly one plugin named "telemetry". Configure it with [telemetry] and
+# [plugins.telemetry] in ~/.config/lindesk/lindesk.toml.
+[plugin]
+name = "telemetry"
+version = "0.1.0"
+api = 1
+kinds = ["sink"]
+exec = "../../lindesk-telemetry-sink"
+privilege = "user"
+description = "Telemetry lake: pressure, per-unit usage, events and metrics as Vortex files, queried with lindesk-data"
+
+[timeouts]
+call_ms = 6000

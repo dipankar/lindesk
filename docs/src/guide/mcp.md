@@ -72,12 +72,12 @@ the mutating tools return an error that says how to start the daemon.
 | `latency_map` | yes | The calibrated baseline: wakeup latency, core speed, memory, disk 4 KiB p50/p99, swap page-in. |
 | `swap_analysis` | yes | Swap devices, zswap, vm.* tunables, MGLRU, swap rates, findings with proposed ops. |
 | `explain {target}` | yes | How lindesk treats a pid/unit: class, foreground, applied settings and why. |
-| `query {sql, limit}` | yes | One SELECT/WITH over the telemetry lake (≤ 1000 rows). |
+| `query {sql, limit}` | yes | One SELECT/WITH over the telemetry lake (≤ 1000 rows), through `lindesk-data`. Without the optional lindesk-telemetry package: a tool error `telemetry_not_installed`. |
 | `list_plugins` | yes | Live pipeline health plus installed external plugins. |
 | `list_profiles` | yes | Profiles, which is active, which match this machine now. |
 | `list_changes {limit}`, `get_change {id}` | yes | The versioned change history. |
 | `recent_events {n, kind}` | yes | Focus, level, action and plugin events. |
-| `recommendations` | yes | Ranked fixes from doctor, swap, requirements, latency anomalies and 24 h of telemetry, each with `proposed_ops`, `risk` and `scope`. |
+| `recommendations` | yes | Ranked fixes from doctor, swap, requirements, latency anomalies and 24 h of telemetry (skipped, `sources.telemetry = "not installed"`, without lindesk-telemetry), each with `proposed_ops`, `risk` and `scope`. |
 | `plan_change {scope, ops, description}` | yes (dry run) | Guardrail validation, risk and diff. |
 | `apply_change {scope, ops, description, ttl_minutes}` | no | Apply with a dead-man switch. |
 | `confirm_change {scope, id}` | no | Keep a change. |

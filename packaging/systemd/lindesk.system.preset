@@ -1,3 +1,2 @@
-# Enable the lindesk broker and its maintenance timer by default.
+# Enable the lindesk broker by default.
 enable lindeskd.service
-enable lindesk-compact.timer

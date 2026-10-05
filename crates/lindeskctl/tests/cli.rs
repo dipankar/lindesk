@@ -5,7 +5,12 @@ use std::process::{Command, Output};
 
 fn ctl(args: &[&str], env: &[(&str, &Path)]) -> Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_lindeskctl"));
-    c.args(args).env("NO_COLOR", "1").env("LANG", "C.UTF-8").env_remove("LC_ALL").env_remove("LINDESK_TELEMETRY_DIR");
+    c.args(args)
+        .env("NO_COLOR", "1")
+        .env("LANG", "C.UTF-8")
+        .env_remove("LC_ALL")
+        .env_remove("LINDESK_TELEMETRY_DIR")
+        .env_remove("LINDESK_DATA");
     for (k, v) in env {
         c.env(k, v);
     }
@@ -151,13 +156,50 @@ fn completions_and_man() {
     let d = tempfile::tempdir().unwrap();
     let o = ctl(&["man", d.path().to_str().unwrap()], &[]);
     assert!(o.status.success(), "{}", stderr(&o));
-    for p in ["lindeskctl.1", "lindeskctl-plugin.1", "lindeskd.8", "lindesk-session.1", "lindesk-data.1"] {
+    for p in ["lindeskctl.1", "lindeskctl-plugin.1", "lindeskd.8", "lindesk-session.1", "lindesk-mcp.1"] {
         assert!(d.path().join(p).is_file(), "missing {p}");
     }
 }
 
+/// `lindesk-data` from this workspace's build (lindeskctl finds it next to itself), or
+/// `None` when only lindeskctl was built (`cargo test -p lindeskctl`).
+fn workspace_lindesk_data() -> Option<std::path::PathBuf> {
+    let p = Path::new(env!("CARGO_BIN_EXE_lindeskctl")).with_file_name("lindesk-data");
+    p.is_file().then_some(p)
+}
+
+#[test]
+fn telemetry_commands_without_lindesk_data() {
+    let d = tempfile::tempdir().unwrap();
+    let missing = d.path().join("no-lindesk-data");
+    let env: &[(&str, &Path)] = &[("LINDESK_DATA", &missing), ("HOME", d.path())];
+    for args in [
+        &["query", "select 1"][..],
+        &["data", "stats"],
+        &["data", "delete", "--where", "true", "--yes"],
+        &["simulate", "--policy", "builtin:threshold", "--from", "-1h"],
+    ] {
+        let o = ctl(args, env);
+        assert_eq!(o.status.code(), Some(1), "{args:?}: {}{}", stdout(&o), stderr(&o));
+        assert_eq!(
+            stderr(&o).trim(),
+            "telemetry isn't installed: sudo apt install lindesk-telemetry (or ./packaging/install.sh --with-telemetry)",
+            "{args:?}"
+        );
+    }
+    let o = ctl(&["doctor", "--json"], env);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["telemetry"]["user"]["installed"], false, "{v}");
+    let o = ctl(&["doctor"], env);
+    assert!(stdout(&o).contains("not installed (optional)"), "{}", stdout(&o));
+}
+
 #[test]
 fn query_and_data_on_a_temp_lake() {
+    if workspace_lindesk_data().is_none() {
+        eprintln!("lindesk-data isn't built next to lindeskctl (cargo test --workspace builds it); skipping");
+        return;
+    }
     let d = tempfile::tempdir().unwrap();
     let lake = d.path().join("telemetry");
     std::fs::create_dir_all(&lake).unwrap();

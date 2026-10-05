@@ -13,7 +13,13 @@
 | `lindeskd` | root, system service | The broker: probe, PSI, system plugins, policy, system units, iocost. Sends per-user desired state to session agents. |
 | `lindesk-session` | you, `systemd --user` service | Foreground tracking, user units, user plugins, your telemetry. Runs the whole pipeline (your units only) when there's no broker. |
 | `lindeskctl` | you (or root) | The CLI: doctor, status/watch/events, explain, run/set/restore, plugin tooling, simulate, query/data. |
-| `lindesk-data` | oneshot timer | Telemetry compaction, rollups, retention. |
+| `lindesk-mcp` | you, stdio or socket | MCP server for local AI agents. |
+| `lindesk-bench` | you | Latency probe and A/B harness. |
+| `lindesk-telemetry-sink` | a plugin process of each daemon | *Optional lindesk-telemetry package*: the `telemetry` sink plugin that writes the lake. |
+| `lindesk-data` | CLI, oneshot timer | *Optional lindesk-telemetry package*: lake query, export/import, compaction, rollups, retention (DuckDB). |
+
+The core package (`lindesk`) links neither DuckDB nor Vortex; see "Packages and what links
+what" in docs/ARCHITECTURE.md.
 
 The source of truth for the interfaces between components is
 [docs/ARCHITECTURE.md](https://github.com/dipankar/lindesk/blob/main/docs/ARCHITECTURE.md).
@@ -47,9 +53,11 @@ the config file of the same scope.
 | `lindesk-core` | Pure: config, resolver, safety caps, reconciler state, clocks. |
 | `lindesk-sys` | Probe, cgroupfs, procfs, PSI, syscalls; every function takes explicit roots. |
 | `lindesk-host` | Discovery, supervision, stdio transport, the deterministic `Engine`, conformance, scaffolding. |
-| `lindesk-builtins` | Built-in sensors, adapters, classifiers, policies, actuators and sinks. |
-| `lindesk-store` | Telemetry writer (arrow + Vortex files, no DuckDB). |
-| `lindesk-query` | Telemetry reader and maintainer (DuckDB). |
+| `lindesk-builtins` | Built-in sensors, adapters, classifiers, policies and actuators. |
+| `lindesk-store` | Telemetry writer (arrow + Vortex files, no DuckDB); lindesk-telemetry only. |
+| `lindesk-query` | Telemetry reader and maintainer (DuckDB); lindesk-telemetry only. |
+| `lindesk-telemetry-sink` | The `telemetry` plugin binary. |
+| `lindesk-data` | The lake tool binary. |
 | `lindesk-ipc` | D-Bus names, proxies, payloads and polkit helpers. |
 | `lindesk-plugin` | Rust SDK for external plugins. |
 

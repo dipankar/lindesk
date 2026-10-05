@@ -1,0 +1,31 @@
+#!/bin/sh
+# lindesk-telemetry postrm: drop the timers; restart lindeskd so it runs without the
+# plugin (session agents drop it at their next start); purge also removes the lakes'
+# system data.
+set -e
+
+case "$1" in
+remove | purge)
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl --global disable lindesk-compact.timer >/dev/null 2>&1 || true
+	fi
+	if command -v deb-systemd-helper >/dev/null 2>&1; then
+		if [ "$1" = purge ]; then
+			deb-systemd-helper purge lindesk-compact.timer >/dev/null || true
+			deb-systemd-helper unmask lindesk-compact.timer >/dev/null || true
+		else
+			deb-systemd-helper mask lindesk-compact.timer >/dev/null || true
+		fi
+	fi
+	if [ -d /run/systemd/system ]; then
+		systemctl --system daemon-reload >/dev/null || true
+		systemctl try-restart lindeskd.service >/dev/null 2>&1 || true
+	fi
+	if [ "$1" = purge ]; then
+		rm -rf /var/lib/lindesk/telemetry /var/lib/lindesk/duckdb-ext
+		rm -f /var/lib/lindesk/catalog.duckdb
+	fi
+	;;
+esac
+
+exit 0

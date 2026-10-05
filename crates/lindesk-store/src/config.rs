@@ -1,8 +1,8 @@
-//! Configuration of the `parquet-store` sink (it writes Vortex files; the name is kept for
-//! config compatibility), parsed from its JSON `[config]` table.
+//! Configuration of the `telemetry` sink plugin (`lindesk-telemetry-sink`), parsed from its
+//! JSON `[config]` table. `[plugins.parquet-store]`, the sink's former name, is still read.
 //!
 //! ```toml
-//! [plugins.parquet-store.config]
+//! [plugins.telemetry.config]
 //! dir = "/var/lib/lindesk/telemetry"   # default depends on privilege
 //! flush = "60s"                        # humantime duration
 //! mode = "system"                      # "user" (0700/0600), "system" (0750/0640) or "0750"

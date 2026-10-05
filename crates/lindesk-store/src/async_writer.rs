@@ -45,7 +45,7 @@ impl Default for AsyncOptions {
         AsyncOptions {
             queue_rows: 100_000,
             flush_timeout: Duration::from_secs(5),
-            metric_plugin: "parquet-store".into(),
+            metric_plugin: "telemetry".into(),
             thread_init: None,
             write_delay: Duration::ZERO,
         }

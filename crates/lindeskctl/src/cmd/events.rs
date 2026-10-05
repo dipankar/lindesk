@@ -42,13 +42,12 @@ fn emit(ui: &Ui, kinds: &[String], v: &Value) {
     }
 }
 
-/// Last events from the telemetry lake (daemons without `RecentEvents`).
+/// Last events from the telemetry lake (daemons without `RecentEvents`), through
+/// lindesk-data; not-installed exits 1 with the usual message.
 fn from_lake(ui: &Ui, n: usize) -> Result<Vec<Value>> {
-    let config = crate::paths::load_config(&crate::paths::config_path(ui.system)).ok();
-    let root = crate::paths::lake_root(None, ui.system, config.as_ref());
-    let lake = lindesk_query::Lake::open(&root)?;
+    let lake = crate::cmd::data::open_lake(ui, None)?;
     let sql = format!("select payload from events order by ts desc limit {n}");
-    let json = lake.query(&sql, &lindesk_query::Format::Json)?;
+    let json = lake.data.output(&["query", &sql, "--format", "json"])?;
     let rows: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
     let mut v: Vec<Value> = rows
         .iter()

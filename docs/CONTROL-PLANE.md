@@ -7,7 +7,7 @@ machine and tune lindesk safely. It extends [ARCHITECTURE.md](ARCHITECTURE.md).
  local agent (Claude Code, …)        lindeskctl
         │ MCP (stdio | unix socket)      │
         ▼                                 │
-   lindesk-mcp  ── read-only ─► lake (lindesk-query), lindesk-sys (hardware, swap, doctor)
+   lindesk-mcp  ── read-only ─► lake (runs lindesk-data, if installed), lindesk-sys (hardware, swap, doctor)
         │ mutations (D-Bus only; lindesk-mcp itself holds no privileges)
         ▼                                 ▼
  org.lindesk.QoS1 (user scope)   org.lindesk.Broker1 (system scope, polkit)

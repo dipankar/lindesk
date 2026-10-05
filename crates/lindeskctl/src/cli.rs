@@ -174,16 +174,6 @@ pub enum BackendArg {
     Native,
 }
 
-impl From<BackendArg> for lindesk_query::BackendChoice {
-    fn from(b: BackendArg) -> Self {
-        match b {
-            BackendArg::Auto => lindesk_query::BackendChoice::Auto,
-            BackendArg::Extension => lindesk_query::BackendChoice::Extension,
-            BackendArg::Native => lindesk_query::BackendChoice::Native,
-        }
-    }
-}
-
 /// Parse "1s", "250ms", "2m".
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let d = humantime::parse_duration(s.trim()).map_err(|e| format!("{e} (examples: 500ms, 1s, 2m)"))?;
@@ -352,6 +342,10 @@ pub enum Cmd {
     )]
     Query(QueryArgs),
 
+    /// Machine setup: conflicting priority daemons (`setup conflicts`).
+    #[command(subcommand)]
+    Setup(SetupCmd),
+
     /// Maintain the telemetry lake: catalog, compact, prune, stats, delete, purge, shell, install-extension.
     #[command(subcommand)]
     Data(DataCmd),
@@ -456,8 +450,9 @@ pub enum Cmd {
     /// Write man pages for lindeskctl and the daemons into a directory.
     #[command(
         long_about = "Write lindeskctl.1, one page per subcommand (lindeskctl-plugin.1, \
-                      lindeskctl-plugin-new.1, ...), and lindeskd.8, lindesk-session.1, \
-                      lindesk-data.1 and lindesk-mcp.1 into DIR.",
+                      lindeskctl-plugin-new.1, ...), and lindeskd.8, lindesk-session.1 and \
+                      lindesk-mcp.1 into DIR. (lindesk-data.1 comes with lindesk-data, from the \
+                      optional lindesk-telemetry package: lindesk-data man DIR.)",
         after_help = "Example:\n  lindeskctl man /tmp/man && man -l /tmp/man/lindeskctl.1"
     )]
     Man {
@@ -941,6 +936,12 @@ pub enum ChangesCmd {
         /// Don't ask for confirmation.
         #[arg(long, short)]
         yes: bool,
+        /// Apply directly to the change store instead of through the daemon (root for
+        /// system scope; recovery and tests). There is no auto-revert without a daemon.
+        #[arg(long)]
+        offline: bool,
+        #[command(flatten)]
+        local: LocalStore,
     },
     /// Keep an applied change: cancels its auto-revert.
     #[command(after_help = "Example:\n  lindeskctl changes confirm 7")]
@@ -963,6 +964,106 @@ pub enum ChangesCmd {
         #[arg(long, short)]
         yes: bool,
     },
+    /// Undo every change lindesk ever made in a scope, without a daemon (uninstall).
+    #[command(
+        long_about = "Open the change store directly (no daemon needed: run it after stopping \
+                      lindesk), roll back interrupted changesets, and revert every changeset \
+                      still in effect: sysctls, I/O schedulers, zswap, EPP/governor, \
+                      conflicting services and config edits go back to the values recorded \
+                      before lindesk changed them, and persisted sysctl.d/udev lines are \
+                      removed. System scope needs root. The uninstaller runs this.",
+        after_help = "Examples:\n  sudo lindeskctl changes revert-all --scope system --yes\n  lindeskctl changes revert-all --scope user"
+    )]
+    RevertAll {
+        /// Which store: the system one (/var/lib/lindesk/changes) or yours.
+        #[arg(long, value_enum, default_value_t = StoreScope::System)]
+        scope: StoreScope,
+        /// Don't ask for confirmation.
+        #[arg(long, short)]
+        yes: bool,
+        #[command(flatten)]
+        local: LocalStore,
+    },
+}
+
+/// A change store scope.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum StoreScope {
+    #[default]
+    System,
+    User,
+}
+
+/// Where an offline change-store operation looks (hidden: fixtures and tests).
+#[derive(Args, Debug, Clone, Default)]
+pub struct LocalStore {
+    /// Change store directory (default: /var/lib/lindesk/changes, or
+    /// $XDG_STATE_HOME/lindesk/changes for user scope).
+    #[arg(long, value_name = "DIR", hide = true)]
+    pub store: Option<PathBuf>,
+    /// Find /proc, /sys and /etc under this directory instead of / (fixture trees).
+    #[arg(long, value_name = "DIR", hide = true)]
+    pub root: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SetupCmd {
+    /// Other priority daemons (system76-scheduler, ananicy(-cpp), uresourced): show,
+    /// disable, restore.
+    #[command(
+        long_about = "Without options: the state of every conflicting daemon installed here, the \
+                      install-time snapshot, and which ones lindesk disabled. --disable stops and \
+                      disables the running/enabled ones through a versioned change (`lindeskctl \
+                      changes list` shows it; uninstall reverts it); --restore reverts those \
+                      changes; --reconcile compares with the install-time snapshot \
+                      (/var/lib/lindesk/install-state.json) and offers to put back units changed \
+                      outside lindesk. Changing anything needs root. Why they conflict: \
+                      docs/src/guide/conflicts.md.",
+        after_help = "Examples:\n  lindeskctl setup conflicts\n  sudo lindeskctl setup conflicts --disable\n  sudo lindeskctl setup conflicts --restore\n  sudo lindeskctl setup conflicts --reconcile --restore-conflicts --yes"
+    )]
+    Conflicts {
+        /// Stop and disable the conflicting daemons (a revertible change).
+        #[arg(long, conflicts_with_all = ["restore", "reconcile"])]
+        disable: bool,
+        /// Revert what --disable did.
+        #[arg(long, conflicts_with = "reconcile")]
+        restore: bool,
+        /// Compare with the install-time snapshot and offer to restore differences.
+        #[arg(long)]
+        reconcile: bool,
+        /// With --reconcile: restore every difference without asking.
+        #[arg(long, requires = "reconcile", conflicts_with = "keep_current")]
+        restore_conflicts: bool,
+        /// With --reconcile: keep the current state (the default without a terminal).
+        #[arg(long, requires = "reconcile")]
+        keep_current: bool,
+        /// Don't ask for confirmation.
+        #[arg(long, short)]
+        yes: bool,
+        /// Recorded as the changeset's origin.
+        #[arg(long, value_enum, default_value_t = SetupOrigin::Cli, hide = true)]
+        origin: SetupOrigin,
+        /// State directory (default /var/lib/lindesk; fixtures and tests).
+        #[arg(long, value_name = "DIR", hide = true)]
+        lib_dir: Option<PathBuf>,
+    },
+    /// Record the install-time snapshot (install.sh and the package scripts run this).
+    #[command(hide = true)]
+    Snapshot {
+        /// script, deb, rpm or arch.
+        #[arg(long, default_value = "script")]
+        method: String,
+        #[arg(long, value_name = "DIR", hide = true)]
+        lib_dir: Option<PathBuf>,
+    },
+}
+
+/// Origin recorded by `setup conflicts`.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SetupOrigin {
+    #[default]
+    Cli,
+    Install,
 }
 
 /// MCP clients `lindesk-mcp config` knows.
