@@ -114,6 +114,29 @@ $ lindeskctl completions fish > ~/.config/fish/completions/lindeskctl.fish
 
 `elvish` and `powershell` work too.
 
+## Uninstall
+
+```console
+$ sudo lindesk-uninstall                # restore everything, remove an install.sh install, keep data
+$ sudo lindesk-uninstall --purge        # also /etc/lindesk, /var/lib/lindesk and (asked) user data
+$ sudo lindesk-uninstall --package      # package installs: restore, then apt/dnf/pacman remove
+$ lindesk-uninstall --dry-run           # print the plan
+```
+
+`./packaging/install.sh --uninstall` runs the same script. In order it: stops every
+logged-in user's `lindesk-session`/`lindesk-mcp`, then `lindeskd` and the timers; restores
+what lindesk changed (`lindeskd --restore` and `lindesk-session --restore` for cgroup
+settings and iocost; `lindeskctl changes revert-all` for the system store and every
+user's: sysctls, I/O schedulers, zswap, EPP/governor, conflicting daemons lindesk
+disabled; persisted `sysctl.d`/udev drop-ins; conflicting daemons changed by hand back to
+the install-time snapshot, asked on a terminal or `--restore-conflicts` / `--keep-current`;
+the GNOME extension or KWin script `lindesk-session` switched on); then removes the files.
+Package removal runs the restore part too (`uninstall.sh --restore-only`). `--purge`
+deletes the change store and `/var/lib/lindesk/install-state.json` only after the restore
+succeeded. It is idempotent and safe on a half-installed system.
+
+To stop lindesk without removing it, use `lindeskctl off` (see [Everyday use](usage.md)).
+
 ## Requirements and preflight checks
 
 lindesk needs Linux with `/proc` and a kernel ≥ 3.10 to run at all. Everything else only

@@ -197,6 +197,36 @@ Every change lindesk makes is runtime-only and restored when its daemon stops (e
 crash). `restore` is the manual escape hatch; a running daemon would re-apply its
 settings, hence `--stop`.
 
+## On, off, pause
+
+`lindeskctl status` (and plain `lindeskctl`) always says which of four states lindesk is in:
+**on**, **paused**, **off** (installed, not running) or **not installed**.
+
+```console
+$ lindeskctl off             # back to the machine's default behaviour
+$ lindeskctl on              # and back
+$ lindeskctl pause --for 10m # A/B: revert everything, keep observing, resume by itself
+$ lindeskctl resume          # end a pause early
+```
+
+* `off` stops and disables `lindeskd` (as root, or through polkit) and your
+  `lindesk-session`; both restore everything they applied when they stop. As root it also
+  puts conflicting daemons (system76-scheduler, ...) back to how they were before lindesk
+  (`--keep-conflicts` leaves them), and records `"lindesk_enabled": false` in
+  `/var/lib/lindesk/install-state.json`, so upgrades and package scripts don't turn it back
+  on. Config, profiles, change history and telemetry are kept. `--all-users` (root) also
+  stops every logged-in user's agent now.
+* `on` enables and starts them again, offers to disable conflicting daemons (as the
+  installer does; `--disable-conflicts` / `--keep-conflicts`), and waits until lindesk
+  answers.
+* `pause` doesn't stop anything: every running daemon reverts what it applied and keeps
+  sensing and deciding without applying (status shows `⏸ paused (resumes in 9m)`). With
+  `--for` it resumes by itself; an indefinite pause lasts, across restarts, until `resume`.
+  `lindesk-bench run` uses it for its "off" phase (`--off-mode pause`, the default).
+  Pausing lindeskd needs admin rights; your own agent doesn't.
+
+To remove lindesk completely, `sudo lindesk-uninstall` (see [Installation](install.md)).
+
 ## Profiles, changes and hardware
 
 ```console

@@ -108,6 +108,8 @@ to the agent's uid.
 | `Status()` | → `s` | Status JSON (below). |
 | `Explain(what)` | `s` → `s` | Explanation JSON (below). `InvalidArgs` when `what` doesn't parse. |
 | `RecentEvents(n)` | `u` → `s` | JSON array of the last `n` events (ring of 500, oldest first). |
+| `SetPaused(paused, seconds)` | `bu` → `s` | Pause (observe-only: every applied setting reverted, sensing and decisions continue) or resume; `seconds > 0` auto-resumes. Returns the pause JSON `{paused, since_ms, until_ms, by}`. Own uid only. |
+| `GetPaused()` | → `s` | The pause JSON. |
 | control plane | | `PlanChange`, `ApplyChange`, `ConfirmChange`, `RevertChange`, `ListChanges`, `GetChange`, `ListProfiles`, `SetProfile`, `GetHardware`, `SwapReport` as in [CONTROL-PLANE.md §5](CONTROL-PLANE.md), user scope (the user's `lindesk.toml`, store `$XDG_STATE_HOME/lindesk/changes`). Callers whose uid isn't the agent's get `AccessDenied`. |
 | signal `LevelChanged(level)` | `s` | `green|yellow|red`. |
 | signal `Events(json)` | `s` | JSON array of the events of one engine step (at most 100 per signal). |
@@ -133,6 +135,8 @@ is asked non-interactively unless the call has `ALLOW_INTERACTIVE_AUTHORIZATION`
 | `Explain(what)` | `s` → `s` | none |
 | `RecentEvents(n)` | `u` → `s` | none; **filtered by caller**: root gets every event, other users the system-scope events plus the events about their own units and processes |
 | `Reload()` | → | polkit `org.lindesk.manage` |
+| `SetPaused(paused, seconds)` | `bu` → `s` | polkit `org.lindesk.manage`; as on QoS1. A paused broker relays `"dry_run": true` to session agents, so user units are released too. |
+| `GetPaused()` | → `s` | none |
 | `PlanChange`, `ListChanges`, `GetChange`, `ListProfiles`, `GetHardware`, `SwapReport` | see [CONTROL-PLANE.md §5](CONTROL-PLANE.md) | none (no side effects) |
 | `ApplyChange`, `ConfirmChange`, `RevertChange`, `SetProfile` | see [CONTROL-PLANE.md §5](CONTROL-PLANE.md) | polkit `org.lindesk.manage`; system scope (`/etc/lindesk/lindesk.toml` = `--config`, kernel tunables) |
 | `Calibrate()` / `CalibrateWith(options_json)` | → `s` / `s` → `s` | polkit `org.lindesk.manage`. Runs `lindesk_sys::calibrate::run` on a helper thread (one at a time; `Failed` while another runs), saves it, attaches it to `HostCaps.hardware.latency` and emits `calibration.done`; returns the `LatencyMap` JSON. Options: `quick` (`CalibrateRequest`), and broker extensions `force` (default true: a busy machine gives a map flagged `noisy`) and `storage` (default true; false skips the disk phase). Also in dry-run (it measures, it changes nothing). |
@@ -179,7 +183,8 @@ increases by one per event for the lifetime of the daemon process, so a client c
 events carry a provenance reason starting with `"dry run: "`. Daemon notices (`kind:
 "notice"`, `name`): `requirements.warning` (one per start-up warning, `data` = the
 requirement), `hardware.power` (`data: {from, to}` when AC/battery changes),
-`setup.desktop_integration` (`data: {action, desktop}`), `profile.changed` (`data: {from,
+`setup.desktop_integration` (`data: {action, desktop}`), `lindesk.paused` (`data: {until_ms, by,
+restored}`), `lindesk.resumed` (`data: {by, paused_since_ms}`; `by: "timer"` after `--for`), `profile.changed` (`data: {from,
 to, reason, pinned}`), `calibration.done` (`data` = the `LatencyMap`), `change.applied`,
 `change.confirmed`, `change.reverted`, `change.expired`, `change.failed` (`data` = the
 changeset).
@@ -194,6 +199,9 @@ changeset).
     "version": "0.1.0", "pid": 1234, "uid": 0,
     "mode": "broker" | "connected" | "standalone" | "starting",
     "dry_run": false,
+    "state": "on" | "paused",
+    "paused": {"paused": false, "since_ms": null, "until_ms": null, "by": null},
+    "telemetry": {"installed": true, "enabled": true, "state": "running", "dir": "…"},
     "started": 1759560000000,            // ms since the epoch
     "uptime_s": 12.5,
     "steps": 50,
@@ -312,6 +320,28 @@ The bus name `org.lindesk.QoS1` is requested only after the engine's first step
 (`Type=dbus` readiness). Built-in adapters (`adapters::detect`) are initialised with
 `[plugins.<name>].config`; their events wake the engine and are forwarded to the broker when
 connected. `Unsupported` adapters are skipped with an info log.
+
+### Pause (both daemons)
+
+`Engine::set_paused(true)` restores every applied setting and then runs the pipeline as in
+dry-run (action events say `paused: …`); `set_paused(false)` forgets what was only recorded
+so the next step applies for real. The engine thread owns the pause: a timed pause ends on
+the first loop iteration after `until_ms`; the state is persisted (`<lib>/paused.json` for
+lindeskd, `$XDG_STATE_HOME/lindesk/paused.json` for the agent) and reloaded at start-up
+while it's still due (an indefinite pause until `resume`).
+
+### On, off and the install-time state
+
+`/var/lib/lindesk/install-state.json` (`lindesk_changes::install_state`) records how
+lindesk was installed and the state of every conflicting daemon's unit before lindesk; it
+is written by `install.sh` and the package scripts (`lindeskctl setup snapshot`), or by
+lindeskd on its first start, and never overwritten (later installs append `upgrades`).
+`lindeskctl off` sets `"lindesk_enabled": false` (with a `toggles` entry); package scripts
+and `install.sh` then leave lindesk stopped until `lindeskctl on`. Conflicting daemons are
+only ever changed through `service_state` changesets (allow-listed units, Medium risk, the
+previous enabled/active state recorded), so `lindeskctl changes revert-all` and uninstall
+restore them; `lindeskctl setup conflicts --reconcile` compares with the snapshot for
+changes made outside lindesk.
 
 ### `--restore` (both daemons)
 

@@ -134,6 +134,15 @@ lindeskctl explain firefox
 lindeskctl calibrate     # optional: measure this machine's latency baseline (≈15 s)
 ```
 
+On, off, or a quick A/B:
+
+```bash
+lindeskctl on | off              # off = back to the machine's default behaviour (config and history kept)
+lindeskctl pause --for 10m       # revert everything, keep observing; resumes by itself
+lindeskctl resume
+sudo lindesk-uninstall [--purge] # restore everything lindesk changed, then remove it
+```
+
 Optional add-on: **`lindesk-telemetry`** records history you can query with SQL (DuckDB +
 Vortex; much larger). It is never pulled in automatically, and it is picked up without
 configuration:
