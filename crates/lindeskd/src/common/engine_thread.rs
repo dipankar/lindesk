@@ -205,6 +205,11 @@ pub trait Hooks: Send + 'static {
     /// After [`Engine::shutdown`] restored everything.
     fn shutdown(&mut self, _engine: &mut Engine) {}
 
+    /// When the requirement warnings were last computed (`None`: only at start-up).
+    fn requirements_checked(&self) -> Option<TimestampMs> {
+        None
+    }
+
     /// Where the pause state is kept across restarts (`None`: not persisted).
     fn pause_file(&self) -> Option<PathBuf> {
         None
@@ -766,6 +771,7 @@ impl<H: Hooks> Loop<H> {
             "epoch": { "active": active, "source": source },
             "hardware": self.engine.options().caps.hardware,
             "requirements": self.hooks.requirements(),
+            "requirements_checked_ms": self.hooks.requirements_checked().unwrap_or(self.started),
             "text": text,
         })
         .to_string()

@@ -85,6 +85,11 @@ pub struct SessionHooks {
     /// First-run quick calibration (standalone mode only).
     /// Where a pause is persisted (`lindeskctl pause`).
     pub pause_file: Option<PathBuf>,
+    /// Re-checks the requirement warnings (maintenance tick, after a versioned change).
+    pub requirements_watch: Option<crate::common::startup::RequirementsWatch>,
+    /// A focus event arrived (from a built-in adapter or over D-Bus from the GNOME
+    /// extension / KWin script): foreground tracking works.
+    pub focus_seen: bool,
     pub calibrator: Option<Calibrator>,
     mode: Mode,
     broker: Option<BrokerView>,
@@ -92,6 +97,22 @@ pub struct SessionHooks {
 }
 
 impl SessionHooks {
+    /// `active`, or why there is no focus information yet: on GNOME/KDE focus comes from
+    /// the shell extension / KWin script, which a running Wayland shell only loads after a
+    /// login.
+    pub fn foreground_tracking(&self) -> String {
+        if self.focus_seen || self.adapters.iter().any(|a| a.connected()) {
+            return "active".into();
+        }
+        match crate::desktop::desktop_of(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref()) {
+            crate::desktop::Desktop::Gnome => "waiting for GNOME extension (log out and in once)".into(),
+            crate::desktop::Desktop::Kde => {
+                "waiting for the KWin script (enable it in System Settings > KWin Scripts, or log out and in)".into()
+            }
+            crate::desktop::Desktop::Other => "no foreground adapter for this desktop".into(),
+        }
+    }
+
     pub fn new(uid: u32, feed: RelayFeed, threshold: Gate, psi: Gate) -> Self {
         SessionHooks {
             uid,
@@ -109,6 +130,8 @@ impl SessionHooks {
             degraded: Vec::new(),
             rules_source: "system",
             pause_file: None,
+            requirements_watch: None,
+            focus_seen: false,
             calibrator: None,
             mode: Mode::Starting,
             broker: None,
@@ -237,6 +260,7 @@ impl Hooks for SessionHooks {
         let adapters: Vec<Value> =
             self.adapters.iter().map(|a| json!({ "name": a.info().name, "connected": a.connected() })).collect();
         m.insert("adapters".into(), Value::Array(adapters));
+        m.insert("foreground_tracking".into(), json!(self.foreground_tracking()));
         m
     }
 
@@ -273,6 +297,14 @@ impl Hooks for SessionHooks {
     }
 
     fn after_step(&mut self, engine: &mut Engine, report: &StepReport, _cx: &mut LoopCx<'_>) {
+        if crate::common::startup::has_change_notice(&report.events)
+            && let Some(w) = self.requirements_watch.as_mut()
+        {
+            self.requirements = w.refresh();
+        }
+        if !self.focus_seen && report.events.iter().any(|e| matches!(e, lindesk_plugin_api::Event::Focus { .. })) {
+            self.focus_seen = true;
+        }
         if let Some(p) = self.profiles.as_mut() {
             p.tick(engine, report.now);
         }
@@ -296,6 +328,13 @@ impl Hooks for SessionHooks {
         if let Some(h) = &self.hardware {
             h.refresh(engine);
         }
+        if let Some(w) = self.requirements_watch.as_mut() {
+            self.requirements = w.refresh();
+        }
+    }
+
+    fn requirements_checked(&self) -> Option<TimestampMs> {
+        self.requirements_watch.as_ref().map(|w| w.checked_ms)
     }
 
     fn reload(&mut self, engine: &mut Engine) -> Result<String, String> {

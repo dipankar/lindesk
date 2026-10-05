@@ -4,7 +4,6 @@ Architecture: @ARCH@
 Maintainer: Dipankar Sarkar <me@dipankar.name>
 Installed-Size: @INSTALLED_SIZE@
 Depends: dbus, systemd | systemd-standalone-sysusers, polkitd | policykit-1@SHLIBS_DEPENDS@
-Recommends: gnome-shell-extension-prefs
 Suggests: lindesk-telemetry
 Section: admin
 Priority: optional

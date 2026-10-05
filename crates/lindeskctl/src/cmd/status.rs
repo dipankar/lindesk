@@ -201,7 +201,10 @@ pub fn render(
             }
             s.push('\n');
         }
-        None => s.push_str(&format!("  {}\n", ui.dim("nothing focused (no adapter event yet)"))),
+        None => match &env.tracking {
+            Some(t) => s.push_str(&format!("  {}\n", ui.yellow(format!("foreground tracking: {t}")))),
+            None => s.push_str(&format!("  {}\n", ui.dim("nothing focused (no adapter event yet)"))),
+        },
     }
     s.push('\n');
     let protected: Vec<&TargetSummary> =
@@ -340,6 +343,12 @@ pub fn status(ui: &Ui) -> Result<()> {
                     let psi = live::read_psi(Path::new("/proc"));
                     let mut env = f.envelope.clone();
                     env.pending = pending;
+                    env.requirements = live::merged_requirements(
+                        &env.requirements_raw,
+                        env.requirements_checked,
+                        lindesk_core::clock::now_ms(),
+                        live::local_conflicts,
+                    );
                     if env.hardware.is_none() {
                         env.hardware = Some(live::local_hardware());
                     }
@@ -417,13 +426,22 @@ pub fn bare(ui: &Ui) -> Result<()> {
             if let Some(p) = envelope.paused_text(lindesk_core::clock::now_ms()) {
                 s.push_str(&format!("  {}\n", ui.yellow(p)));
             }
+            if let Some(t) = &envelope.tracking {
+                s.push_str(&format!("  {}\n", ui.yellow(format!("foreground tracking: {t}"))));
+            }
             s.push_str(&format!("  {} {}\n", ui.dim("pressure"), psi_inline(ui, &psi)));
             if !st.yielding.is_empty() {
                 let y: Vec<String> = st.yielding.iter().take(4).map(ToString::to_string).collect();
                 let more = if st.yielding.len() > 4 { format!(" +{}", st.yielding.len() - 4) } else { String::new() };
                 s.push_str(&format!("  {} {}{more}\n", ui.dim("yielding"), ui.yellow(y.join(" · "))));
             }
-            for r in envelope.requirements.iter().take(1) {
+            let reqs = live::merged_requirements(
+                &envelope.requirements_raw,
+                envelope.requirements_checked,
+                lindesk_core::clock::now_ms(),
+                live::local_conflicts,
+            );
+            for r in reqs.iter().take(1) {
                 s.push_str(&format!("  {}\n", ui.dim(format!("⚠ {r}"))));
             }
             let now = lindesk_core::clock::now_ms();
@@ -587,6 +605,15 @@ pub mod tests {
             telemetry: Some(json!({"installed": false, "enabled": true})),
             ..Default::default()
         };
+        let mut waiting = env.clone();
+        waiting.tracking = Some("waiting for GNOME extension (log out and in once)".into());
+        let mut nofg = st.clone();
+        nofg.foreground = None;
+        let w = render(&Ui::plain(), Daemon::Session, &nofg, &waiting, None, true);
+        assert!(
+            w.contains("FOREGROUND\n  foreground tracking: waiting for GNOME extension (log out and in once)"),
+            "{w}"
+        );
         let s = render(&Ui::plain(), Daemon::Session, &st, &env, None, true);
         assert!(
             s.contains("  telemetry: not installed (optional) → to record history: sudo apt install lindesk-telemetry"),
@@ -602,6 +629,24 @@ pub mod tests {
         assert!(s.contains("PROTECTED  1\n  gnome"), "{s}");
         assert!(s.contains("rustc") && s.contains("-31%") && s.contains("-45%") && s.contains("6s"), "{s}");
         assert!(s.contains("cpu.weight 20"), "{s}");
+    }
+
+    #[test]
+    fn stale_conflict_warnings_are_rechecked_locally() {
+        let raw = vec![
+            json!({"id": "conflicts", "title": "Conflicting daemons", "status": "warn", "detail": "system76-scheduler running"}),
+            json!({"id": "psi", "title": "PSI", "status": "warn", "detail": "per-cgroup PSI disabled"}),
+        ];
+        let now = 1_000_000;
+        // Fresh: the daemon's lines as they are, no local check.
+        let fresh = live::merged_requirements(&raw, Some(now - 10_000), now, || panic!("no local check when fresh"));
+        assert_eq!(fresh.len(), 2);
+        // Stale (or from an older daemon): the conflicts line comes from a local check.
+        let stale = live::merged_requirements(&raw, Some(now - 120_000), now, || None);
+        assert_eq!(stale.len(), 1, "the conflict is gone now: {stale:?}");
+        assert!(stale[0].contains("PSI"));
+        let old = live::merged_requirements(&raw, None, now, || Some(raw[0].clone()));
+        assert!(old.iter().any(|l| l.contains("system76-scheduler")));
     }
 
     #[test]

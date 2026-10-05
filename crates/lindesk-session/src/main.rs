@@ -254,6 +254,12 @@ fn run(cli: Cli, uid: u32) -> anyhow::Result<()> {
     hooks.profiles = Some(profiles);
     hooks.hardware = Some(HardwareWatch::new(roots.clone()));
     hooks.requirements = requirements.clone();
+    hooks.requirements_watch = Some(crate::common::startup::RequirementsWatch::new(
+        Component::Session,
+        roots.clone(),
+        Env::from_process(),
+        false,
+    ));
     hooks.rules_source = rules_source.as_str();
     hooks.degraded = degraded_reasons(&probe, uid);
     hooks.degraded.extend(control_error);

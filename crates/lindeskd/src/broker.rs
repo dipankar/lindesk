@@ -120,6 +120,8 @@ pub struct BrokerHooks {
     pub rules_source: &'static str,
     /// Where a pause is persisted (`lindeskctl pause`).
     pub pause_file: Option<PathBuf>,
+    /// Re-checks the requirement warnings (maintenance tick, after a versioned change).
+    pub requirements_watch: Option<crate::common::startup::RequirementsWatch>,
     pub calibrator: Option<Calibrator>,
     sessions: BTreeSet<u32>,
     last_sent: BTreeMap<u32, String>,
@@ -141,6 +143,7 @@ impl BrokerHooks {
             degraded: Vec::new(),
             rules_source: "system",
             pause_file: None,
+            requirements_watch: None,
             calibrator: None,
             sessions: BTreeSet::new(),
             last_sent: BTreeMap::new(),
@@ -248,6 +251,11 @@ impl Hooks for BrokerHooks {
     }
 
     fn after_step(&mut self, engine: &mut Engine, report: &StepReport, cx: &mut LoopCx<'_>) {
+        if crate::common::startup::has_change_notice(&report.events)
+            && let Some(w) = self.requirements_watch.as_mut()
+        {
+            self.requirements = w.refresh();
+        }
         if let Some(p) = self.profiles.as_mut() {
             p.tick(engine, report.now);
         }
@@ -279,6 +287,13 @@ impl Hooks for BrokerHooks {
         if let Some(h) = &self.hardware {
             h.refresh(engine);
         }
+        if let Some(w) = self.requirements_watch.as_mut() {
+            self.requirements = w.refresh();
+        }
+    }
+
+    fn requirements_checked(&self) -> Option<lindesk_plugin_api::TimestampMs> {
+        self.requirements_watch.as_ref().map(|w| w.checked_ms)
     }
 
     fn reload(&mut self, engine: &mut Engine) -> Result<String, String> {

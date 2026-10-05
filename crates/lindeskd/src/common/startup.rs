@@ -48,6 +48,39 @@ pub fn check_requirements(
     Ok(warnings)
 }
 
+/// Re-runs the requirements check while the daemon runs, so status warnings (a
+/// conflicting daemon that was since disabled, say) don't go stale: every maintenance tick
+/// and right after a versioned change.
+pub struct RequirementsWatch {
+    component: Component,
+    roots: Roots,
+    env: Env,
+    dbus_required: bool,
+    /// When the warnings were last computed (ms since the epoch).
+    pub checked_ms: lindesk_plugin_api::TimestampMs,
+}
+
+impl RequirementsWatch {
+    pub fn new(component: Component, roots: Roots, env: Env, dbus_required: bool) -> Self {
+        RequirementsWatch { component, roots, env, dbus_required, checked_ms: now_ms() }
+    }
+
+    /// The current warnings as JSON (no logging; hard failures are a start-up matter).
+    pub fn refresh(&mut self) -> Vec<Value> {
+        let probe = lindesk_sys::probe(&self.roots, &self.env);
+        let opts = CheckOptions::default().dbus_required(self.dbus_required);
+        let report = requirements::check_with(&self.roots, &self.env, self.component, &probe, &opts);
+        self.checked_ms = now_ms();
+        report.warnings().map(|w| serde_json::to_value(w).unwrap_or(Value::Null)).collect()
+    }
+}
+
+/// True when a step's events include a versioned change (`change.*` notice), after which
+/// the requirement warnings are re-evaluated.
+pub fn has_change_notice(events: &[Event]) -> bool {
+    events.iter().any(|e| matches!(e, Event::Notice { name, .. } if name.starts_with("change.")))
+}
+
 /// A daemon-level `Event::Notice`.
 pub fn notice(name: &str, source: &str, message: String, data: Value) -> Event {
     Event::Notice { ts: now_ms(), name: name.into(), source: source.into(), message, data }
@@ -91,5 +124,34 @@ impl HardwareWatch {
         caps.hardware.power = now.power;
         engine.set_caps(caps);
         true
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+
+    #[test]
+    fn warnings_follow_a_conflicting_daemon_going_away() {
+        let d = tempfile::tempdir().unwrap();
+        let (roots, env) = lindesk_sys::fixture::pop_os(d.path());
+        let f = lindesk_sys::fixture::Fixture::new(d.path());
+        f.process(3000, "system76-schedu");
+        let mut w = RequirementsWatch::new(Component::Broker, roots, env, false);
+        let conflicts = |v: &[Value]| v.iter().any(|r| r["id"] == "conflicts");
+        assert!(conflicts(&w.refresh()), "system76-scheduler running: a warning");
+        let first = w.checked_ms;
+        f.remove("proc/3000");
+        assert!(!conflicts(&w.refresh()), "stopped (e.g. setup conflicts --disable): the warning goes");
+        assert!(w.checked_ms >= first);
+        let n = |name: &str| Event::Notice {
+            ts: 0,
+            name: name.into(),
+            source: "t".into(),
+            message: String::new(),
+            data: Value::Null,
+        };
+        assert!(has_change_notice(&[n("profile.changed"), n("change.applied")]));
+        assert!(!has_change_notice(&[n("profile.changed")]));
     }
 }

@@ -71,6 +71,16 @@ pub fn gnome_state(info: &str) -> Option<bool> {
     None
 }
 
+/// True when the running shell has the extension loaded (`State: ACTIVE`/`ENABLED`). On
+/// Wayland a freshly installed extension is only loaded after the next login.
+pub fn gnome_loaded(info: &str) -> bool {
+    info.lines().any(|l| {
+        l.trim()
+            .strip_prefix("State:")
+            .is_some_and(|v| matches!(v.trim().to_ascii_uppercase().as_str(), "ENABLED" | "ACTIVE"))
+    })
+}
+
 pub fn first_run_path() -> Option<PathBuf> {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -114,8 +124,8 @@ pub fn first_run(current_desktop: Option<&str>, state: &Path) -> Option<String> 
     let action = match desktop {
         Desktop::Gnome => {
             let out = run("gnome-extensions", &["info", GNOME_UUID])?;
-            match gnome_state(&String::from_utf8_lossy(&out.stdout)).filter(|_| out.status.success()) {
-                None => return None, // not installed (yet)
+            let action = match gnome_state(&String::from_utf8_lossy(&out.stdout)).filter(|_| out.status.success()) {
+                None => return None, // not installed, or the shell doesn't know it yet: next login
                 Some(true) => "GNOME extension already enabled".to_string(),
                 Some(false) => match run("gnome-extensions", &["enable", GNOME_UUID]) {
                     Some(o) if o.status.success() => format!("enabled the GNOME extension {GNOME_UUID}"),
@@ -124,7 +134,16 @@ pub fn first_run(current_desktop: Option<&str>, state: &Path) -> Option<String> 
                         return None;
                     }
                 },
+            };
+            // Only "done" once the shell runs it; until then (Wayland: the next login) the
+            // next start tries again.
+            let loaded = run("gnome-extensions", &["info", GNOME_UUID])
+                .is_some_and(|o| gnome_loaded(&String::from_utf8_lossy(&o.stdout)));
+            if !loaded {
+                tracing::info!("{action}; GNOME Shell loads it at the next login (log out and in once)");
+                return Some(format!("{action} (active after the next login)"));
             }
+            action
         }
         Desktop::Kde => {
             if !kwin_script_installed() {
@@ -178,6 +197,9 @@ mod tests {
         assert_eq!(gnome_state("x\n  Enabled: Yes\n"), Some(true));
         assert_eq!(gnome_state("x\n  State: ENABLED\n"), Some(true));
         assert_eq!(gnome_state("x\n  State: DISABLED\n"), Some(false));
+        assert!(gnome_loaded("x\n  Enabled: Yes\n  State: ACTIVE\n"));
+        assert!(!gnome_loaded("x\n  Enabled: Yes\n  State: INITIALIZED\n"), "enabled but not loaded yet");
+        assert!(!gnome_loaded("x\n  Enabled: Yes\n"));
         assert_eq!(gnome_state("Extension doesn't exist"), None);
     }
 

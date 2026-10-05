@@ -30,4 +30,5 @@ sd-notify.workspace = true
 futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
+lindesk-sys = { workspace = true, features = ["fixtures"] }
 tempfile.workspace = true

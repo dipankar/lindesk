@@ -286,6 +286,9 @@ pub struct Envelope {
     pub hardware: Option<lindesk_plugin_api::Hardware>,
     /// Requirement warnings, one line each.
     pub requirements: Vec<String>,
+    /// The daemon's warnings as sent, and when it computed them (`requirements_checked_ms`).
+    pub requirements_raw: Vec<Value>,
+    pub requirements_checked: Option<i64>,
     /// The active profile (`daemon.profile`).
     pub profile: Option<crate::cmd::profile::ProfileState>,
     /// Changes that auto-revert unless confirmed (filled by the caller from `ListChanges`).
@@ -295,6 +298,9 @@ pub struct Envelope {
     pub telemetry: Option<Value>,
     /// `daemon.paused` when paused: until when (`None` = until resumed).
     pub paused: Option<Option<i64>>,
+    /// `daemon.foreground_tracking` of lindesk-session when it isn't `active` (e.g.
+    /// "waiting for GNOME extension (log out and in once)").
+    pub tracking: Option<String>,
 }
 
 impl Envelope {
@@ -340,6 +346,8 @@ pub fn parse_envelope(raw: &Value) -> Envelope {
         e.mode = d.get("mode").and_then(Value::as_str).map(str::to_string);
         e.uptime = d.get("uptime_s").and_then(Value::as_f64).map(|s| Duration::from_secs_f64(s.max(0.0)));
         e.telemetry = d.get("telemetry").filter(|t| t.is_object()).cloned();
+        e.tracking =
+            d.get("foreground_tracking").and_then(Value::as_str).filter(|t| *t != "active").map(str::to_string);
         if let Some(p) = d.get("paused").filter(|p| p["paused"] == true) {
             e.paused = Some(p["until_ms"].as_i64());
         }
@@ -355,9 +363,46 @@ pub fn parse_envelope(raw: &Value) -> Envelope {
     e.hardware = raw.get("hardware").and_then(|h| serde_json::from_value(h.clone()).ok());
     if let Some(Value::Array(a)) = raw.get("requirements") {
         e.requirements = a.iter().map(requirement_line).collect();
+        e.requirements_raw = a.clone();
     }
+    e.requirements_checked = raw.get("requirements_checked_ms").and_then(Value::as_i64);
     e.profile = crate::cmd::profile::ProfileState::from_status(raw);
     e
+}
+
+/// How old a daemon's requirement warnings may be before the conflicts line is checked
+/// locally instead.
+pub const REQUIREMENTS_STALE_MS: i64 = 60_000;
+
+/// The requirement lines to show: the daemon's, except that when they are older than
+/// [`REQUIREMENTS_STALE_MS`] (or the daemon doesn't say) the `conflicts` item is replaced
+/// by `local_conflicts`, a fresh local check (`None`: no conflict now).
+pub fn merged_requirements(
+    raw: &[Value],
+    checked: Option<i64>,
+    now: i64,
+    local_conflicts: impl FnOnce() -> Option<Value>,
+) -> Vec<String> {
+    let stale = checked.is_none_or(|t| now - t > REQUIREMENTS_STALE_MS);
+    if !stale {
+        return raw.iter().map(requirement_line).collect();
+    }
+    let mut v: Vec<Value> = raw.iter().filter(|r| r["id"] != "conflicts").cloned().collect();
+    v.extend(local_conflicts());
+    v.iter().map(requirement_line).collect()
+}
+
+/// The `conflicts` requirement of this machine right now, when it isn't a pass.
+pub fn local_conflicts() -> Option<Value> {
+    let roots = lindesk_sys::Roots::host();
+    let env = lindesk_sys::Env::from_process();
+    let probe = lindesk_sys::probe(&roots, &env);
+    let report = lindesk_sys::requirements::check(&roots, &env, lindesk_sys::requirements::Component::Session, &probe);
+    report
+        .items
+        .iter()
+        .find(|i| i.id == "conflicts" && i.status != lindesk_sys::requirements::Status::Pass)
+        .and_then(|i| serde_json::to_value(i).ok())
 }
 
 /// Hardware detected on this machine (when no daemon reports it).

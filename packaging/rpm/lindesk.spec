@@ -27,7 +27,6 @@ BuildRequires:  make
 %{?systemd_requires}
 Requires:       dbus
 Requires:       polkit
-Recommends:     gnome-shell-extension-prefs
 Suggests:       lindesk-telemetry
 
 %description

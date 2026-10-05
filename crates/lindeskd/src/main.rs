@@ -313,6 +313,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     hooks.profiles = Some(profiles);
     hooks.hardware = Some(HardwareWatch::new(roots.clone()));
     hooks.requirements = requirements;
+    hooks.requirements_watch = Some(crate::common::startup::RequirementsWatch::new(
+        Component::Broker,
+        roots.clone(),
+        Env::from_process(),
+        !cli.no_dbus,
+    ));
     hooks.rules_source = rules_source.as_str();
     hooks.degraded = degraded_reasons(&probe, cli.no_dbus);
     hooks.degraded.extend(control_error);
