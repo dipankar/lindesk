@@ -67,8 +67,10 @@ jobs:
       - name: doctor and version smoke test
         run: |
           ./target/debug/lindeskctl --version
+          # doctor exits 1 when something needs action (nothing is installed on a runner).
           ./target/debug/lindeskctl doctor || true
-          ./target/debug/lindeskctl doctor --json >/dev/null
+          ./target/debug/lindeskctl doctor --json > doctor.json || true
+          jq -e '.needs_action != null and .requirements != null' doctor.json >/dev/null
 
   core-is-lean:
     name: core links no DuckDB/Vortex
@@ -164,6 +166,12 @@ jobs:
         run: docker run --rm -v "$PWD":/src -w /src -e LINDESK_BIN_DIR=/src/target/release fedora:latest ./packaging/build-packages.sh rpm
       - name: Build Arch package
         run: docker run --rm -v "$PWD":/src -w /src -e LINDESK_BIN_DIR=/src/target/release archlinux:latest ./packaging/build-packages.sh arch
+      - name: Man pages are in the packages
+        # Checked here: minimal container images drop /usr/share/man on install.
+        run: |
+          dpkg-deb -c dist/lindesk_*.deb | grep -q 'man1/lindesk-mcp.1.gz'
+          dpkg-deb -c dist/lindesk_*.deb | grep -q 'man8/lindeskd.8.gz'
+          dpkg-deb -c dist/lindesk-telemetry_*.deb | grep -q 'man1/lindesk-data.1.gz'
       - name: Install core, add and remove telemetry, purge (.deb in Ubuntu)
         run: |
           docker run --rm -v "$PWD/dist":/dist:ro ubuntu:24.04 sh -euxc '
@@ -176,7 +184,6 @@ jobs:
             test -d /var/lib/lindesk/changes
             test -f /usr/share/lindesk/profiles.d/00-balanced.toml
             test -f /usr/lib/systemd/user/lindesk-mcp.socket
-            test -f /usr/share/man/man1/lindesk-mcp.1.gz
             test ! -e /usr/bin/lindesk-data
             lindeskctl profile list --json >/dev/null
             if lindeskctl query "select 1" 2>err; then exit 1; fi
@@ -187,7 +194,6 @@ jobs:
             test -f /usr/lib/lindesk/plugins/telemetry/plugin.toml
             test -f /usr/lib/lindesk/plugins/telemetry-user/plugin.toml
             test -d /var/lib/lindesk/telemetry
-            test -f /usr/share/man/man1/lindesk-data.1.gz
             lindeskctl query --backend native "select 1 as x" | grep -q 1
             lindeskctl plugin list --system --all | grep -q telemetry
             apt-get remove -y -qq lindesk-telemetry
