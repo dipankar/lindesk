@@ -55,7 +55,7 @@ warning: [plugins.steam-game]: no built-in or installed plugin has this name (ty
 
 | Section | What it controls |
 |---|---|
-| `[general]` | `tick`, extra `plugin_dirs`, `dry_run` (observe only) |
+| `[general]` | `tick`, `idle_tick` (the slower tick while the machine is calm), extra `plugin_dirs`, `dry_run` (observe only) |
 | `[io]` | `iocost = "auto" \| "on" \| "off"`, managed `devices` |
 | `[safety]` | the caps no plugin can exceed (see [Safety invariants](../reference/safety.md)) |
 | `[telemetry]` | `enabled`, `interval`, `flush`, `dir`, `[telemetry.retention]` |

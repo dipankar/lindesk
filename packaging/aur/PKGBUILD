@@ -54,6 +54,7 @@ package_lindesk() {
     'lindesk-telemetry: telemetry lake, lindeskctl query/data/simulate'
     'gnome-shell: GNOME foreground adapter (extension lindesk@lindesk.org)'
     'kwin: KDE Plasma foreground adapter (KWin script)'
+    'hyprland: Hyprland foreground adapter (built in; Omarchy)'
   )
   backup=(etc/lindesk/lindesk.toml)
   install=lindesk.install

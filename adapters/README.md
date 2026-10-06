@@ -15,9 +15,10 @@ over D-Bus.
 |---|---|---|---|---|---|
 | GNOME 45 to 49 (Wayland, X11) | [GNOME Shell extension](gnome-shell-extension/) | `notify::focus-window` and stage input/idle monitor → D-Bus `org.lindesk.QoS1` | pid | yes, ≤ 1 per 250 ms | optional frame-overrun metrics |
 | KDE Plasma 5/6 (Wayland, X11) | [KWin script](kwin-script/) | `workspace.windowActivated` → `callDBus` | pid | focus changes only (KWin scripts cannot see input) | |
-| COSMIC | built-in `cosmic` | Wayland `ext_foreign_toplevel_list_v1` + `zcosmic_toplevel_info_v1` (v2+) | app_id | no (not exposed to clients) | |
+| COSMIC | built-in `cosmic` + `wayland-input` | Wayland `ext_foreign_toplevel_list_v1` + `zcosmic_toplevel_info_v1` (v2+); `ext-idle-notify-v1` | app_id | yes, ≤ 1 per 250 ms | |
+| Hyprland (Omarchy, ...) | built-in `hyprland` + `wayland-input` | `activewindowv2` on the event socket → `j/activewindow` on the request socket; `ext-idle-notify-v1` | pid + class | yes, ≤ 1 per 250 ms | follows Hyprland across restarts |
 | any X11 session (Xfce, MATE, Cinnamon, i3, Openbox, GNOME/Plasma on Xorg, ...) | built-in `x11` | `_NET_ACTIVE_WINDOW` → `_NET_WM_PID` (+ `WM_CLIENT_LEADER`, children), `WM_CLASS`; XInput2 raw events | pid + WM_CLASS | yes, ≤ 1 per 250 ms | |
-| wlroots (sway, Hyprland, river, labwc, Wayfire, ...) | none built in for v1 | use the D-Bus API below with the compositor's IPC | | | `wlr-foreign-toplevel-management` adapter planned |
+| other Wayland compositors (sway, niri, river, labwc, Wayfire, ...) | none built in yet | use the D-Bus API below with the compositor's IPC | | | `wlr-foreign-toplevel-management` adapter planned |
 
 Built-in adapters are plugins, so they are configured in `lindesk.toml` like any other plugin:
 
@@ -28,6 +29,12 @@ config = { display = ":0", input = true }   # defaults: $DISPLAY; input on when 
 
 [plugins.cosmic]
 config = { display = "wayland-1" }          # default: $WAYLAND_DISPLAY
+
+[plugins.hyprland]
+config = { instance = "..." }               # default: $HYPRLAND_INSTANCE_SIGNATURE, else the newest instance
+
+[plugins.wayland-input]
+enabled = true                              # input activity via ext-idle-notify-v1 (COSMIC, Hyprland)
 ```
 
 On a GNOME or Plasma X11 session both the built-in `x11` adapter and the shell script may
@@ -64,20 +71,6 @@ busctl --user introspect org.lindesk.QoS1 /org/lindesk/QoS1
 
 ## Integrating another shell in about 10 lines
 
-**Hyprland**, through its event socket (`activewindowv2` gives the window address, and
-`hyprctl` maps that to a pid):
-
-```sh
-#!/bin/sh
-sock="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
-socat -U - UNIX-CONNECT:"$sock" | while IFS='>' read -r event _ data; do
-  [ "$event" = activewindowv2 ] || continue
-  pid=$(hyprctl -j clients | jq -r --arg a "0x$data" '.[] | select(.address == $a) | .pid')
-  [ -n "$pid" ] && [ "$pid" -gt 0 ] && busctl --user call org.lindesk.QoS1 /org/lindesk/QoS1 \
-      org.lindesk.QoS1 SetForegroundProcess i "$pid" >/dev/null 2>&1 &
-done
-```
-
 **sway / i3**, through window focus events from the IPC:
 
 ```sh
@@ -100,7 +93,7 @@ def set_foreground(pid):
              Gio.DBusCallFlags.NO_AUTO_START, -1, None, None)  # async, errors ignored
 ```
 
-Run such a script from your compositor's autostart (`exec` in sway, `exec-once` in Hyprland).
+Run such a script from your compositor's autostart (`exec` in sway).
 For input activity, call `BeginInteraction` from a key or button hook if your compositor
 offers one, at most once every 250 ms.
 
@@ -110,7 +103,7 @@ Built-in adapters implement `lindesk_plugin_api::Adapter`. `start(sink)` spawns 
 that calls `sink(Event::Focus { .. })` / `sink(Event::Interaction { .. })`. `stop()` joins
 it, and `connected()` reports the link state. If the desktop isn't present, `start` returns
 `PluginError::Unsupported` so the host skips the adapter. See
-[`crates/lindesk-builtins/src/adapters/`](../crates/lindesk-builtins/src/adapters/): `x11.rs` and
-`cosmic.rs` share the worker/backoff plumbing in `worker.rs` and the `Debouncer`/`Throttle`
+[`crates/lindesk-builtins/src/adapters/`](../crates/lindesk-builtins/src/adapters/): `x11.rs`,
+`cosmic.rs`, `hyprland.rs` and `wl_input.rs` share the worker/backoff plumbing in `worker.rs` and the `Debouncer`/`Throttle`
 helpers in `mod.rs`. External adapters can also be stdio plugins of kind `adapter` (see the
 plugin guide).

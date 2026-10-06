@@ -223,7 +223,7 @@ mod tests {
         let mut s = GatedSensor::new(P(log.clone(), 0), gate.clone());
         s.init(&ctx()).unwrap();
         assert!(s.wake_fds().is_empty());
-        let input = SensorInput { now: 0, targets: vec![], foreground: None };
+        let input = SensorInput { now: 0, targets: vec![], foreground: None, foreground_family: Vec::new() };
         assert_eq!(s.poll(&input).unwrap(), SensorOutput::default());
         gate.set(true);
         s.poll(&input).unwrap();

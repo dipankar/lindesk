@@ -144,6 +144,10 @@ impl Sink for TelemetrySink {
     }
 }
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--version") {
         println!("{}", lindesk_version::line("lindesk-telemetry-sink"));

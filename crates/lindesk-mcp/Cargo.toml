@@ -12,7 +12,13 @@ authors.workspace = true
 name = "lindesk-mcp"
 path = "src/main.rs"
 
+[features]
+default = ["mimalloc"]
+# Use mimalloc instead of the system allocator.
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
+mimalloc = { workspace = true, optional = true }
 lindesk-version.workspace = true
 lindesk-plugin-api.workspace = true
 lindesk-core.workspace = true

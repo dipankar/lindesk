@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ use lindesk_plugin_api::{Resource, Sample, Scope, TimestampMs};
 use serde::{Deserialize, Serialize};
 
 use crate::Roots;
-use crate::util::{invalid_data, invalid_input, under};
+use crate::util::{invalid_data, invalid_input, read_file, under};
 
 /// One line (`some` or `full`) of a PSI file.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
@@ -66,7 +66,58 @@ impl PsiReading {
 
     /// Read and parse a PSI file.
     pub fn read(path: &Path) -> io::Result<Self> {
-        Self::parse(&std::fs::read_to_string(path)?)
+        Self::parse(&read_file(path)?)
+    }
+}
+
+/// PSI files kept open, for the few scopes sampled on every step: one `pread(2)` per sample
+/// instead of an open, the reads and a close.
+///
+/// A descriptor on a removed cgroup's file fails with `ENODEV`; it is dropped and the next
+/// read opens the path again, so a cgroup recreated under the same name is picked up.
+#[derive(Debug, Default)]
+pub struct PsiFiles {
+    open: HashMap<(Scope, Resource), File>,
+}
+
+impl PsiFiles {
+    /// No files open yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Read the PSI file for `scope`/`resource`, opening it on first use.
+    pub fn read(&mut self, roots: &Roots, scope: &Scope, resource: Resource) -> io::Result<PsiReading> {
+        let key = (scope.clone(), resource);
+        let file = match self.open.entry(key) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => e.insert(File::open(scope_path(roots, scope, resource)?)?),
+        };
+        // Two lines of about 70 bytes; the kernel hands the whole file over in one read.
+        let mut buf = [0u8; 512];
+        let read = file.read_at(&mut buf, 0).and_then(|n| {
+            let s = std::str::from_utf8(&buf[..n]).map_err(|_| invalid_data("PSI data is not UTF-8"))?;
+            PsiReading::parse(s)
+        });
+        if read.is_err() {
+            self.open.remove(&(scope.clone(), resource));
+        }
+        read
+    }
+
+    /// Close the files of every scope `keep` rejects.
+    pub fn retain(&mut self, mut keep: impl FnMut(&Scope) -> bool) {
+        self.open.retain(|(scope, _), _| keep(scope));
+    }
+
+    /// Number of open files.
+    pub fn len(&self) -> usize {
+        self.open.len()
+    }
+
+    /// True when no file is open.
+    pub fn is_empty(&self) -> bool {
+        self.open.is_empty()
     }
 }
 
@@ -171,6 +222,19 @@ impl PsiTracker {
         resource: Resource,
     ) -> io::Result<Option<Sample>> {
         let r = PsiReading::read(&scope_path(roots, &scope, resource)?)?;
+        Ok(self.update(ts, scope, resource, &r))
+    }
+
+    /// Like [`PsiTracker::sample`], reading through `files` (descriptors kept open).
+    pub fn sample_open(
+        &mut self,
+        files: &mut PsiFiles,
+        roots: &Roots,
+        ts: TimestampMs,
+        scope: Scope,
+        resource: Resource,
+    ) -> io::Result<Option<Sample>> {
+        let r = files.read(roots, &scope, resource)?;
         Ok(self.update(ts, scope, resource, &r))
     }
 
@@ -359,6 +423,39 @@ mod tests {
         assert!(PsiReading::parse("").is_err());
         assert!(PsiReading::parse("some avg10=x total=1").is_err());
         assert!(PsiReading::parse("some avg10=1.0").is_err());
+    }
+
+    #[test]
+    fn open_files_follow_rewrites_and_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = Roots::under(dir.path());
+        let cg = dir.path().join("sys/fs/cgroup/a.scope");
+        let write = |total: u64| {
+            std::fs::create_dir_all(&cg).unwrap();
+            std::fs::write(cg.join("io.pressure"), format!("some avg10=1.00 avg60=0.00 avg300=0.00 total={total}\n"))
+                .unwrap();
+        };
+        let scope = Scope::Cgroup("/a.scope".into());
+        let mut files = PsiFiles::new();
+        assert!(files.read(&roots, &scope, Resource::Io).is_err());
+        assert!(files.is_empty());
+
+        write(5);
+        assert_eq!(files.read(&roots, &scope, Resource::Io).unwrap().some.total_us, 5);
+        write(70);
+        assert_eq!(files.read(&roots, &scope, Resource::Io).unwrap().some.total_us, 70);
+        assert_eq!(files.len(), 1, "one descriptor, reused");
+
+        // Unparseable (or gone, on a real cgroup: ENODEV) drops the descriptor; the next
+        // read opens the path afresh.
+        std::fs::write(cg.join("io.pressure"), "").unwrap();
+        assert!(files.read(&roots, &scope, Resource::Io).is_err());
+        assert!(files.is_empty());
+        std::fs::remove_dir_all(&cg).unwrap();
+        write(3);
+        assert_eq!(files.read(&roots, &scope, Resource::Io).unwrap().some.total_us, 3);
+        files.retain(|s| *s == Scope::System);
+        assert!(files.is_empty());
     }
 
     #[test]

@@ -9,7 +9,8 @@
 //! | KDE Plasma (Wayland) | KWin script (`adapters/kwin-script`) | pushes to `org.lindesk.QoS1` over D-Bus |
 //! | COSMIC | [`cosmic::CosmicAdapter`] (`"cosmic"`) | `ext_foreign_toplevel_list_v1` + `zcosmic_toplevel_info_v1` |
 //! | any X11 session | [`x11::X11Adapter`] (`"x11"`) | `_NET_ACTIVE_WINDOW` / `_NET_WM_PID` + XInput2 raw events |
-//! | other wlroots compositors (sway, Hyprland, river, ...) | none in v1 | integrate through the D-Bus API (see `adapters/README.md`) |
+//! | Hyprland (Omarchy, ...) | [`hyprland::HyprlandAdapter`] (`"hyprland"`) + [`wl_input::WlInputAdapter`] (`"wayland-input"`) | Hyprland's event and request sockets (pid); `ext-idle-notify-v1` for input |
+//! | other wlroots compositors (sway, river, ...) | none yet | integrate through the D-Bus API (see `adapters/README.md`) |
 //!
 //! [`detect`] picks the built-in adapters for a session; the shell-side ones are installed
 //! separately and need nothing from the host.
@@ -18,10 +19,14 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "cosmic")]
 pub mod cosmic;
+#[cfg(feature = "hyprland")]
+pub mod hyprland;
+#[cfg(feature = "wayland-input")]
+pub mod wl_input;
 #[cfg(feature = "x11")]
 pub mod x11;
 
-#[cfg(any(feature = "x11", feature = "cosmic"))]
+#[cfg(any(feature = "x11", feature = "cosmic", feature = "hyprland", feature = "wayland-input"))]
 mod worker;
 
 #[cfg(all(test, feature = "x11"))]
@@ -33,6 +38,10 @@ use lindesk_plugin_api::Adapter;
 pub const X11: &str = "x11";
 /// Plugin name of [`cosmic::CosmicAdapter`].
 pub const COSMIC: &str = "cosmic";
+/// Plugin name of [`hyprland::HyprlandAdapter`].
+pub const HYPRLAND: &str = "hyprland";
+/// Plugin name of [`wl_input::WlInputAdapter`].
+pub const WAYLAND_INPUT: &str = "wayland-input";
 
 /// Minimum spacing between two `Event::Interaction`s from one adapter.
 pub const INTERACTION_THROTTLE: Duration = Duration::from_millis(250);
@@ -46,6 +55,12 @@ pub fn available() -> Vec<&'static str> {
     if cfg!(feature = "cosmic") {
         v.push(COSMIC);
     }
+    if cfg!(feature = "hyprland") {
+        v.push(HYPRLAND);
+    }
+    if cfg!(feature = "wayland-input") {
+        v.push(WAYLAND_INPUT);
+    }
     v
 }
 
@@ -57,6 +72,10 @@ pub fn create(name: &str) -> Option<Box<dyn Adapter>> {
         X11 => Some(Box::new(x11::X11Adapter::default())),
         #[cfg(feature = "cosmic")]
         COSMIC => Some(Box::new(cosmic::CosmicAdapter::default())),
+        #[cfg(feature = "hyprland")]
+        HYPRLAND => Some(Box::new(hyprland::HyprlandAdapter::default())),
+        #[cfg(feature = "wayland-input")]
+        WAYLAND_INPUT => Some(Box::new(wl_input::WlInputAdapter::default())),
         _ => None,
     }
 }
@@ -72,6 +91,10 @@ pub struct SessionEnv {
     pub wayland_display: Option<String>,
     /// `DISPLAY`
     pub display: Option<String>,
+    /// A Hyprland instance is running for this user: `HYPRLAND_INSTANCE_SIGNATURE` is set, or
+    /// one answers under `$XDG_RUNTIME_DIR/hypr`. The second half matters for a user service
+    /// started before the compositor exported its environment to systemd.
+    pub hyprland: bool,
 }
 
 impl SessionEnv {
@@ -84,12 +107,20 @@ impl SessionEnv {
             session_type: get("XDG_SESSION_TYPE"),
             wayland_display: get("WAYLAND_DISPLAY"),
             display: get("DISPLAY"),
+            hyprland: get("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
         }
     }
 
-    /// Reads the variables from this process's environment.
+    /// Reads the variables from this process's environment, and looks for a running Hyprland.
     pub fn from_process() -> Self {
-        Self::from_fn(|k| std::env::var(k).ok())
+        let mut env = Self::from_fn(|k| std::env::var(k).ok());
+        #[cfg(feature = "hyprland")]
+        if !env.hyprland
+            && let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR")
+        {
+            env.hyprland = hyprland::is_live(std::path::Path::new(&runtime), None);
+        }
+        env
     }
 
     fn has_desktop(&self, name: &str) -> bool {
@@ -115,22 +146,28 @@ impl SessionEnv {
 
 /// Picks the built-in adapters to enable for a session.
 ///
-/// * COSMIC → `["cosmic"]`.
+/// * COSMIC → `["cosmic", "wayland-input"]`: focus from COSMIC's toplevel protocols, input from
+///   `ext-idle-notify-v1`.
+/// * Hyprland → `["hyprland", "wayland-input"]`: focus (with the pid) from Hyprland's sockets.
 /// * GNOME and KDE Plasma on Wayland → `[]`: their shell-side scripts push focus and input
 ///   over D-Bus, and nothing outside the compositor can observe focus there.
 /// * Any X11 session (GNOME/Plasma on Xorg, Xfce, MATE, i3, ...) → `["x11"]`. The GNOME
 ///   extension and KWin script also work on X11; running both just reports the same focus twice.
-/// * Other Wayland compositors (wlroots: sway, Hyprland, river, labwc, ...) → `[]` in v1. They
-///   can integrate with a few lines of IPC glue calling `org.lindesk.QoS1` (see
+/// * Other Wayland compositors (sway, river, labwc, niri, ...) → `[]` for now. They can
+///   integrate with a few lines of IPC glue calling `org.lindesk.QoS1` (see
 ///   `adapters/README.md`); a `wlr-foreign-toplevel-management` adapter is planned.
 /// * No graphical session (tty, ssh) → `[]`.
 ///
 /// Names are returned even when the matching cargo feature is off; [`create`] returns `None`
 /// for those.
 pub fn detect(env: &SessionEnv) -> Vec<&'static str> {
+    // Hyprland first, and without asking for a Wayland session type: its sockets say so.
+    if env.hyprland || (env.is_wayland() && env.has_desktop("Hyprland")) {
+        return vec![HYPRLAND, WAYLAND_INPUT];
+    }
     if env.is_wayland() {
         if env.has_desktop("COSMIC") {
-            return vec![COSMIC];
+            return vec![COSMIC, WAYLAND_INPUT];
         }
         // GNOME, KDE (shell scripts) and everything else: nothing built in.
         return Vec::new();
@@ -249,10 +286,29 @@ mod tests {
             ("XDG_SESSION_TYPE", "wayland"),
             ("WAYLAND_DISPLAY", "wayland-1"),
         ]);
-        assert_eq!(detect(&e), vec![COSMIC]);
+        assert_eq!(detect(&e), vec![COSMIC, WAYLAND_INPUT]);
         // Session type missing, but a Wayland socket is there.
         let e = env(&[("XDG_CURRENT_DESKTOP", "pop:COSMIC"), ("WAYLAND_DISPLAY", "wayland-1")]);
-        assert_eq!(detect(&e), vec![COSMIC]);
+        assert_eq!(detect(&e), vec![COSMIC, WAYLAND_INPUT]);
+    }
+
+    #[test]
+    fn detect_hyprland() {
+        // Started through uwsm (Omarchy): the whole session environment is there.
+        let e = env(&[
+            ("XDG_CURRENT_DESKTOP", "Hyprland"),
+            ("XDG_SESSION_TYPE", "wayland"),
+            ("WAYLAND_DISPLAY", "wayland-1"),
+            ("HYPRLAND_INSTANCE_SIGNATURE", "abc_1_2"),
+        ]);
+        assert!(e.hyprland);
+        assert_eq!(detect(&e), vec![HYPRLAND, WAYLAND_INPUT]);
+        // Only the desktop name made it into the service's environment.
+        let e = env(&[("XDG_CURRENT_DESKTOP", "Hyprland"), ("WAYLAND_DISPLAY", "wayland-1")]);
+        assert_eq!(detect(&e), vec![HYPRLAND, WAYLAND_INPUT]);
+        // Nothing did, but an instance answers on its socket (what `from_process` checks).
+        let e = SessionEnv { hyprland: true, ..env(&[]) };
+        assert_eq!(detect(&e), vec![HYPRLAND, WAYLAND_INPUT]);
     }
 
     #[test]
@@ -270,7 +326,7 @@ mod tests {
 
     #[test]
     fn detect_wlroots_and_headless() {
-        for desktop in ["sway", "Hyprland", "river", "labwc:wlroots"] {
+        for desktop in ["sway", "niri", "river", "labwc:wlroots"] {
             let e = env(&[
                 ("XDG_CURRENT_DESKTOP", desktop),
                 ("XDG_SESSION_TYPE", "wayland"),

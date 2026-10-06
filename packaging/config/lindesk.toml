@@ -18,6 +18,9 @@
 [general]
 # Pipeline tick. Sensors with wake fds (PSI triggers) can wake the loop earlier.
 tick = "250ms"
+# Tick while the machine is calm (GREEN, no input for a few seconds). Input, a focus change
+# or rising pressure wakes the loop at once, so this costs no responsiveness. "0s": never slow down.
+idle_tick = "1s"
 # Extra plugin directories, searched after the defaults
 # (/usr/lib/lindesk/plugins, /etc/lindesk/plugins; user: $XDG_DATA_HOME/lindesk/plugins).
 plugin_dirs = []

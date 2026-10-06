@@ -2555,6 +2555,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "lindesk-bench"
 version = "0.1.0"
 dependencies = [
@@ -2567,6 +2576,7 @@ dependencies = [
  "lindesk-plugin-api",
  "lindesk-sys",
  "lindesk-version",
+ "mimalloc",
  "serde",
  "serde_json",
  "tempfile",
@@ -2641,6 +2651,7 @@ dependencies = [
  "lindesk-query",
  "lindesk-store",
  "lindesk-version",
+ "mimalloc",
  "rustix 1.1.5",
  "serde",
  "serde_json",
@@ -2697,6 +2708,7 @@ dependencies = [
  "lindesk-plugin-api",
  "lindesk-sys",
  "lindesk-version",
+ "mimalloc",
  "rmcp",
  "schemars",
  "serde",
@@ -2763,13 +2775,13 @@ dependencies = [
  "lindesk-plugin-api",
  "lindesk-sys",
  "lindesk-version",
+ "mimalloc",
  "rustix 1.1.5",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing",
- "tracing-journald",
  "tracing-subscriber",
  "zbus",
 ]
@@ -2819,6 +2831,7 @@ dependencies = [
  "lindesk-store",
  "lindesk-sys",
  "lindesk-version",
+ "mimalloc",
  "rustix 1.1.5",
  "serde_json",
  "tempfile",
@@ -2852,6 +2865,7 @@ dependencies = [
  "lindesk-store",
  "lindesk-sys",
  "lindesk-version",
+ "mimalloc",
  "ratatui",
  "serde",
  "serde_json",
@@ -2876,6 +2890,7 @@ dependencies = [
  "lindesk-plugin-api",
  "lindesk-sys",
  "lindesk-version",
+ "mimalloc",
  "rustix 1.1.5",
  "sd-notify",
  "serde",
@@ -2883,7 +2898,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tracing-journald",
  "tracing-subscriber",
  "zbus",
 ]
@@ -3005,6 +3019,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]
@@ -4886,17 +4909,6 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
  "valuable",
-]
-
-[[package]]
-name = "tracing-journald"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d3a81ed245bfb62592b1e2bc153e77656d94ee6a0497683a65a12ccaf2438d0"
-dependencies = [
- "libc",
- "tracing-core",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -37,6 +37,11 @@ pub struct General {
     /// Pipeline tick. Sensors with wake fds can wake the loop earlier.
     #[serde(with = "dur")]
     pub tick: Duration,
+    /// Tick while nothing is happening: the level is GREEN, nobody has touched the machine
+    /// for a few seconds and pressure triggers are armed to wake the loop. `0s` always uses
+    /// `tick`.
+    #[serde(with = "dur")]
+    pub idle_tick: Duration,
     /// Extra plugin directories, searched after the defaults.
     pub plugin_dirs: Vec<PathBuf>,
     /// Start in observe-only mode: compute and record intents but never apply them.
@@ -53,6 +58,7 @@ impl Default for General {
     fn default() -> Self {
         General {
             tick: Duration::from_millis(250),
+            idle_tick: Duration::from_secs(1),
             plugin_dirs: Vec::new(),
             dry_run: false,
             profile: PROFILE_AUTO.to_string(),

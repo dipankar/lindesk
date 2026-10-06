@@ -12,6 +12,8 @@ authors = ["Dipankar Sarkar <me@dipankar.name>"]
 description = "macOS-style QoS for the Linux desktop: a plugin-based userspace resource governor"
 
 [workspace.dependencies]
+# The allocator of every lindesk binary (their `mimalloc` feature, on by default).
+mimalloc = { version = "0.1", default-features = false }
 # internal
 lindesk-plugin-api = { path = "crates/lindesk-plugin-api", version = "0.1.0" }
 lindesk-plugin = { path = "crates/lindesk-plugin", version = "0.1.0" }
@@ -35,7 +37,6 @@ toml = "0.9"
 schemars = "1.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-tracing-journald = "0.3"
 clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4.6"
 clap_mangen = "0.2"

@@ -35,3 +35,4 @@ mod util;
 
 pub use probe::{Backend, Probe, SupportLevel, probe};
 pub use roots::{Env, Roots};
+pub use util::read_file;

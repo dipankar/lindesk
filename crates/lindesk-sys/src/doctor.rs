@@ -247,6 +247,7 @@ pub fn findings(p: &Probe) -> Vec<Finding> {
         (DesktopKind::Gnome, _) => ("GNOME", Some("install the lindesk GNOME Shell extension for focus tracking")),
         (DesktopKind::Kde, _) => ("KDE", Some("install the lindesk KWin script for focus tracking")),
         (DesktopKind::Cosmic, _) => ("COSMIC", None),
+        (DesktopKind::Hyprland, _) => ("Hyprland", None),
         (DesktopKind::Other, SessionType::X11) => ("other", None),
         (DesktopKind::Other, _) => ("other", Some("no built-in focus adapter; write an adapter plugin or use X11")),
         (DesktopKind::Unknown, _) => ("unknown", Some("run doctor from inside the desktop session")),

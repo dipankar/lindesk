@@ -419,13 +419,13 @@ const MAX_FAMILY_PROCS: usize = 4096;
 
 /// A process's parent pid, from `/proc/<pid>/stat`.
 fn ppid(proc_root: &Path, pid: i32) -> Option<i32> {
-    let stat = std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok()?;
+    let stat = lindesk_sys::read_file(&proc_root.join(pid.to_string()).join("stat")).ok()?;
     let rest = stat.get(stat.rfind(')')? + 1..)?;
     rest.split_whitespace().nth(1)?.parse().ok()
 }
 
 fn start_time(proc_root: &Path, pid: i32) -> Option<u64> {
-    let stat = std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok()?;
+    let stat = lindesk_sys::read_file(&proc_root.join(pid.to_string()).join("stat")).ok()?;
     // `comm` may contain spaces and parentheses: fields resume after the last ')'.
     let rest = stat.get(stat.rfind(')')? + 1..)?;
     rest.split_whitespace().nth(19)?.parse().ok()
@@ -550,7 +550,7 @@ impl Environment for SysEnvironment {
     }
 
     fn mem_total(&self) -> Option<u64> {
-        let s = std::fs::read_to_string(self.roots.proc.join("meminfo")).ok()?;
+        let s = lindesk_sys::read_file(&self.roots.proc.join("meminfo")).ok()?;
         let kb: u64 = s.lines().find_map(|l| l.strip_prefix("MemTotal:"))?.split_whitespace().next()?.parse().ok()?;
         kb.checked_mul(1024)
     }

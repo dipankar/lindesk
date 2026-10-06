@@ -150,6 +150,7 @@ pub enum DesktopKind {
     Gnome,
     Kde,
     Cosmic,
+    Hyprland,
     Other,
     Unknown,
 }
@@ -643,6 +644,8 @@ pub fn desktop(env: &Env) -> Desktop {
         DesktopKind::Kde
     } else if has(&|t| t.contains("gnome")) {
         DesktopKind::Gnome
+    } else if has(&|t| t == "hyprland") || env.get("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+        DesktopKind::Hyprland
     } else if tokens.is_empty() {
         DesktopKind::Unknown
     } else {
@@ -875,6 +878,9 @@ mod tests {
         assert_eq!(d(&[("XDG_CURRENT_DESKTOP", "COSMIC")]).kind, DesktopKind::Cosmic);
         assert_eq!(d(&[("DESKTOP_SESSION", "plasma")]).kind, DesktopKind::Kde);
         assert_eq!(d(&[("XDG_CURRENT_DESKTOP", "sway"), ("XDG_SESSION_TYPE", "wayland")]).kind, DesktopKind::Other);
+        // Omarchy: `uwsm start -D Hyprland`.
+        assert_eq!(d(&[("XDG_CURRENT_DESKTOP", "Hyprland"), ("WAYLAND_DISPLAY", "w")]).kind, DesktopKind::Hyprland);
+        assert_eq!(d(&[("HYPRLAND_INSTANCE_SIGNATURE", "abc_1_2")]).kind, DesktopKind::Hyprland);
         assert_eq!(d(&[("DISPLAY", ":1")]).session, SessionType::X11);
         assert_eq!(d(&[("XDG_SESSION_TYPE", "tty")]).session, SessionType::Tty);
         assert_eq!(d(&[]).session, SessionType::Unknown);

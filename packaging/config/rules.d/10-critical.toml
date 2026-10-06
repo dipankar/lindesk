@@ -20,7 +20,23 @@ comm = [
   "Xorg",
   "sway",
   "Hyprland",
+  "niri",
+  "river",
+  "labwc",
+  "wayfire",
+  # Desktop shells drawn by a separate process: Omarchy's bar, launcher and lock screen
+  # (Quickshell), and the usual wlroots bar.
+  "quickshell",
+  "qs",
+  "waybar",
 ]
+
+# uwsm (Omarchy and other Hyprland, sway and niri setups) runs the compositor as this unit,
+# and whatever the compositor starts directly (a shell, a bar) lives in it too.
+[[rule]]
+name = "compositor-units"
+class = "critical"
+unit = ["wayland-wm@*.service"]
 
 [[rule]]
 name = "audio"
@@ -41,6 +57,13 @@ comm = ["ibus-daemon", "fcitx5"]
 name = "session"
 class = "critical"
 comm = ["gnome-session-binary", "gnome-session-b", "dbus-broker", "dbus-broker-lau*", "dbus-daemon"]
+
+# Nearly every service writes its log to journald and waits for it to take the line. When
+# journald is starved of disk, they all stall with it, the desktop's own services included.
+[[rule]]
+name = "logging"
+class = "critical"
+comm = ["systemd-journal"]
 
 [[rule]]
 name = "accessibility"

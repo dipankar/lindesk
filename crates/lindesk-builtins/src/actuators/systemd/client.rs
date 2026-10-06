@@ -12,6 +12,9 @@
 use std::fmt;
 
 use zbus::blocking::Connection;
+
+/// Deadline for one call to systemd.
+const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 use zbus::zvariant::{DynamicType, OwnedObjectPath, OwnedValue, Value};
 
 use crate::actuators::Bus;
@@ -143,14 +146,17 @@ impl SystemdClient {
     /// Open the connection now (it is otherwise opened by the first call).
     pub fn connect(&mut self) -> Result<&Connection, SystemdError> {
         if self.conn.is_none() {
+            use zbus::blocking::connection::Builder;
+            // Every call has a deadline: if systemd itself is stuck (PID 1 blocked in the
+            // kernel under extreme I/O load), a call must fail, not hang the engine thread.
             let conn = match self.bus {
-                Bus::System => Connection::system(),
-                Bus::User => Connection::session().or_else(|e| {
+                Bus::System => Builder::system().and_then(|b| b.method_timeout(CALL_TIMEOUT).build()),
+                Bus::User => Builder::session().and_then(|b| b.method_timeout(CALL_TIMEOUT).build()).or_else(|e| {
                     let path = format!("/run/user/{}/bus", self.uid);
                     if !std::path::Path::new(&path).exists() {
                         return Err(e);
                     }
-                    zbus::blocking::connection::Builder::address(format!("unix:path={path}").as_str())?.build()
+                    Builder::address(format!("unix:path={path}").as_str())?.method_timeout(CALL_TIMEOUT).build()
                 }),
             }
             .map_err(|e| SystemdError::Connection(format!("{} bus: {e}", self.bus)))?;

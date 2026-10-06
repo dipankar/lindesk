@@ -50,7 +50,7 @@ pub fn parse_status_uid(status: &str) -> Option<u32> {
 
 /// Real uid of a process.
 pub fn uid(proc_root: &Path, pid: i32) -> io::Result<u32> {
-    let s = fs::read_to_string(proc_root.join(pid.to_string()).join("status"))?;
+    let s = crate::util::read_file(&proc_root.join(pid.to_string()).join("status"))?;
     parse_status_uid(&s).ok_or_else(|| invalid_data(format!("no Uid line in /proc/{pid}/status")))
 }
 
@@ -73,7 +73,7 @@ pub fn parse_proc_cgroup(contents: &str) -> Option<String> {
 
 /// Cgroup path of a process (see [`parse_proc_cgroup`]).
 pub fn cgroup(proc_root: &Path, pid: i32) -> io::Result<Option<String>> {
-    Ok(parse_proc_cgroup(&fs::read_to_string(proc_root.join(pid.to_string()).join("cgroup"))?))
+    Ok(parse_proc_cgroup(&crate::util::read_file(&proc_root.join(pid.to_string()).join("cgroup"))?))
 }
 
 /// Everything classifiers get to know about a process.

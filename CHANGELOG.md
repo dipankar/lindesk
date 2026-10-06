@@ -20,7 +20,9 @@ The first release.
   their renderers in another; focusing the window protects every unit the app runs in.
 - **Builds yield.** A terminal tab or app scope running compilers and linkers is background
   work while it builds. The focused app is never throttled.
-- **Foreground tracking** for GNOME (Shell extension), KDE (KWin script), COSMIC and X11.
+- **Foreground tracking** for GNOME (Shell extension), KDE (KWin script), COSMIC, Hyprland
+  (built in, so it drops into Omarchy) and X11; input activity on Wayland compositors
+  through `ext-idle-notify-v1`.
 - **Plugins** for every stage (sensors, adapters, classifiers, policies, actuators, sinks)
   in any language over stdio JSON-RPC; Rust and Python SDKs; conformance tests;
   `lindeskctl plugin new|test|install`; `lindeskctl simulate` to replay history through a policy.
@@ -40,11 +42,18 @@ The first release.
   compaction, rollups, retention and deletion. The core package links neither.
 - **Packaging:** `.deb`, `.rpm`, Arch, `install.sh` and `lindesk-uninstall`; x86_64 and aarch64.
 - lindesk guarantees its own resources (protected, unswappable, memory-locked working set;
-  high CPU and I/O share) so it stays responsive under the load it is managing.
+  high CPU and I/O share) so it stays responsive under the load it is managing. Its logging
+  never waits for the journal: when journald is stuck behind a saturated disk, records are
+  dropped and counted instead of stalling the governor.
+- **Cheap to run.** Only the system and the focused app's cgroups are sampled on every
+  step, through file descriptors kept open; everything else is sampled every two seconds.
+  The loop drops to one step a second while the machine is calm and wakes at once on input
+  or rising pressure. mimalloc is the allocator of every binary.
 
 ### Known limitations
 - On GNOME Wayland the Shell extension loads at the next login after the first install.
-- The KDE adapter is tested against stubs, not yet on a real Plasma session.
+- The KDE adapter is tested against stubs, not yet on a real Plasma session; the Hyprland
+  adapter against a stand-in for Hyprland's sockets, not yet on an Omarchy machine.
 - No published benchmark numbers yet: run `lindesk-bench run` on your machine.
 - The `lindesk-session` binary in the packages is GPL-3.0 because of the COSMIC adapter's
   dependency (see THIRD-PARTY.md); the source is MIT OR Apache-2.0.

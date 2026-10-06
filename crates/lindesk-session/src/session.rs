@@ -109,6 +109,8 @@ impl SessionHooks {
             crate::desktop::Desktop::Kde => {
                 "waiting for the KWin script (enable it in System Settings > KWin Scripts, or log out and in)".into()
             }
+            // A built-in adapter (Hyprland, COSMIC, X11) that has not reached its compositor.
+            crate::desktop::Desktop::Other if !self.adapters.is_empty() => "waiting for the compositor".into(),
             crate::desktop::Desktop::Other => "no foreground adapter for this desktop".into(),
         }
     }

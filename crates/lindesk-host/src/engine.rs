@@ -47,6 +47,9 @@ const CLASSIFY_RETRY_MS: i64 = 5_000;
 const ACTUATE_BUDGET: Duration = Duration::from_millis(400);
 /// Actions always attempted per step, however slow, so a slow actuator still makes progress.
 const ACTUATE_MIN_ACTIONS: usize = 4;
+/// Called by [`Engine::step`] with what it is about to do (a stage, or one action).
+pub type ProgressHook = Box<dyn Fn(&str) + Send>;
+
 /// How often the focused application's other units are looked up again.
 const FAMILY_REFRESH_MS: i64 = 5_000;
 /// Every target is reclassified this often, so classifiers that look at what a unit is doing
@@ -275,7 +278,7 @@ pub struct Engine {
     last_now: TimestampMs,
     state_dirty: bool,
     /// Called after every actuator call and plugin poll: "the engine is alive, just busy".
-    progress: Option<Box<dyn Fn() + Send>>,
+    progress: Option<ProgressHook>,
     /// Observe-only (`set_paused`): sensing and policy run, nothing is applied.
     paused: bool,
 }
@@ -491,15 +494,16 @@ impl Engine {
     }
 
     /// File descriptors (PSI triggers) that should wake the daemon loop early.
-    /// Install a liveness callback, called after every actuator call during a step. Daemons
-    /// use it to tell "slow because the system is slow" from "stuck" for their watchdog.
-    pub fn set_progress_hook(&mut self, hook: Box<dyn Fn() + Send>) {
+    /// Install a liveness callback. It is called with a short description *before* each
+    /// stage of a step and each actuator call, so a daemon can tell "slow because the system
+    /// is slow" from "stuck" for its watchdog, and say what the engine was doing if it is stuck.
+    pub fn set_progress_hook(&mut self, hook: ProgressHook) {
         self.progress = Some(hook);
     }
 
-    fn tick_progress(&self) {
+    fn tick_progress(&self, doing: &str) {
         if let Some(p) = &self.progress {
-            p();
+            p(doing);
         }
     }
 
@@ -533,16 +537,19 @@ impl Engine {
         self.last_now = now;
 
         // 0. Targets the host manages.
+        self.tick_progress("listing units");
         let watched = self.env.watched_targets();
         self.sync_targets(&watched);
 
         // 1. Sensors.
         let t = Instant::now();
+        self.tick_progress("polling sensors");
         self.poll_sensors(&mut cx);
         timings.sensors_us = elapsed_us(t);
 
         // 2. Events.
         let t = Instant::now();
+        self.tick_progress("resolving events");
         let mut input = std::mem::take(&mut self.pending);
         input.extend(self.queues.events.try_iter());
         for e in &mut input {
@@ -553,6 +560,7 @@ impl Engine {
 
         // 3. Classification.
         let t = Instant::now();
+        self.tick_progress("classifying units");
         self.classify(&mut cx);
         timings.classify_us = elapsed_us(t);
 
@@ -563,6 +571,7 @@ impl Engine {
         snapshot_events.extend(cx.host_events.iter().cloned());
         let snapshot = self.snapshot(now, snapshot_events);
         let pre_policy_events = cx.host_events.len();
+        self.tick_progress("evaluating policies");
         let proposals = self.evaluate_policies(&snapshot, &mut cx);
         timings.policies_us = elapsed_us(t);
 
@@ -583,9 +592,9 @@ impl Engine {
             if done >= ACTUATE_MIN_ACTIONS && t.elapsed() >= ACTUATE_BUDGET {
                 break;
             }
+            self.tick_progress(&describe(&action));
             self.execute(action, "no longer requested by any policy", &mut cx);
             done += 1;
-            self.tick_progress();
         }
         if done < planned {
             tracing::debug!(done, planned, "actuation budget reached; the rest is applied on the next step");
@@ -597,6 +606,7 @@ impl Engine {
 
         // 7. Sinks.
         let t = Instant::now();
+        self.tick_progress("recording to sinks");
         let mut sink_events = std::mem::take(&mut self.unsent);
         sink_events.extend(input.iter().cloned());
         sink_events.extend(cx.host_events.iter().cloned());
@@ -664,7 +674,12 @@ impl Engine {
 
     fn poll_sensors(&mut self, cx: &mut Ctx) {
         let now = cx.now;
-        let input = SensorInput { now, targets: self.watched_inputs(), foreground: self.foreground.clone() };
+        let input = SensorInput {
+            now,
+            targets: self.watched_inputs(),
+            foreground: self.foreground.clone(),
+            foreground_family: self.foreground_family.clone(),
+        };
         let mut outputs = Vec::new();
         let mut errors = Vec::new();
         for slot in &mut self.registry.sensors {
@@ -1273,8 +1288,8 @@ impl Engine {
     pub fn restore_all(&mut self) -> Vec<ActionReport> {
         let mut cx = Ctx::new(self.last_now.max(lindesk_core::clock::now_ms()));
         for action in self.applied.restore_all() {
+            self.tick_progress(&describe(&action));
             self.execute(action, "restored", &mut cx);
-            self.tick_progress();
         }
         self.state_dirty = true;
         self.autosave();
@@ -1512,6 +1527,14 @@ fn pseudo_proc(t: &Target, cgroup: Option<&str>) -> ProcInfo {
             }
         }
         Target::Process { pid } => ProcInfo { pid: *pid, ..Default::default() },
+    }
+}
+
+/// What an action is about to do, for the liveness hook.
+fn describe(a: &Action) -> String {
+    match a {
+        Action::Apply { target, setting, .. } => format!("applying {} on {target}", setting.knob()),
+        Action::Reset { target, knob, .. } => format!("reverting {knob} on {target}"),
     }
 }
 

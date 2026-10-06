@@ -44,12 +44,13 @@ fn daemon_finding(d: Daemon) -> Finding {
     }
 }
 
-/// The GNOME extension or KWin script; COSMIC and X11 adapters are built in.
+/// The GNOME extension or KWin script; the COSMIC, Hyprland and X11 adapters are built in.
 fn adapter_finding(p: &Probe) -> Finding {
     match p.desktop.kind {
         DesktopKind::Gnome => gnome_extension(),
         DesktopKind::Kde => kwin_script(),
         DesktopKind::Cosmic => finding(Severity::Ok, "Desktop adapter", "COSMIC (built into lindesk-session)", None),
+        DesktopKind::Hyprland => finding(Severity::Ok, "Desktop adapter", "Hyprland (built into lindesk-session)", None),
         _ if p.desktop.session == lindesk_sys::probe::SessionType::X11 => {
             finding(Severity::Ok, "Desktop adapter", "X11 (built into lindesk-session)", None)
         }
@@ -58,7 +59,7 @@ fn adapter_finding(p: &Probe) -> Finding {
             "Desktop adapter",
             "none for this desktop",
             Some(
-                "foreground tracking needs GNOME, KDE, COSMIC or X11; apps can still call SetForegroundProcess".into(),
+                "foreground tracking needs GNOME, KDE, COSMIC, Hyprland or X11; apps can still call SetForegroundProcess".into(),
             ),
         ),
     }

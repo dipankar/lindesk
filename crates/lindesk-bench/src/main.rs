@@ -49,6 +49,10 @@ enum Cmd {
     Compare { a: String, b: Option<String> },
 }
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     sys::install_signal_handlers();
     let cli = Cli::parse();

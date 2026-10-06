@@ -717,9 +717,9 @@ fn uninstall(ui: &Ui, name: &str) -> Result<()> {
 
 // -------------------------------------------------------------------------------- logs
 
-/// journalctl arguments: the daemon's unit AND the plugin's journal field. tracing-journald
-/// writes the `plugin` span/event field as `F_PLUGIN` (its default field prefix) or `PLUGIN`
-/// (without a prefix); both are matched (`+` is OR in journalctl).
+/// journalctl arguments: the daemon's unit AND the plugin's journal field. The daemons write
+/// the `plugin` span/event field as `F_PLUGIN`; `PLUGIN` (no prefix) is matched as well
+/// (`+` is OR in journalctl).
 pub fn journal_args(system: bool, name: &str, follow: bool, lines: usize) -> Vec<String> {
     let (unit_field, unit) =
         if system { ("_SYSTEMD_UNIT", "lindeskd.service") } else { ("_SYSTEMD_USER_UNIT", "lindesk-session.service") };

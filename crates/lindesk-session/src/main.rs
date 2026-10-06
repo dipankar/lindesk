@@ -114,6 +114,10 @@ impl Cli {
     }
 }
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     common::logging::init("lindesk-session", cli.log_level.as_deref());

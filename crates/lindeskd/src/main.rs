@@ -83,6 +83,10 @@ pub struct Cli {
     pub no_dbus: bool,
 }
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     common::logging::init("lindeskd", cli.log_level.as_deref());
@@ -522,7 +526,10 @@ async fn watchdog(handle: EngineHandle<broker::BrokerExt>, period: Duration) {
         if stale < (period / 2).as_millis() as i64 {
             let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog]);
         } else {
-            tracing::warn!("engine loop unresponsive for {stale} ms; not petting the watchdog");
+            tracing::warn!(
+                "engine loop unresponsive for {stale} ms while {}; not petting the watchdog",
+                handle.doing()
+            );
         }
     }
 }

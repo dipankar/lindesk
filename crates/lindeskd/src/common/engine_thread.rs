@@ -44,6 +44,26 @@ const SLOW_STEP_US: u64 = 1_000_000;
 /// How often [`Hooks::maintenance`] runs.
 pub const MAINTENANCE_EVERY: Duration = Duration::from_secs(30);
 
+/// How often the journal gets a count of the settings applied and reverted.
+pub const ACTION_SUMMARY_EVERY: Duration = Duration::from_secs(60);
+
+/// Settings applied and reverted since the last summary line.
+struct Tally {
+    since: Instant,
+    applied: u64,
+    reverted: u64,
+}
+
+impl Default for Tally {
+    fn default() -> Self {
+        Tally { since: Instant::now(), applied: 0, reverted: 0 }
+    }
+}
+
+/// How long after the last sign of activity (input, a command, a pressure trigger, a setting
+/// applied, a level other than GREEN) the loop drops to `[general] idle_tick`.
+pub const IDLE_AFTER: Duration = Duration::from_secs(5);
+
 /// Events kept for `RecentEvents`.
 pub const EVENT_RING: usize = 500;
 
@@ -268,6 +288,8 @@ pub struct EngineHandle<X> {
     waker: Arc<OwnedFd>,
     published: Arc<RwLock<Published>>,
     alive: Arc<AtomicI64>,
+    /// What the engine thread last said it was about to do (for the watchdog's log).
+    doing: Arc<Mutex<String>>,
     recent: Arc<Mutex<VecDeque<(Audience, String)>>>,
 }
 
@@ -278,6 +300,7 @@ impl<X> Clone for EngineHandle<X> {
             waker: self.waker.clone(),
             published: self.published.clone(),
             alive: self.alive.clone(),
+            doing: self.doing.clone(),
             recent: self.recent.clone(),
         }
     }
@@ -380,6 +403,11 @@ impl<X: Send + 'static> EngineHandle<X> {
     }
 
     /// Wall-clock ms of the loop's latest iteration (for the systemd watchdog).
+    /// What the engine thread was about to do when it last reported progress.
+    pub fn doing(&self) -> String {
+        self.doing.lock().map(|d| d.clone()).unwrap_or_default()
+    }
+
     pub fn last_alive(&self) -> TimestampMs {
         self.alive.load(Ordering::Relaxed)
     }
@@ -391,6 +419,8 @@ pub struct Inbox<X> {
     waker: Arc<OwnedFd>,
     published: Arc<RwLock<Published>>,
     alive: Arc<AtomicI64>,
+    /// What the engine thread last said it was about to do (for the watchdog's log).
+    doing: Arc<Mutex<String>>,
     recent: Arc<Mutex<VecDeque<(Audience, String)>>>,
 }
 
@@ -402,6 +432,7 @@ pub fn channel<X: Send + 'static>() -> std::io::Result<(EngineHandle<X>, Inbox<X
     let (tx, rx) = mpsc::channel();
     let published = Arc::new(RwLock::new(Published::default()));
     let alive = Arc::new(AtomicI64::new(now_ms()));
+    let doing = Arc::new(Mutex::new(String::from("starting")));
     let recent = Arc::new(Mutex::new(VecDeque::with_capacity(EVENT_RING)));
     Ok((
         EngineHandle {
@@ -409,9 +440,10 @@ pub fn channel<X: Send + 'static>() -> std::io::Result<(EngineHandle<X>, Inbox<X
             waker: waker.clone(),
             published: published.clone(),
             alive: alive.clone(),
+            doing: doing.clone(),
             recent: recent.clone(),
         },
-        Inbox { rx, waker, published, alive, recent },
+        Inbox { rx, waker, published, alive, doing, recent },
     ))
 }
 
@@ -470,10 +502,12 @@ pub fn spawn<H: Hooks>(engine: Engine, hooks: H, inbox: Inbox<H::Ext>) -> std::i
             waker: inbox.waker,
             published: inbox.published,
             alive: inbox.alive,
+            doing: inbox.doing,
             recent: inbox.recent,
             notify: ntx,
             pause: Pause::default(),
             last_level: None,
+            tally: Tally::default(),
             steps: 0,
             seq: 0,
             started: now_ms(),
@@ -492,10 +526,13 @@ struct Loop<H: Hooks> {
     waker: Arc<OwnedFd>,
     published: Arc<RwLock<Published>>,
     alive: Arc<AtomicI64>,
+    /// What the engine thread last said it was about to do (for the watchdog's log).
+    doing: Arc<Mutex<String>>,
     recent: Arc<Mutex<VecDeque<(Audience, String)>>>,
     notify: tmpsc::UnboundedSender<Notification>,
     pause: Pause,
     last_level: Option<Level>,
+    tally: Tally,
     steps: u64,
     /// Sequence number of the last streamed event.
     seq: u64,
@@ -504,20 +541,33 @@ struct Loop<H: Hooks> {
 
 impl<H: Hooks> Loop<H> {
     fn run(&mut self, ready: mpsc::Sender<()>) {
-        let tick = self.engine.config().general.tick.max(MIN_STEP_SPACING);
+        let busy_tick = self.engine.config().general.tick.max(MIN_STEP_SPACING);
+        let idle_tick = self.engine.config().general.idle_tick.max(busy_tick);
         // A step that applies many settings through a slow systemd is alive, not hung: the
         // engine reports progress after each action so the watchdog only fires on a real stall.
         let alive = self.alive.clone();
-        self.engine.set_progress_hook(Box::new(move || alive.store(now_ms(), Ordering::Relaxed)));
+        let doing = self.doing.clone();
+        self.engine.set_progress_hook(Box::new(move |what| {
+            alive.store(now_ms(), Ordering::Relaxed);
+            if let Ok(mut d) = doing.lock() {
+                d.clear();
+                d.push_str(what);
+            }
+        }));
         self.load_pause();
         self.step();
         let _ = ready.send(());
         let mut last_step = Instant::now();
         let mut last_maintenance = Instant::now();
+        let mut last_activity = Instant::now();
         let mut pending = false;
         loop {
             self.alive.store(now_ms(), Ordering::Relaxed);
             let since = last_step.elapsed();
+            let fds = self.engine.wake_fds();
+            // Calm, and the kernel will wake us when stall builds up: there is nothing to
+            // see four times a second.
+            let tick = if !fds.is_empty() && last_activity.elapsed() >= IDLE_AFTER { idle_tick } else { busy_tick };
             // While a step is pending but too close to the last one, only wait for commands
             // (a wake fd stuck in an error state must not make us spin).
             let (timeout, watch_fds) = if pending {
@@ -525,8 +575,7 @@ impl<H: Hooks> Loop<H> {
             } else {
                 (tick.saturating_sub(since), true)
             };
-            let fds = if watch_fds { self.engine.wake_fds() } else { Vec::new() };
-            let (cmd_ready, fd_fired) = self.wait(&fds, timeout);
+            let (cmd_ready, fd_fired) = self.wait(if watch_fds { &fds } else { &[] }, timeout);
             if cmd_ready {
                 let mut buf = [0u8; 8];
                 let _ = rustix::io::read(&*self.waker, &mut buf);
@@ -564,6 +613,9 @@ impl<H: Hooks> Loop<H> {
             // A bare wake-up (no command) means someone fed the host queues directly
             // (adapters): step soon.
             pending |= cx_want || (cmd_ready && commands == 0);
+            if fd_fired || cmd_ready {
+                last_activity = Instant::now();
+            }
             if last_maintenance.elapsed() >= MAINTENANCE_EVERY {
                 last_maintenance = Instant::now();
                 self.hooks.maintenance(&mut self.engine);
@@ -572,7 +624,9 @@ impl<H: Hooks> Loop<H> {
                 }
             }
             if pending && last_step.elapsed() >= MIN_STEP_SPACING {
-                self.step();
+                if self.step() {
+                    last_activity = Instant::now();
+                }
                 last_step = Instant::now();
                 pending = false;
             }
@@ -672,7 +726,9 @@ impl<H: Hooks> Loop<H> {
         }
     }
 
-    fn step(&mut self) {
+    /// One engine step. True when it showed activity: something was applied or reverted, an
+    /// event came in, or the level isn't GREEN.
+    fn step(&mut self) -> bool {
         let t0 = Instant::now();
         let report = self.engine.step(now_ms());
         self.steps += 1;
@@ -680,8 +736,26 @@ impl<H: Hooks> Loop<H> {
             tracing::warn!("slow engine step: {:?}", report.timings);
         }
         let t1 = Instant::now();
+        // Every action is in `lindeskctl events` and `explain`. The journal gets them at
+        // debug level and a line a minute otherwise: a boost on every keypress and a limit
+        // that moves every second are a lot to write on a machine that is short on I/O.
         for a in &report.actions {
-            tracing::info!(target: "lindesk::action", "{a}");
+            tracing::debug!(target: "lindesk::action", "{a}");
+            match a.setting {
+                Some(_) => self.tally.applied += 1,
+                None => self.tally.reverted += 1,
+            }
+        }
+        if self.tally.since.elapsed() >= ACTION_SUMMARY_EVERY {
+            if self.tally.applied + self.tally.reverted > 0 {
+                tracing::info!(
+                    "past minute: {} settings applied, {} reverted (level {}); details: lindeskctl events",
+                    self.tally.applied,
+                    self.tally.reverted,
+                    self.engine.level()
+                );
+            }
+            self.tally = Tally::default();
         }
         for n in &report.notes {
             tracing::debug!(target: "lindesk::note", "{n}");
@@ -692,6 +766,7 @@ impl<H: Hooks> Loop<H> {
             let _ = self.notify.send(Notification::LevelChanged(level));
         }
         self.last_level = Some(level);
+        let active = level != Level::Green || !report.actions.is_empty() || !report.events.is_empty();
         let mut cx = LoopCx { published: &self.published, notify: &self.notify, want_step: false };
         self.hooks.after_step(&mut self.engine, &report, &mut cx);
         self.stream_events(&report.events);
@@ -708,6 +783,7 @@ impl<H: Hooks> Loop<H> {
         if t1.elapsed() > Duration::from_micros(SLOW_STEP_US) {
             tracing::warn!("slow step bookkeeping: {:?} (engine step {:?})", t1.elapsed(), t1 - t0);
         }
+        active
     }
 
     /// Append events to the ring and emit them in `Events` chunks, one series per audience.

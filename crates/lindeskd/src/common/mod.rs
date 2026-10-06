@@ -5,6 +5,7 @@ pub mod calibration;
 pub mod control;
 pub mod defaults;
 pub mod engine_thread;
+pub mod journal;
 pub mod logging;
 pub mod observe;
 pub mod profiles;

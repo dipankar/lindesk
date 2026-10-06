@@ -73,6 +73,10 @@ async fn shutdown_signal() {
     }
 }
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if let Some(Cmd::Config { client, listen }) = &cli.command {

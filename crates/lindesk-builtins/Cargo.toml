@@ -9,9 +9,13 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
-default = ["x11", "cosmic"]
+default = ["x11", "cosmic", "hyprland", "wayland-input"]
 x11 = ["dep:x11rb"]
 cosmic = ["dep:wayland-client", "dep:wayland-protocols", "dep:cosmic-protocols"]
+# Focus from Hyprland's IPC sockets; no extra dependencies.
+hyprland = []
+# Input activity through ext-idle-notify-v1, for compositors whose IPC reports none.
+wayland-input = ["dep:wayland-client", "dep:wayland-protocols"]
 
 [dependencies]
 lindesk-plugin-api.workspace = true

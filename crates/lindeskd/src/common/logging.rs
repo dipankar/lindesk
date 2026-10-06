@@ -1,4 +1,6 @@
 //! Logging: journald when started by systemd (`JOURNAL_STREAM` set), stderr otherwise.
+//! The journal is written through [`JournalLayer`], which drops records rather than wait for
+//! a journald that has stopped reading.
 //!
 //! The filter is `--log-level` when given, else `RUST_LOG`, else `info`. Either may be a
 //! full `tracing_subscriber::EnvFilter` directive such as `info,lindesk_host=debug`. Plugin
@@ -9,8 +11,10 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
-/// Prefix of every structured field in the journal except `message` (tracing-journald's
-/// default, set explicitly because `lindeskctl plugin logs` depends on `F_PLUGIN`).
+use super::journal::JournalLayer;
+
+/// Prefix of every structured field in the journal except `message` (`lindeskctl plugin logs`
+/// depends on `F_PLUGIN`).
 pub const FIELD_PREFIX: &str = "F";
 
 /// The filter directive to use.
@@ -27,9 +31,8 @@ pub fn init(ident: &str, cli_level: Option<&str>) {
         EnvFilter::new("info")
     });
     if std::env::var_os("JOURNAL_STREAM").is_some() {
-        match tracing_journald::layer() {
+        match JournalLayer::new(ident, FIELD_PREFIX) {
             Ok(j) => {
-                let j = j.with_syslog_identifier(ident.to_string()).with_field_prefix(Some(FIELD_PREFIX.into()));
                 let _ = tracing_subscriber::registry().with(j.with_filter(filter)).try_init();
                 return;
             }

@@ -66,6 +66,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(c) => c,

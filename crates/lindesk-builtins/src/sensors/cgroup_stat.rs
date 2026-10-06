@@ -135,6 +135,7 @@ mod tests {
                 watched(Target::Process { pid: 1 }, None),
             ],
             foreground: None,
+            foreground_family: Vec::new(),
         };
         assert!(s.poll(&input(1_000)).unwrap().usage.is_empty(), "baseline only");
         assert_eq!(s.tracked(), 2);
@@ -165,7 +166,12 @@ mod tests {
         counters(&f, UNIT, 1_000_000, 0, 0, 0);
         let mut s = CgroupStatSensor::with_cgroup_root(f.roots().cgroup);
         let t = Target::user_unit(1000, "app-foo-1.scope");
-        let input = |now| SensorInput { now, targets: vec![watched(t.clone(), Some(UNIT))], foreground: None };
+        let input = |now| SensorInput {
+            now,
+            targets: vec![watched(t.clone(), Some(UNIT))],
+            foreground: None,
+            foreground_family: Vec::new(),
+        };
         s.poll(&input(0)).unwrap();
         f.remove(&format!("sys/fs/cgroup{UNIT}"));
         assert!(s.poll(&input(1_000)).unwrap().usage.is_empty());
@@ -176,7 +182,7 @@ mod tests {
         counters(&f, UNIT, 30, 0, 0, 0);
         assert_eq!(s.poll(&input(3_000)).unwrap().usage[0].usage.cpu_usage_us, 20);
         // Unwatched targets are dropped.
-        s.poll(&SensorInput { now: 4_000, targets: vec![], foreground: None }).unwrap();
+        s.poll(&SensorInput { now: 4_000, targets: vec![], foreground: None, foreground_family: Vec::new() }).unwrap();
         assert_eq!(s.tracked(), 0);
     }
 }

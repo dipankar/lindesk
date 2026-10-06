@@ -4,6 +4,7 @@
 
 # User guide
 - [Installation](guide/install.md)
+- [Omarchy and Hyprland](guide/omarchy.md)
 - [How lindesk keeps the desktop responsive](guide/responsiveness.md)
 - [doctor: what your system supports](guide/doctor.md)
 - [Other priority daemons (conflicts)](guide/conflicts.md)

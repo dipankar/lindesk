@@ -32,7 +32,8 @@ and your input:
 |---|---|
 | GNOME (Wayland, X11) | a Shell extension (`lindesk@lindesk.org`); also reports key, pointer and touch input |
 | KDE Plasma | a KWin script |
-| COSMIC | built into `lindesk-session` (toplevel-info protocol) |
+| COSMIC | built into `lindesk-session` (toplevel-info protocol; input from `ext-idle-notify`) |
+| Hyprland (Omarchy) | built into `lindesk-session` (Hyprland's sockets give the window's pid; input from `ext-idle-notify`) |
 | any X11 session | built into `lindesk-session` (EWMH), with XInput2 for input |
 
 The window's process is mapped to its systemd unit (the app's scope), and that unit is what
@@ -157,6 +158,11 @@ guarantees itself that little:
 * a step spends at most about 400 ms applying settings; the rest is applied on the next
   step, so sensing never waits on a slow systemd. The watchdog restarts a broker that is
   really stuck, not one that is busy;
+* its logging never waits for the journal. When journald is stuck behind a saturated disk,
+  a daemon that logs synchronously stops with it; lindesk drops the record and counts it;
+* it is cheap: only the system and the focused app's cgroups are sampled on every step,
+  everything else every two seconds, and the loop drops to one step a second while the
+  machine is calm (input, a focus change or rising pressure wakes it at once);
 * no plugin or policy can throttle lindesk's own units;
 * telemetry, when installed, is written by a separate low-priority process and is dropped
   rather than allowed to block.

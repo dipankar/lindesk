@@ -1,7 +1,7 @@
 //! Small filesystem helpers shared by the modules.
 
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 /// Build an `InvalidData` error.
@@ -14,9 +14,29 @@ pub(crate) fn invalid_input(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg.into())
 }
 
+/// Read a whole small file as text, in as few system calls as it takes.
+///
+/// procfs and cgroupfs files report a size of 0, so `fs::read_to_string` stats the file and
+/// then probes with a run of small reads (eight for `/proc/<pid>/status`). The daemons read
+/// thousands of these a minute; this reads a page at a time and never stats.
+pub fn read_file(path: &Path) -> io::Result<String> {
+    let mut f = fs::File::open(path)?;
+    let mut page = [0u8; 4096];
+    let mut out = Vec::new();
+    loop {
+        match f.read(&mut page) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&page[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    String::from_utf8(out).map_err(|_| invalid_data(format!("{} is not UTF-8", path.display())))
+}
+
 /// Read a file and strip trailing whitespace.
 pub(crate) fn read_trimmed(path: &Path) -> io::Result<String> {
-    let mut s = fs::read_to_string(path)?;
+    let mut s = read_file(path)?;
     s.truncate(s.trim_end().len());
     Ok(s)
 }

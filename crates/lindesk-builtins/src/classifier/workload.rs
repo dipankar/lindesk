@@ -292,9 +292,12 @@ mod tests {
     const CG: &str =
         "/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.gnome.Terminal.slice/vte-spawn-1.scope";
 
-    static NOW: AtomicI64 = AtomicI64::new(0);
+    // Per thread: tests run in parallel, each on its own thread, and must not share a clock.
+    thread_local! {
+        static NOW: AtomicI64 = const { AtomicI64::new(0) };
+    }
     fn clock() -> TimestampMs {
-        NOW.load(Ordering::SeqCst)
+        NOW.with(|n| n.load(Ordering::SeqCst))
     }
 
     struct Fx {
@@ -346,7 +349,7 @@ mod tests {
         let mut c = fx.classifier();
         let p = proc("vte-spawn-1.scope", CG);
 
-        NOW.store(1_000, Ordering::SeqCst);
+        NOW.with(|n| n.store(1_000, Ordering::SeqCst));
         fx.procs(CG, &["bash", "claude"]);
         assert_eq!(c.classify(&p).unwrap(), None, "an idle shell is nobody's business");
 
@@ -357,9 +360,9 @@ mod tests {
 
         // Build over: stays background for the hold, then goes back to "no opinion".
         fx.procs(CG, &["bash", "claude"]);
-        NOW.store(1_000 + 30_000, Ordering::SeqCst);
+        NOW.with(|n| n.store(1_000 + 30_000, Ordering::SeqCst));
         assert!(c.classify(&p).unwrap().unwrap().reason.contains("finished"));
-        NOW.store(1_000 + 61_000, Ordering::SeqCst);
+        NOW.with(|n| n.store(1_000 + 61_000, Ordering::SeqCst));
         assert_eq!(c.classify(&p).unwrap(), None);
     }
 
@@ -367,7 +370,7 @@ mod tests {
     fn one_stray_compiler_is_not_a_build_and_only_user_scopes_count() {
         let fx = Fx::new();
         let mut c = fx.classifier();
-        NOW.store(5_000, Ordering::SeqCst);
+        NOW.with(|n| n.store(5_000, Ordering::SeqCst));
         fx.procs(CG, &["bash", "make"]);
         assert_eq!(c.classify(&proc("vte-spawn-1.scope", CG)).unwrap(), None, "below min_processes");
 

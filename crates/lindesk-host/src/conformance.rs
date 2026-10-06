@@ -379,6 +379,7 @@ fn kind_checks(r: &mut Runner, p: &ExternalPlugin, kind: PluginKind, init: &Init
                         cgroup: Some("/background.slice".into()),
                     }],
                     foreground: None,
+                    foreground_family: Vec::new(),
                 };
                 let _: SensorOutput = typed(p, methods::SENSOR_POLL, &input)?;
                 Ok(())

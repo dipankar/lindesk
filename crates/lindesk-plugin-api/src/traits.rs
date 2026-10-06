@@ -162,6 +162,9 @@ pub struct SensorInput {
     /// The current foreground target, if any (sensors may watch it more closely).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground: Option<Target>,
+    /// The other units of the focused application (e.g. a browser's renderers).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreground_family: Vec<Target>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]

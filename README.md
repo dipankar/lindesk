@@ -28,7 +28,7 @@ The goal is a Linux desktop that stays as responsive under load as a Mac does. N
 patch. No reboot. Any distro. Everything it changes, it undoes.
 
 > **Status: 0.1.0, early.** It runs daily on the author's GNOME/Wayland workstation; KDE,
-> COSMIC and X11 adapters exist and are tested in isolation. It has not yet earned the
+> COSMIC, Hyprland and X11 adapters exist and are tested in isolation. It has not yet earned the
 > trust that years of deployment give tools like system76-scheduler. Don't take our word for
 > the difference it makes: [`lindesk-bench`](#measure-it-yourself) runs the same load with
 > lindesk off and on, on *your* machine.
@@ -62,7 +62,7 @@ why, and every decision as it happens.
 ```bash
 sudo apt install ./lindesk_*_amd64.deb     # Debian, Ubuntu, Pop!_OS
 sudo dnf install ./lindesk-0*.rpm          # Fedora
-makepkg -si                                # Arch (packaging/aur)
+makepkg -si                                # Arch, Omarchy (packaging/aur)
 ./packaging/install.sh                     # anything else, from source
 ```
 
@@ -76,6 +76,7 @@ lindeskctl watch      # the live dashboard
 
 It needs no configuration. On GNOME Wayland, log out and in once after the first install so
 the Shell extension that reports the focused window loads; everything else works at once.
+On [Omarchy](docs/src/guide/omarchy.md) and other Hyprland setups the adapter is built in.
 
 The core package is about 15 MB. It never changes anything permanently, and you can step
 away from it at any time:
@@ -92,7 +93,7 @@ Linux already has the machinery: pressure-stall information (PSI), cgroup v2 CPU
 memory control, uclamp, systemd's per-app units. What it lacks is something that connects
 *"the human just touched this window"* to those knobs. lindesk is that connection.
 
-1. **It knows which app is you.** Desktop adapters (GNOME, KDE, COSMIC, X11) report the
+1. **It knows which app is you.** Desktop adapters (GNOME, KDE, COSMIC, Hyprland, X11) report the
    focused window and your input. Every workload gets a class: `critical` (compositor,
    audio), `interactive`, `normal`, `background`, `batch`.
 2. **It does nothing while the machine is healthy.** Only work-conserving weights, which

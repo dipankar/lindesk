@@ -7,6 +7,17 @@
 //! disappear, or that the host stops watching, are forgotten so a recreated cgroup starts
 //! from a fresh baseline.
 //!
+//! # What is read when
+//!
+//! Reading a pressure file is not free: the kernel folds per-CPU counters for that cgroup on
+//! every read, and a desktop has a couple of hundred cgroups. Only two things decide
+//! anything quickly, so only they are read on every poll, through descriptors kept open
+//! (one `pread` each): the system files, and the cgroups of the focused application
+//! ([`SensorInput::foreground`] and [`SensorInput::foreground_family`], at most
+//! [`HOT_MAX`]). Every other watched cgroup is read once per `background_interval`, spread
+//! evenly over the polls in between. Samples carry their own interval, so the stall ratios
+//! stay exact at either cadence.
+//!
 //! # Triggers
 //!
 //! With `triggers = true` the sensor registers kernel PSI triggers
@@ -28,10 +39,10 @@
 //! # Config
 //!
 //! ```json
-//! {"triggers": true, "stall": "100ms", "window": "1s", "kind": "some"}
+//! {"triggers": true, "stall": "100ms", "window": "1s", "kind": "some", "background_interval": "2s"}
 //! ```
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -39,11 +50,11 @@ use std::time::Duration;
 use lindesk_core::config::dur;
 use lindesk_plugin_api::{
     InitContext, Metric, Plugin, PluginError, PluginInfo, PluginKind, PluginResult, Resource, Scope, Sensor,
-    SensorInput, SensorOutput, TimestampMs, WatchedTarget,
+    SensorInput, SensorOutput, Target, TimestampMs, WatchedTarget,
 };
 use lindesk_sys::Roots;
 use lindesk_sys::cgroupfs::CgroupFs;
-use lindesk_sys::psi::{self, PsiTracker, PsiTrigger, Stall};
+use lindesk_sys::psi::{self, PsiFiles, PsiTracker, PsiTrigger, Stall};
 use serde::{Deserialize, Serialize};
 
 /// Plugin name.
@@ -51,6 +62,9 @@ pub const NAME: &str = "psi";
 
 /// Name of the metric emitted for every fired trigger.
 pub const TRIGGER_METRIC: &str = "psi_trigger";
+
+/// Most cgroups read on every poll (the focused application's units).
+pub const HOT_MAX: usize = 16;
 
 /// Order in which system triggers are armed.
 const TRIGGER_RESOURCES: [Resource; 3] = [Resource::Io, Resource::Memory, Resource::Cpu];
@@ -71,6 +85,9 @@ pub struct PsiConfig {
     pub kind: Stall,
     /// Also arm triggers on the foreground cgroup.
     pub foreground: bool,
+    /// How often cgroups other than the focused application's are read. `0s`: every poll.
+    #[serde(with = "dur")]
+    pub background_interval: Duration,
     /// Override privilege detection (normally: effective uid 0). Mostly for tests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub privileged: Option<bool>,
@@ -84,6 +101,7 @@ impl Default for PsiConfig {
             window: Duration::from_secs(1),
             kind: Stall::Some,
             foreground: true,
+            background_interval: Duration::from_secs(2),
             privileged: None,
         }
     }
@@ -134,8 +152,12 @@ pub struct PsiSensor {
     cfg: PsiConfig,
     privileged: bool,
     tracker: PsiTracker,
-    /// Cgroups sampled in the previous poll.
+    /// Descriptors kept open for the scopes read on every poll.
+    files: PsiFiles,
+    /// Cgroups watched in the previous poll.
     cgroups: BTreeSet<String>,
+    /// When each cgroup outside the focused application was last read.
+    read_at: HashMap<String, TimestampMs>,
     system_triggers: Vec<Armed>,
     foreground: ForegroundCgroup,
     /// Foreground cgroup the `fg_triggers` are armed on (`None` = not armed).
@@ -162,7 +184,9 @@ impl PsiSensor {
             cfg: PsiConfig::default(),
             privileged: is_root(),
             tracker: PsiTracker::new(),
+            files: PsiFiles::new(),
             cgroups: BTreeSet::new(),
+            read_at: HashMap::new(),
             system_triggers: Vec::new(),
             foreground: ForegroundCgroup::default(),
             fg_armed: None,
@@ -282,6 +306,13 @@ fn is_root() -> bool {
     rustix::process::geteuid().is_root()
 }
 
+/// Where in its interval a cgroup's reads fall: a stable offset in `0..every`.
+fn stagger(cgroup: &str, every: i64) -> i64 {
+    // FNV-1a; any stable spread will do.
+    let h = cgroup.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    if every <= 0 { 0 } else { i64::try_from(h % every.unsigned_abs()).unwrap_or(0) }
+}
+
 /// Distinct cgroup paths of the watched targets.
 fn watched_cgroups(targets: &[WatchedTarget]) -> BTreeSet<String> {
     targets.iter().filter_map(|w| w.cgroup.clone()).collect()
@@ -300,7 +331,9 @@ impl Plugin for PsiSensor {
     fn init(&mut self, ctx: &InitContext) -> PluginResult<()> {
         let cfg = PsiConfig::from_json(&ctx.config).map_err(|e| PluginError::Failed(format!("{NAME}: {e}")))?;
         self.tracker = PsiTracker::new();
+        self.files = PsiFiles::new();
         self.cgroups.clear();
+        self.read_at.clear();
         self.configure(cfg);
         Ok(())
     }
@@ -316,34 +349,53 @@ impl Sensor for PsiSensor {
         let mut out = SensorOutput::default();
         for r in Resource::ALL {
             // A missing file means no PSI on this host (or this resource); nothing to report.
-            if let Ok(Some(s)) = self.tracker.sample(&self.roots, now, Scope::System, r) {
+            if let Ok(Some(s)) = self.tracker.sample_open(&mut self.files, &self.roots, now, Scope::System, r) {
                 out.samples.push(s);
             }
         }
 
-        if let Some(fg) = &input.foreground {
-            let cg = input.targets.iter().find(|w| &w.target == fg).and_then(|w| w.cgroup.clone());
-            if cg.is_some() && cg != self.foreground.get() {
-                self.foreground.set(cg);
-            }
+        let cgroup_of = |t: &Target| input.targets.iter().find(|w| &w.target == t).and_then(|w| w.cgroup.clone());
+        let fg = input.foreground.as_ref().and_then(cgroup_of);
+        if fg.is_some() && fg != self.foreground.get() {
+            self.foreground.set(fg.clone());
         }
-        let fs = CgroupFs::new(&self.roots.cgroup);
-        let mut seen = BTreeSet::new();
-        for cg in watched_cgroups(&input.targets) {
-            if !fs.exists(&cg) {
-                continue;
+        let hot: BTreeSet<String> =
+            fg.into_iter().chain(input.foreground_family.iter().filter_map(cgroup_of)).take(HOT_MAX).collect();
+
+        let every = i64::try_from(self.cfg.background_interval.as_millis()).unwrap_or(i64::MAX);
+        let watched = watched_cgroups(&input.targets);
+        let mut gone = Vec::new();
+        for cg in &watched {
+            let scope = Scope::Cgroup(cg.clone());
+            let read = if hot.contains(cg) {
+                self.read_at.remove(cg);
+                Resource::ALL.map(|r| self.tracker.sample_open(&mut self.files, &self.roots, now, scope.clone(), r))
+            } else {
+                match self.read_at.get(cg) {
+                    Some(at) if now >= *at && now - at < every => continue,
+                    Some(_) => self.read_at.insert(cg.clone(), now),
+                    // First sight: take the baseline now, and stagger the next read so the
+                    // cgroups don't all come due on the same poll.
+                    None => self.read_at.insert(cg.clone(), now - stagger(cg, every)),
+                };
+                Resource::ALL.map(|r| self.tracker.sample(&self.roots, now, scope.clone(), r))
+            };
+            // A cgroup without the directory is gone; one without a controller's pressure
+            // file (or with PSI turned off) just has nothing to report.
+            if read.iter().all(Result::is_err) && !CgroupFs::new(&self.roots.cgroup).exists(cg) {
+                gone.push(cg.clone());
             }
-            for r in Resource::ALL {
-                if let Ok(Some(s)) = self.tracker.sample(&self.roots, now, Scope::Cgroup(cg.clone()), r) {
-                    out.samples.push(s);
-                }
-            }
-            seen.insert(cg);
+            out.samples.extend(read.into_iter().filter_map(|r| r.ok().flatten()));
         }
-        for gone in self.cgroups.difference(&seen) {
-            self.tracker.forget(&Scope::Cgroup(gone.clone()));
+        for cg in gone.iter().chain(self.cgroups.difference(&watched)) {
+            self.tracker.forget(&Scope::Cgroup(cg.clone()));
+            self.read_at.remove(cg);
         }
-        self.cgroups = seen;
+        self.files.retain(|s| match s {
+            Scope::System => true,
+            Scope::Cgroup(cg) => hot.contains(cg) && !gone.contains(cg),
+        });
+        self.cgroups = watched;
 
         self.service_triggers(now, &mut out.metrics);
         Ok(out)
@@ -357,7 +409,7 @@ impl Sensor for PsiSensor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lindesk_plugin_api::{API_VERSION, HostCaps, Privilege, Target};
+    use lindesk_plugin_api::{API_VERSION, HostCaps, Privilege, Sample};
     use lindesk_sys::fixture::{self, Fixture};
 
     const UNIT: &str = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-foo-1.scope";
@@ -390,6 +442,7 @@ mod tests {
                 })
                 .collect(),
             foreground: None,
+            foreground_family: Vec::new(),
         }
     }
 
@@ -417,7 +470,7 @@ mod tests {
         let f = Fixture::new(dir.path());
         write_psi(&f, None, 1_000, 100);
         write_psi(&f, Some(UNIT), 50, 0);
-        let mut s = sensor(&f, serde_json::json!({"triggers": false}));
+        let mut s = sensor(&f, serde_json::json!({"triggers": false, "background_interval": "0s"}));
         assert!(s.wake_fds().is_empty());
 
         let out = s.poll(&input(1_000, &[UNIT, "/user.slice", "/missing.scope"])).unwrap();
@@ -444,7 +497,7 @@ mod tests {
         fixture::pop_os(dir.path());
         let f = Fixture::new(dir.path());
         write_psi(&f, Some(UNIT), 5_000_000, 0);
-        let mut s = sensor(&f, serde_json::json!({"triggers": false}));
+        let mut s = sensor(&f, serde_json::json!({"triggers": false, "background_interval": "0s"}));
         let count = |out: &SensorOutput| out.samples.iter().filter(|x| x.scope == Scope::Cgroup(UNIT.into())).count();
 
         s.poll(&input(0, &[UNIT])).unwrap();
@@ -464,6 +517,63 @@ mod tests {
         s.poll(&input(5_000, &[])).unwrap();
         write_psi(&f, Some(UNIT), 9_999_999, 0);
         assert_eq!(count(&s.poll(&input(6_000, &[UNIT])).unwrap()), 0);
+    }
+
+    #[test]
+    fn only_the_focused_app_is_read_on_every_poll() {
+        let dir = crate::actuators::test_dir();
+        fixture::pop_os(dir.path());
+        let f = Fixture::new(dir.path());
+        let renderers = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-foo-2.scope";
+        let build = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-build-3.scope";
+        let all = [UNIT, renderers, build];
+        let mut s = sensor(&f, serde_json::json!({"triggers": false}));
+        assert_eq!(s.config().background_interval, Duration::from_secs(2));
+
+        let focused = |now| SensorInput {
+            foreground: Some(Target::Cgroup { path: UNIT.into() }),
+            foreground_family: vec![Target::Cgroup { path: renderers.into() }],
+            ..input(now, &all)
+        };
+        let mut seen: BTreeMap<&str, Vec<Sample>> = BTreeMap::new();
+        for step in 0..=16u64 {
+            for cg in all {
+                write_psi(&f, Some(cg), step * 1_000, 0);
+            }
+            let out = s.poll(&focused(i64::try_from(step).unwrap() * 250)).unwrap();
+            for cg in all {
+                seen.entry(cg).or_default().extend(
+                    out.samples
+                        .iter()
+                        .filter(|x| x.scope == Scope::Cgroup(cg.into()) && x.resource == Resource::Io)
+                        .cloned(),
+                );
+            }
+        }
+        // The focused app's units: every poll after the baseline, through open descriptors.
+        for cg in [UNIT, renderers] {
+            assert_eq!(seen[cg].len(), 16, "{cg}");
+            assert!(seen[cg].iter().all(|x| x.interval_ms == 250 && x.some_delta_us == 1_000));
+        }
+        assert_eq!(s.files.len(), 9, "system + two focused cgroups, three files each");
+        // Everything else: once per background interval, and the stall adds up all the same.
+        let cold = &seen[build];
+        assert_eq!(cold.len(), 2, "{cold:?}");
+        assert_eq!(cold[1].interval_ms, 2_000);
+        assert_eq!(cold[1].some_delta_us, 8_000);
+        assert!(cold.iter().all(|x| x.some_delta_us == u64::from(x.interval_ms) * 4));
+
+        // Focus moves: the build is read every poll now, the browser at the slow cadence.
+        let moved = |now| SensorInput { foreground: Some(Target::Cgroup { path: build.into() }), ..input(now, &all) };
+        s.poll(&moved(4_250)).unwrap();
+        let (mut hot, mut left) = (0, 0);
+        for now in (4_500..=6_250).step_by(250) {
+            let out = s.poll(&moved(now)).unwrap();
+            hot += out.samples.iter().filter(|x| x.scope == Scope::Cgroup(build.into())).count();
+            left += out.samples.iter().filter(|x| x.scope == Scope::Cgroup(UNIT.into())).count();
+        }
+        assert_eq!((hot, left), (8 * 3, 3));
+        assert_eq!(s.files.len(), 6);
     }
 
     #[test]
@@ -559,6 +669,7 @@ mod tests {
             now,
             targets: vec![WatchedTarget { target: Target::Cgroup { path: cg.clone() }, cgroup: Some(cg.clone()) }],
             foreground: None,
+            foreground_family: Vec::new(),
         };
         let t0 = lindesk_core::clock::now_ms();
         s.poll(&inp(t0)).unwrap();

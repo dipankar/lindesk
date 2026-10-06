@@ -71,8 +71,8 @@ $ gnome-extensions enable lindesk@lindesk.org
 ```
 
 On KDE, enable the **lindesk** KWin script (System Settings → Window Management → KWin
-Scripts). COSMIC and X11 need nothing extra: their adapters are built into
-`lindesk-session`.
+Scripts). COSMIC, Hyprland and X11 need nothing extra: their adapters are built into
+`lindesk-session`. On Omarchy, see [Omarchy and Hyprland](omarchy.md).
 
 ## Check it
 

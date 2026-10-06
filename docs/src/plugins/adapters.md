@@ -17,11 +17,16 @@ which is the short boost behind lindesk's responsiveness.
 |---|---|---|---|
 | GNOME 45–49 | Shell extension (`adapters/gnome-shell-extension`), pushes over D-Bus | pid | yes, ≤ 1 per 250 ms |
 | KDE Plasma 5/6 | KWin script (`adapters/kwin-script`), pushes over D-Bus | pid | focus changes only |
-| COSMIC | built-in `cosmic` (Wayland toplevel protocols) | app_id | no |
+| COSMIC | built-in `cosmic` (Wayland toplevel protocols) + `wayland-input` | app_id | yes, ≤ 1 per 250 ms |
+| Hyprland (Omarchy, …) | built-in `hyprland` (its event and request sockets) + `wayland-input` | pid + class | yes, ≤ 1 per 250 ms |
 | any X11 session | built-in `x11` (`_NET_ACTIVE_WINDOW`, XInput2) | pid | yes |
-| wlroots (sway, Hyprland, …) | none built in yet (planned); a 10-line script using the D-Bus API works today | | |
+| other Wayland compositors (sway, niri, river, …) | none built in yet (planned); a 10-line script using the D-Bus API works today | | |
 
-The details per desktop, and the scripts for sway and Hyprland, are in
+`wayland-input` reports input activity on any compositor with `ext-idle-notify-v1`: it asks
+to be told after 250 ms without input and when input resumes, and reports an interaction
+for as long as you keep typing or moving the pointer. It never sees what you type.
+
+The details per desktop, and the script for sway, are in
 [`adapters/README.md`](https://github.com/dipankar/lindesk/blob/main/adapters/README.md).
 
 ## Three ways to write an adapter

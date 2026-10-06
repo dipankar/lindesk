@@ -359,6 +359,24 @@ impl SystemdActuator {
 
     // ------------------------------------------------------------------------- io.max
 
+    /// The unit's cgroup when its `io.max` can be written directly.
+    ///
+    /// `io.max` is the one setting lindesk changes at a high rate (the adaptive limit moves
+    /// every second on every yielding unit while RED). Through systemd that is a D-Bus round
+    /// trip plus a drop-in file per change, on PID 1, exactly when the machine is busiest;
+    /// a write to the cgroup file is microseconds and involves nobody else. systemd only
+    /// rewrites `io.max` for devices it has limits configured for, so a direct write to a
+    /// unit without `IO*Max` properties stays put. The systemd route remains for units whose
+    /// `io.max` file doesn't exist yet (the io controller isn't enabled there) and for units
+    /// that were already set through it.
+    fn io_max_direct(&mut self, target: &Target, unit: &str, iface: &str, dev: &str) -> Option<String> {
+        if self.io_paths.contains_key(&(unit.to_string(), dev.to_string())) {
+            return None;
+        }
+        let cg = self.cgroup_of(target, unit, iface).ok()?;
+        self.fs.has_attr(&cg, "io.max").then_some(cg)
+    }
+
     /// Current limits for `dev` and the device path systemd already uses for it.
     fn read_io_limit(
         &mut self,
@@ -426,7 +444,13 @@ impl SystemdActuator {
             Setting::MemoryHigh { bytes } => {
                 self.set(target, unit, &[("MemoryHigh", Value::U64(bytes.unwrap_or(UNSET)))])
             }
-            Setting::IoMax { device, limit } => self.write_io_limit(target, unit, iface, device, limit),
+            Setting::IoMax { device, limit } => match self.io_max_direct(target, unit, iface, device) {
+                Some(cg) => self.fs.write_setting(&cg, setting).map_err(|e| {
+                    self.cgroups.remove(unit);
+                    PluginError::Failed(format!("{NAME}: writing io.max of {target}: {e}"))
+                }),
+                None => self.write_io_limit(target, unit, iface, device, limit),
+            },
             Setting::UclampMin { .. } | Setting::UclampMax { .. } => self.write_uclamp(target, unit, iface, setting),
             Setting::Nice { .. } | Setting::IoPrio { .. } => Err(unsupported_knob(NAME, &setting.knob(), target)),
         }
@@ -516,6 +540,12 @@ impl Actuator for SystemdActuator {
             }
             Knob::IoMax(dev) => {
                 check_device(dev).map_err(|m| PluginError::Failed(format!("{NAME}: {m}")))?;
+                if let Some(cg) = self.io_max_direct(target, unit, iface, dev) {
+                    return self
+                        .fs
+                        .read_setting(&cg, knob)
+                        .map_err(|e| PluginError::Failed(format!("{NAME}: reading io.max of {target}: {e}")));
+                }
                 let (_, limit) = self.read_io_limit(target, unit, iface, dev)?;
                 Some(Setting::IoMax { device: dev.clone(), limit })
             }
