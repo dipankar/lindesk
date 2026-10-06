@@ -78,6 +78,8 @@ impl Snap {
             usage: Some(Usage { mem_current: 1 << 30, interval_ms: TICK as u32, ..Default::default() }),
             applied: Vec::new(),
             top_comm: None,
+            visible: None,
+            audible: None,
         });
         self
     }
@@ -91,6 +93,14 @@ impl Snap {
             interval_ms: TICK as u32,
             ..Default::default()
         });
+        self
+    }
+
+    /// What the adapters say about `name`'s windows and sound.
+    fn seen(mut self, name: &str, visible: Option<bool>, audible: Option<bool>) -> Self {
+        let u = self.s.units.iter_mut().find(|u| u.target == unit(name)).expect("unit");
+        u.visible = visible;
+        u.audible = audible;
         self
     }
 
@@ -514,6 +524,68 @@ fn limited_units_share_the_floor_and_idle_ones_are_left_alone() {
         assert_eq!(io_max(&out, "tracker.service").unwrap().wbps, Some(8 * MIB_U), "idle: held, not raised");
         assert!(io_max(&out, "build.scope").unwrap().wbps.unwrap() > 8 * MIB_U, "active: raised again");
     }
+}
+
+#[test]
+fn apps_put_away_nap_until_they_are_seen_or_heard() {
+    const SLACK: u64 = 50_000_000;
+    let napping = |out: &PolicyOutput, name: &str| {
+        (get(out, name, Knob::UclampMax), get(out, name, Knob::TimerSlack))
+            == (Some(Setting::UclampMax { percent: 50.0 }), Some(Setting::TimerSlack { ns: SLACK }))
+    };
+    let awake = |out: &PolicyOutput, name: &str| {
+        get(out, name, Knob::UclampMax).is_none() && get(out, name, Knob::TimerSlack).is_none()
+    };
+    // editor: an app whose window goes to another workspace. sync: a service, no window
+    // ever. tab: nobody can tell.
+    let snap_heard = |now: i64, editor: Option<bool>, audible: Option<bool>| {
+        desktop(now, 0.0)
+            .unit("sync.service", QosClass::Normal)
+            .unit("tab.scope", QosClass::Normal)
+            .seen("editor.scope", editor, audible)
+            .seen("sync.service", Some(false), Some(false))
+            .seen("tracker.service", Some(false), Some(false))
+            .seen("session.slice", Some(false), Some(false))
+            .build()
+    };
+    let snap = |now: i64, editor: Option<bool>, audible: bool| snap_heard(now, editor, Some(audible));
+    let mut p = ThresholdPolicy::new(crisp());
+    // On screen, then put away at t = 10 s.
+    for now in (0..10_000).step_by(1000) {
+        assert!(awake(&p.evaluate(&snap(now, Some(true), false)).unwrap(), "editor.scope"));
+    }
+    for now in (10_000..130_000).step_by(1000) {
+        let out = p.evaluate(&snap(now, Some(false), false)).unwrap();
+        assert!(awake(&out, "editor.scope"), "not before nap_after ({now})");
+    }
+    let out = p.evaluate(&snap(130_000, Some(false), false)).unwrap();
+    assert!(napping(&out, "editor.scope"));
+    let why = out.intents.iter().find(|i| i.target == unit("editor.scope") && i.setting.knob() == Knob::TimerSlack);
+    assert!(why.unwrap().reason.starts_with("nap: no window on screen for over 120s"), "{}", why.unwrap().reason);
+    // Never: something that had no window to put away, something nobody can see into, the
+    // session itself, the app in use. Background work keeps its own treatment.
+    for name in ["sync.service", "tab.scope", "session.slice", "app.scope", "tracker.service"] {
+        assert!(get(&out, name, Knob::TimerSlack).is_none(), "{name}");
+    }
+
+    // It starts playing something: awake at once, and napping again when it stops.
+    assert!(awake(&p.evaluate(&snap(131_000, Some(false), true)).unwrap(), "editor.scope"));
+    assert!(napping(&p.evaluate(&snap(132_000, Some(false), false)).unwrap(), "editor.scope"));
+    // Back on screen: awake, and the clock starts over when it is put away again.
+    assert!(awake(&p.evaluate(&snap(133_000, Some(true), false)).unwrap(), "editor.scope"));
+    assert!(awake(&p.evaluate(&snap(134_000, Some(false), false)).unwrap(), "editor.scope"));
+    assert!(napping(&p.evaluate(&snap(134_000 + 120_000, Some(false), false)).unwrap(), "editor.scope"));
+    // Nothing reports sound on this host: it might be playing, so it stays awake.
+    assert!(awake(&p.evaluate(&snap_heard(255_000, Some(false), None)).unwrap(), "editor.scope"));
+    assert!(napping(&p.evaluate(&snap(256_000, Some(false), false)).unwrap(), "editor.scope"));
+    // The adapter goes away (nobody can tell what is on screen any more): awake.
+    assert!(awake(&p.evaluate(&snap(260_000, None, false)).unwrap(), "editor.scope"));
+
+    // Switched off.
+    let mut p = ThresholdPolicy::new(ThresholdConfig { nap: false, ..crisp() });
+    p.evaluate(&snap(0, Some(true), false)).unwrap();
+    p.evaluate(&snap(1000, Some(false), false)).unwrap();
+    assert!(awake(&p.evaluate(&snap(500_000, Some(false), false)).unwrap(), "editor.scope"));
 }
 
 #[test]

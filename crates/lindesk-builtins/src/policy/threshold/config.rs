@@ -222,6 +222,21 @@ pub struct ThresholdConfig {
     #[serde(with = "size")]
     pub memory_low_step: u64,
 
+    /// App Nap: an app whose windows are all off screen (another workspace, minimized) and
+    /// that is silent is put in an efficiency mode after `nap_after`: its timers are
+    /// coalesced and it is steered to the efficient cores and lower frequencies. Nothing
+    /// is capped or frozen; it still gets all the CPU time it asks for. Only apps that had
+    /// a window, and only where an adapter reports which windows are visible.
+    pub nap: bool,
+    /// How long an app must have been off screen before it naps.
+    #[serde(with = "dur")]
+    pub nap_after: Duration,
+    /// Timer slack of a napping app's threads (the kernel default is 50 µs).
+    #[serde(with = "dur")]
+    pub nap_timer_slack: Duration,
+    /// `cpu.uclamp.max` of a napping app, percent.
+    pub nap_uclamp_max: f32,
+
     /// Lower bound for AIMD `io.max` limits (bytes/s, per direction). Also the minimum
     /// "observed" rate the initial limit is derived from.
     /// *auto*: per device, 2% of its nominal bandwidth, at least 4MiB/s.
@@ -283,6 +298,10 @@ impl Default for ThresholdConfig {
             warm_memory_budget: 0.25,
             warm_weight: 150,
             memory_low_step: 64 * 1024 * 1024,
+            nap: true,
+            nap_after: Duration::from_secs(120),
+            nap_timer_slack: Duration::from_millis(50),
+            nap_uclamp_max: 50.0,
             memory_high_ratio: 0.9,
             priority: 0,
             values: ThresholdValues::default(),
@@ -446,6 +465,12 @@ impl ThresholdConfig {
         }
         if self.memory_low_step == 0 {
             return Err("memory_low_step must be > 0".into());
+        }
+        if !(self.nap_uclamp_max > 0.0 && self.nap_uclamp_max <= 100.0) {
+            return Err(format!("nap_uclamp_max = {} must be in (0, 100]", self.nap_uclamp_max));
+        }
+        if self.nap_timer_slack > Duration::from_millis(100) {
+            return Err("nap_timer_slack must be at most 100ms".into());
         }
         if self.aimd_interval.is_zero() {
             return Err("aimd_interval must be > 0".into());

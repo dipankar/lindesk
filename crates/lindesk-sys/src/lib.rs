@@ -31,6 +31,7 @@ pub mod roots;
 pub mod swap;
 pub mod syscalls;
 pub mod telemetry;
+pub mod timerslack;
 
 mod util;
 

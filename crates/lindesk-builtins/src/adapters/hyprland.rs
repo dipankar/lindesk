@@ -8,6 +8,11 @@
 //! from the process (apps started through `uwsm app` each have a scope) and falls back to the
 //! app id.
 //!
+//! It also reports which apps have a window on screen (`Event::Visible`): the windows on
+//! the workspaces the monitors are showing, from `j/monitors` and `j/clients`, whenever a
+//! workspace, monitor or window event says that may have changed. That is what lets apps
+//! on other workspaces nap.
+//!
 //! Hyprland's IPC says nothing about input; the [`wayland-input`](super::wl_input) adapter
 //! runs next to this one for that.
 //!
@@ -45,6 +50,8 @@ pub const REQUEST_SOCKET: &str = ".socket.sock";
 /// How long a request may take. Hyprland answers from its main loop, so a stalled
 /// compositor must not stall the adapter with it.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
+/// The list of visible apps is sent again this often even when nothing changed.
+const RESEND: Duration = Duration::from_millis(lindesk_host::PRESENCE_RESEND_MS);
 /// An event line longer than this is not one of ours (window titles are capped far below).
 const MAX_LINE: usize = 64 * 1024;
 
@@ -56,6 +63,83 @@ const MAX_LINE: usize = 64 * 1024;
 /// empty when nothing has focus). `activewindow>>class,title` precedes it and says less.
 pub fn is_focus_event(line: &str) -> bool {
     line.split_once(">>").is_some_and(|(event, _)| event == "activewindowv2")
+}
+
+/// True for an event line after which a different set of windows may be on screen.
+pub fn is_layout_event(line: &str) -> bool {
+    const EVENTS: [&str; 12] = [
+        "workspace",
+        "workspacev2",
+        "focusedmon",
+        "focusedmonv2",
+        "activespecial",
+        "activespecialv2",
+        "openwindow",
+        "closewindow",
+        "movewindow",
+        "movewindowv2",
+        "monitoradded",
+        "monitorremoved",
+    ];
+    line.split_once(">>").is_some_and(|(event, _)| EVENTS.contains(&event))
+}
+
+#[derive(Deserialize, Default)]
+struct RawWorkspace {
+    #[serde(default)]
+    id: i64,
+}
+
+#[derive(Deserialize)]
+struct RawMonitor {
+    #[serde(default, rename = "activeWorkspace")]
+    active: RawWorkspace,
+    #[serde(default, rename = "specialWorkspace")]
+    special: RawWorkspace,
+}
+
+#[derive(Deserialize)]
+struct RawClient {
+    #[serde(default)]
+    pid: i64,
+    #[serde(default)]
+    class: String,
+    #[serde(default = "yes")]
+    mapped: bool,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    workspace: RawWorkspace,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The apps with a window on screen, from the `j/monitors` and `j/clients` replies: mapped,
+/// not hidden (a tab behind another in a group), on a workspace some monitor is showing
+/// (its regular one, or a special workspace toggled over it). Returns their pids, and the
+/// classes of windows Hyprland has no pid for.
+pub fn visible_apps(monitors: &str, clients: &str) -> Result<(Vec<i32>, Vec<String>), String> {
+    let monitors: Vec<RawMonitor> =
+        serde_json::from_str(monitors.trim()).map_err(|e| format!("unexpected monitors reply: {e}"))?;
+    let clients: Vec<RawClient> =
+        serde_json::from_str(clients.trim()).map_err(|e| format!("unexpected clients reply: {e}"))?;
+    // A monitor without a special workspace open reports id 0 for it, which no window is on.
+    let shown: Vec<i64> = monitors.iter().flat_map(|m| [m.active.id, m.special.id]).filter(|id| *id != 0).collect();
+    let (mut pids, mut classes) = (Vec::new(), Vec::new());
+    for c in clients.iter().filter(|c| c.mapped && !c.hidden && shown.contains(&c.workspace.id)) {
+        match i32::try_from(c.pid).ok().filter(|p| *p > 0) {
+            Some(pid) => pids.push(pid),
+            None if !c.class.trim().is_empty() => classes.push(c.class.trim().to_owned()),
+            None => {}
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    classes.sort_unstable();
+    classes.dedup();
+    Ok((pids, classes))
 }
 
 /// The focused window, from a `j/activewindow` reply.
@@ -257,6 +341,7 @@ struct Session {
     events: UnixStream,
     buf: Vec<u8>,
     focus: Debouncer<(String, Option<i32>)>,
+    visible: Debouncer<(Vec<i32>, Vec<String>)>,
 }
 
 impl Session {
@@ -268,18 +353,24 @@ impl Session {
             )
         })?;
         let events = UnixStream::connect(dir.join(EVENT_SOCKET))?;
-        Ok(Session { dir, events, buf: Vec::new(), focus: Debouncer::new() })
+        Ok(Session { dir, events, buf: Vec::new(), focus: Debouncer::new(), visible: Debouncer::new() })
     }
 
     /// `Ok(())` when stopped, `Err` when the event socket broke.
     fn run(mut self, ctl: &Control, sink: &EventSink) -> io::Result<()> {
-        // Whatever has focus now: there may be no event for a long while.
+        // Whatever has focus and is on screen now: there may be no event for a long while.
         self.report(sink);
+        self.report_visible(sink);
         let mut chunk = [0u8; 4096];
         loop {
-            match ctl.wait(Some(self.events.as_fd()), None)? {
+            match ctl.wait(Some(self.events.as_fd()), Some(RESEND))? {
                 Wake::Stopped => return Ok(()),
-                Wake::Timeout => continue,
+                // The host forgets a list that isn't sent again now and then.
+                Wake::Timeout => {
+                    self.visible.reset();
+                    self.report_visible(sink);
+                    continue;
+                }
                 Wake::Ready => {}
             }
             let n = match self.events.read(&mut chunk) {
@@ -289,9 +380,13 @@ impl Session {
                 Err(e) => return Err(e),
             };
             self.buf.extend_from_slice(&chunk[..n]);
-            // However many focus events arrived together, only where focus ended up matters.
-            if take_lines(&mut self.buf).iter().any(|l| is_focus_event(l)) {
+            // However many events arrived together, only where things ended up matters.
+            let lines = take_lines(&mut self.buf);
+            if lines.iter().any(|l| is_focus_event(l)) {
                 self.report(sink);
+            }
+            if lines.iter().any(|l| is_layout_event(l)) {
+                self.report_visible(sink);
             }
         }
     }
@@ -321,6 +416,24 @@ impl Session {
     }
 }
 
+impl Session {
+    fn report_visible(&mut self, sink: &EventSink) {
+        let apps = request(&self.dir, "j/monitors")
+            .and_then(|m| Ok((m, request(&self.dir, "j/clients")?)))
+            .map_err(|e| e.to_string())
+            .and_then(|(m, c)| visible_apps(&m, &c));
+        match apps {
+            Ok(apps) => {
+                if self.visible.accept(apps.clone()) {
+                    tracing::trace!(pids = ?apps.0, "hyprland visible apps");
+                    sink(Event::Visible { ts: now_ms(), pids: apps.0, app_ids: apps.1, source: SOURCE.into() });
+                }
+            }
+            Err(e) => tracing::debug!(error = %e, "hyprland: listing windows failed"),
+        }
+    }
+}
+
 /// One request on the request socket: Hyprland answers and closes the connection.
 fn request(dir: &Path, command: &str) -> io::Result<String> {
     let mut s = UnixStream::connect(dir.join(REQUEST_SOCKET))?;
@@ -345,6 +458,43 @@ mod tests {
         "class": "chromium", "title": "lindesk - Chromium", "initialClass": "chromium", "initialTitle": "Chromium",
         "pid": 4242, "xwayland": false, "pinned": false, "fullscreen": 0, "focusHistoryID": 0
     }"#;
+
+    const MONITORS: &str = r#"[
+        {"id": 0, "name": "DP-1", "activeWorkspace": {"id": 1, "name": "1"}, "specialWorkspace": {"id": 0, "name": ""}},
+        {"id": 1, "name": "DP-2", "activeWorkspace": {"id": 3, "name": "3"}, "specialWorkspace": {"id": -98, "name": "special:notes"}}
+    ]"#;
+    const CLIENTS: &str = r#"[
+        {"address": "0x1", "mapped": true, "hidden": false, "workspace": {"id": 1, "name": "1"}, "class": "chromium", "pid": 4242},
+        {"address": "0x2", "mapped": true, "hidden": false, "workspace": {"id": 1, "name": "1"}, "class": "chromium", "pid": 4242},
+        {"address": "0x3", "mapped": true, "hidden": false, "workspace": {"id": 2, "name": "2"}, "class": "Slack", "pid": 500},
+        {"address": "0x4", "mapped": true, "hidden": false, "workspace": {"id": 3, "name": "3"}, "class": "Alacritty", "pid": 77},
+        {"address": "0x5", "mapped": true, "hidden": true, "workspace": {"id": 3, "name": "3"}, "class": "Alacritty", "pid": 78},
+        {"address": "0x6", "mapped": true, "hidden": false, "workspace": {"id": -98, "name": "special:notes"}, "class": "obsidian", "pid": 900},
+        {"address": "0x7", "mapped": true, "hidden": false, "workspace": {"id": -99, "name": "special:other"}, "class": "spotify", "pid": 901},
+        {"address": "0x8", "mapped": true, "hidden": false, "workspace": {"id": 1, "name": "1"}, "class": "steam_app_1", "pid": -1},
+        {"address": "0x9", "mapped": false, "hidden": false, "workspace": {"id": 1, "name": "1"}, "class": "ghost", "pid": 902}
+    ]"#;
+
+    #[test]
+    fn windows_on_the_shown_workspaces_are_visible() {
+        let (pids, classes) = visible_apps(MONITORS, CLIENTS).unwrap();
+        // Workspaces 1 and 3 and the open special one; not workspace 2, the closed special
+        // workspace, the tab hidden in a group, or the unmapped window.
+        assert_eq!(pids, [77, 900, 4242]);
+        assert_eq!(classes, ["steam_app_1"], "a window without a pid is known by its class");
+        assert_eq!(visible_apps("[]", CLIENTS).unwrap(), (vec![], vec![]), "no monitor: nothing on screen");
+        assert!(visible_apps("unknown request", "[]").is_err());
+        for line in [
+            "workspace>>2",
+            "workspacev2>>2,2",
+            "openwindow>>5589,1,kitty,~",
+            "closewindow>>5589",
+            "activespecial>>special:notes,DP-2",
+        ] {
+            assert!(is_layout_event(line), "{line}");
+        }
+        assert!(!is_layout_event("activewindowv2>>5589") && !is_layout_event("windowtitle>>5589"));
+    }
 
     #[test]
     fn focus_events() {
@@ -407,6 +557,9 @@ mod tests {
         assert!(!is_live(tmp.path(), Some("new_3_4")));
     }
 
+    /// Reported visible apps: pids, and classes of windows without one.
+    type Apps = (Vec<i32>, Vec<String>);
+
     /// A reported focus: pid and app id.
     type Seen = (Option<i32>, Option<String>);
 
@@ -418,13 +571,16 @@ mod tests {
                 let Ok(mut c) = conn else { return };
                 let mut cmd = [0u8; 64];
                 let n = c.read(&mut cmd).unwrap_or(0);
-                let reply = if &cmd[..n] == b"j/activewindow" {
-                    window.lock().unwrap().clone()
-                } else {
-                    "unknown request".to_owned()
+                let reply = match &cmd[..n] {
+                    b"j/activewindow" => window.lock().unwrap().clone(),
+                    b"j/monitors" => MONITORS.to_owned(),
+                    b"j/clients" => CLIENTS.to_owned(),
+                    _ => "unknown request".to_owned(),
                 };
                 let _ = c.write_all(reply.as_bytes());
-                sent.lock().unwrap().push(reply);
+                if &cmd[..n] == b"j/activewindow" {
+                    sent.lock().unwrap().push(reply);
+                }
             }
         });
     }
@@ -444,13 +600,17 @@ mod tests {
     fn reports_focus_with_pid_and_survives_a_compositor_restart() {
         let tmp = crate::actuators::test_dir();
         let got: Arc<Mutex<Vec<Seen>>> = Arc::default();
+        let visible: Arc<Mutex<Vec<Apps>>> = Arc::default();
         let sink: EventSink = {
             let got = Arc::clone(&got);
-            Arc::new(move |e| {
-                if let Event::Focus { pid, app_id, source, .. } = e {
+            let visible = Arc::clone(&visible);
+            Arc::new(move |e| match e {
+                Event::Focus { pid, app_id, source, .. } => {
                     assert_eq!(source, SOURCE);
                     got.lock().unwrap().push((pid, app_id));
                 }
+                Event::Visible { pids, app_ids, .. } => visible.lock().unwrap().push((pids, app_ids)),
+                _ => {}
             })
         };
         let seen = |n: usize| wait_for(|| Some(got.lock().unwrap().clone()).filter(|g| g.len() >= n));
@@ -471,6 +631,10 @@ mod tests {
         // The window focused at connect time is reported without any event.
         assert_eq!(seen(1), [(Some(4242), Some("chromium".to_owned()))]);
         assert!(a.connected());
+        // So is what is on screen; a workspace switch that changes nothing is not reported again.
+        let on_screen = wait_for(|| visible.lock().unwrap().first().cloned());
+        assert_eq!(on_screen, (vec![77, 900, 4242], vec!["steam_app_1".to_owned()]));
+        ev.write_all(b"workspace>>1\n").unwrap();
 
         // Focus moves; the reply decides, however many events came in one read.
         *window.lock().unwrap() = r#"{"address":"0x2","pid":77,"class":"Alacritty"}"#.into();

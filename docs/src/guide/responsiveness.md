@@ -18,6 +18,7 @@ notice it, with the defaults and where to see each one working.
 | You click or type | The focused app gets a strong, bounded boost for 500 ms | `lindeskctl watch` (⚡) |
 | You switch apps | The app you switched to gets that boost for 3 s, and whatever of it is in swap is read back in | `lindeskctl events -f` |
 | You leave an app | It stays *warm* for 30 minutes: memory protected, raised share | `lindeskctl explain <app>` → `warm:` |
+| You put an app away | Off screen and silent for 2 minutes, it *naps*: timers coalesced, efficient cores | `lindeskctl explain <app>` → `nap:` |
 | The machine gets busy | Background and batch work yield: lower weights, CPU caps | level **YELLOW** |
 | Your app actually stalls | Background I/O is limited, tightening until the stall stops | level **RED** |
 | Pressure passes | Everything is released, one step at a time | level back to **GREEN** |
@@ -138,7 +139,44 @@ warm_memory_budget = 0.25
 memory_low_step = "64MiB"
 ```
 
-## 5. Doing nothing until it matters
+## 5. Apps you put away nap
+
+An app on another workspace, or minimized, still wakes up dozens of times a second to
+poll, blink a cursor nobody sees and tick its timers. On macOS this is what App Nap stops.
+lindesk's version is deliberately gentle. An app whose windows are all off screen, and that
+is silent, is put in an efficiency mode after two minutes:
+
+* its **timers are coalesced**: the kernel may delay them by up to 50 ms so they expire
+  together instead of each waking a CPU;
+* it is **steered to the efficient cores and lower frequencies** (`cpu.uclamp.max` 50 %).
+
+Nothing is frozen and nothing is capped. A napping app still gets all the CPU time it asks
+for, its network connections stay up and its notifications arrive; it just stops costing
+what an app in front of you is worth. It wakes the moment one of its windows is on screen
+again, it gets focus, or it starts playing or recording sound.
+
+What never naps: the app in use, anything critical, anything playing or recording, and
+anything that never had a window: a service or a terminal tab is not an app you put away.
+
+It needs to know two things, and where it can't know them it does nothing:
+
+| What | From | Where |
+|---|---|---|
+| which windows are on screen | the desktop adapter | GNOME (the Shell extension), Hyprland. Not yet KDE, COSMIC or plain X11: no naps there |
+| which apps are making sound | PipeWire (`pw-dump`) | any session with PipeWire; without it nothing naps |
+
+```toml
+[plugins.threshold.config]
+nap = true
+nap_after = "2m"
+nap_timer_slack = "50ms"     # at most 100ms
+nap_uclamp_max = 50.0
+```
+
+`lindeskctl explain <app>` shows `nap: no window on screen for over 120s, silent` on a
+napping app.
+
+## 6. Doing nothing until it matters
 
 lindesk reads **pressure-stall information** (PSI): the share of time tasks were stalled
 waiting for CPU, I/O or memory, for the whole system and *inside the focused app's own
@@ -183,7 +221,7 @@ This matters most on consumer SSDs that collapse under sustained writes (a hot o
 full QLC drive can drop from gigabytes to a few megabytes per second). Nothing makes such
 a disk fast; the targets decide who waits for it.
 
-## 6. Staying responsive itself
+## 7. Staying responsive itself
 
 A governor that stalls with the workload it governs is no use. lindesk needs little, and
 guarantees itself that little:
@@ -205,7 +243,7 @@ guarantees itself that little:
 * telemetry, when installed, is written by a separate low-priority process and is dropped
   rather than allowed to block.
 
-## 7. Never making things worse
+## 8. Never making things worse
 
 * No realtime CPU or I/O classes, ever.
 * Every throttle has a floor (`[safety]` in the config): I/O limits, `memory.high`,
@@ -218,7 +256,7 @@ guarantees itself that little:
 * `lindeskctl pause --for 10m` puts everything back and keeps watching, for a quick
   before/after.
 
-## 8. Adapting to the machine
+## 9. Adapting to the machine
 
 Thresholds and limits scale with what lindesk detects (`lindeskctl hardware`): disk kind and
 measured speed set the I/O floors, RAM sets the memory protections, a small CPU count
@@ -226,7 +264,7 @@ relaxes the CPU threshold, battery shortens boosts. A **profile** is selected au
 (`battery`, `gaming`, `hdd`, `x86-hybrid`, `arm-eas`, else `balanced`); see
 [CPU profiles](profiles.md) and [Hardware awareness](hardware.md).
 
-## 9. Telling you what it can't fix
+## 10. Telling you what it can't fix
 
 Some stalls aren't lindesk's to fix, and it says so instead of quietly failing:
 
@@ -248,7 +286,7 @@ that isn't there.
 | The focused app and the window server are favoured | focus tracking, interaction and switch boosts, critical compositor | on GNOME Wayland it needs the Shell extension |
 | Background QoS throttles CPU and I/O | weights enforced by latency targets, `cpu.idle`, uclamp, adaptive `io.max` | the limits are driven by measured stalls, so they react within about a second rather than pre-emptively |
 | Memory compression and keeping recent apps ready | warm apps (`memory.low`), and an app that did get swapped out is paged back in when you switch to it; works with zram and zswap | macOS also compresses and decompresses per app ahead of time; here it starts at the moment of the switch |
-| App Nap, timer coalescing | — | possible in a careful form: timer slack and a CPU ceiling for apps that are unfocused, silent and hold no inhibitor. Mostly a battery feature; not started |
+| App Nap, timer coalescing | apps that are off screen and silent nap: timers coalesced, efficient cores | gentler than macOS (nothing is throttled or frozen), it doesn't look at power assertions, and it needs the desktop to say what is on screen (GNOME and Hyprland so far) |
 | Priority inheritance across IPC | critical services (compositor, audio, portals, D-Bus, the journal) are always protected | true inheritance is a kernel matter and out of reach. What can be approximated: never throttling what the foreground is waiting on, found by tracing wake-ups (eBPF), or running a sched_ext scheduler that follows wake-up chains |
 | One vendor tuned the whole stack for known hardware | hardware detection, profiles, calibration | every machine is different; that's why the bench is there |
 

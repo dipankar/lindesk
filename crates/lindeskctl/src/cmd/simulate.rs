@@ -225,6 +225,7 @@ impl Actuator for Recorder {
                 Knob::MemoryHigh,
                 Knob::Nice,
                 Knob::IoPrio,
+                Knob::TimerSlack,
             ],
             targets: vec!["unit".into(), "cgroup".into(), "process".into()],
         }
@@ -318,6 +319,7 @@ fn is_throttle(s: &Setting) -> bool {
         Setting::MemoryHigh { bytes } => bytes.is_some(),
         Setting::Nice { value } => *value > 0,
         Setting::IoPrio { class, .. } => *class == lindesk_plugin_api::IoPrioClass::Idle,
+        Setting::TimerSlack { ns } => *ns > lindesk_core::safety::TIMER_SLACK_DEFAULT_NS,
         Setting::UclampMin { .. } | Setting::MemoryLow { .. } => false,
     }
 }

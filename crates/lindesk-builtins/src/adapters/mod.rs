@@ -21,12 +21,12 @@ use std::time::{Duration, Instant};
 pub mod cosmic;
 #[cfg(feature = "hyprland")]
 pub mod hyprland;
+pub mod pipewire;
 #[cfg(feature = "wayland-input")]
 pub mod wl_input;
 #[cfg(feature = "x11")]
 pub mod x11;
 
-#[cfg(any(feature = "x11", feature = "cosmic", feature = "hyprland", feature = "wayland-input"))]
 mod worker;
 
 #[cfg(all(test, feature = "x11"))]
@@ -42,6 +42,13 @@ pub const COSMIC: &str = "cosmic";
 pub const HYPRLAND: &str = "hyprland";
 /// Plugin name of [`wl_input::WlInputAdapter`].
 pub const WAYLAND_INPUT: &str = "wayland-input";
+/// Plugin name of [`pipewire::PipeWireAdapter`].
+pub const PIPEWIRE: &str = "pipewire";
+
+/// True for the adapters that say which app has focus (as opposed to input or sound only).
+pub fn reports_focus(name: &str) -> bool {
+    matches!(name, X11 | COSMIC | HYPRLAND)
+}
 
 /// Minimum spacing between two `Event::Interaction`s from one adapter.
 pub const INTERACTION_THROTTLE: Duration = Duration::from_millis(250);
@@ -61,6 +68,7 @@ pub fn available() -> Vec<&'static str> {
     if cfg!(feature = "wayland-input") {
         v.push(WAYLAND_INPUT);
     }
+    v.push(PIPEWIRE);
     v
 }
 
@@ -76,6 +84,7 @@ pub fn create(name: &str) -> Option<Box<dyn Adapter>> {
         HYPRLAND => Some(Box::new(hyprland::HyprlandAdapter::default())),
         #[cfg(feature = "wayland-input")]
         WAYLAND_INPUT => Some(Box::new(wl_input::WlInputAdapter::default())),
+        PIPEWIRE => Some(Box::new(pipewire::PipeWireAdapter::default())),
         _ => None,
     }
 }
@@ -158,9 +167,21 @@ impl SessionEnv {
 ///   `adapters/README.md`); a `wlr-foreign-toplevel-management` adapter is planned.
 /// * No graphical session (tty, ssh) → `[]`.
 ///
+/// Every graphical session also gets `"pipewire"`, which reports the apps making sound.
+///
 /// Names are returned even when the matching cargo feature is off; [`create`] returns `None`
 /// for those.
 pub fn detect(env: &SessionEnv) -> Vec<&'static str> {
+    let mut adapters = focus_adapters(env);
+    // Any graphical session may have sound; the adapter bows out where there is no PipeWire.
+    if env.hyprland || env.is_wayland() || env.is_x11() {
+        adapters.push(PIPEWIRE);
+    }
+    adapters
+}
+
+/// The adapters that report focus and input for a session.
+fn focus_adapters(env: &SessionEnv) -> Vec<&'static str> {
     // Hyprland first, and without asking for a Wayland session type: its sockets say so.
     if env.hyprland || (env.is_wayland() && env.has_desktop("Hyprland")) {
         return vec![HYPRLAND, WAYLAND_INPUT];
@@ -269,14 +290,14 @@ mod tests {
         ]);
         assert!(e.is_wayland());
         assert!(!e.is_x11(), "Xwayland's DISPLAY must not count as an X11 session");
-        assert!(detect(&e).is_empty());
+        assert_eq!(detect(&e), vec![PIPEWIRE], "focus comes from the shell extension");
     }
 
     #[test]
     fn detect_kde_wayland_is_shell_side() {
         let e =
             env(&[("XDG_CURRENT_DESKTOP", "KDE"), ("XDG_SESSION_TYPE", "wayland"), ("WAYLAND_DISPLAY", "wayland-0")]);
-        assert!(detect(&e).is_empty());
+        assert_eq!(detect(&e), vec![PIPEWIRE]);
     }
 
     #[test]
@@ -286,10 +307,10 @@ mod tests {
             ("XDG_SESSION_TYPE", "wayland"),
             ("WAYLAND_DISPLAY", "wayland-1"),
         ]);
-        assert_eq!(detect(&e), vec![COSMIC, WAYLAND_INPUT]);
+        assert_eq!(detect(&e), vec![COSMIC, WAYLAND_INPUT, PIPEWIRE]);
         // Session type missing, but a Wayland socket is there.
         let e = env(&[("XDG_CURRENT_DESKTOP", "pop:COSMIC"), ("WAYLAND_DISPLAY", "wayland-1")]);
-        assert_eq!(detect(&e), vec![COSMIC, WAYLAND_INPUT]);
+        assert_eq!(detect(&e), vec![COSMIC, WAYLAND_INPUT, PIPEWIRE]);
     }
 
     #[test]
@@ -302,26 +323,26 @@ mod tests {
             ("HYPRLAND_INSTANCE_SIGNATURE", "abc_1_2"),
         ]);
         assert!(e.hyprland);
-        assert_eq!(detect(&e), vec![HYPRLAND, WAYLAND_INPUT]);
+        assert_eq!(detect(&e), vec![HYPRLAND, WAYLAND_INPUT, PIPEWIRE]);
         // Only the desktop name made it into the service's environment.
         let e = env(&[("XDG_CURRENT_DESKTOP", "Hyprland"), ("WAYLAND_DISPLAY", "wayland-1")]);
-        assert_eq!(detect(&e), vec![HYPRLAND, WAYLAND_INPUT]);
+        assert_eq!(detect(&e), vec![HYPRLAND, WAYLAND_INPUT, PIPEWIRE]);
         // Nothing did, but an instance answers on its socket (what `from_process` checks).
         let e = SessionEnv { hyprland: true, ..env(&[]) };
-        assert_eq!(detect(&e), vec![HYPRLAND, WAYLAND_INPUT]);
+        assert_eq!(detect(&e), vec![HYPRLAND, WAYLAND_INPUT, PIPEWIRE]);
     }
 
     #[test]
     fn detect_x11_sessions() {
         for desktop in ["GNOME", "KDE", "XFCE", "i3"] {
             let e = env(&[("XDG_CURRENT_DESKTOP", desktop), ("XDG_SESSION_TYPE", "x11"), ("DISPLAY", ":0")]);
-            assert_eq!(detect(&e), vec![X11], "{desktop}");
+            assert_eq!(detect(&e), vec![X11, PIPEWIRE], "{desktop}");
         }
         // Bare startx: only DISPLAY.
-        assert_eq!(detect(&env(&[("DISPLAY", ":1")])), vec![X11]);
+        assert_eq!(detect(&env(&[("DISPLAY", ":1")])), vec![X11, PIPEWIRE]);
         // XDG_SESSION_TYPE=x11 wins over a stray WAYLAND_DISPLAY.
         let e = env(&[("XDG_SESSION_TYPE", "x11"), ("DISPLAY", ":0"), ("WAYLAND_DISPLAY", "wayland-0")]);
-        assert_eq!(detect(&e), vec![X11]);
+        assert_eq!(detect(&e), vec![X11, PIPEWIRE]);
     }
 
     #[test]
@@ -332,7 +353,7 @@ mod tests {
                 ("XDG_SESSION_TYPE", "wayland"),
                 ("WAYLAND_DISPLAY", "wayland-1"),
             ]);
-            assert!(detect(&e).is_empty(), "{desktop}");
+            assert_eq!(detect(&e), vec![PIPEWIRE], "{desktop}");
         }
         assert!(detect(&env(&[("XDG_SESSION_TYPE", "tty")])).is_empty());
         assert!(detect(&env(&[])).is_empty());

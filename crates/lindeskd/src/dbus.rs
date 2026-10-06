@@ -240,6 +240,33 @@ impl Broker {
             .map_err(gone)
     }
 
+    /// The caller's apps that have a window on screen (`kind = "visible"`) or are making
+    /// sound (`"audible"`). The complete list each time; processes of other users are
+    /// dropped from it.
+    async fn report_presence(
+        &self,
+        kind: String,
+        pids: Vec<i32>,
+        app_ids: Vec<String>,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> fdo::Result<()> {
+        let caller = self.caller(conn, &hdr).await?;
+        let pids: Vec<i32> = pids
+            .into_iter()
+            .filter(|p| *p > 0 && (caller.uid == 0 || proc_uid("/proc".as_ref(), *p) == Some(caller.uid)))
+            .take(1024)
+            .collect();
+        let source = format!("uid:{}", caller.uid);
+        let ts = now_ms();
+        let event = match kind.as_str() {
+            "visible" => Event::Visible { ts, pids, app_ids: app_ids.into_iter().take(256).collect(), source },
+            "audible" => Event::Audible { ts, pids, source },
+            other => return Err(fdo::Error::InvalidArgs(format!("unknown kind '{other}'"))),
+        };
+        self.engine.push_event(event).map_err(gone)
+    }
+
     /// Start (`end = false`) or end an interaction epoch for `pid`.
     async fn interaction(
         &self,

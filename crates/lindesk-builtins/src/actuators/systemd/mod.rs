@@ -452,7 +452,9 @@ impl SystemdActuator {
                 None => self.write_io_limit(target, unit, iface, device, limit),
             },
             Setting::UclampMin { .. } | Setting::UclampMax { .. } => self.write_uclamp(target, unit, iface, setting),
-            Setting::Nice { .. } | Setting::IoPrio { .. } => Err(unsupported_knob(NAME, &setting.knob(), target)),
+            Setting::Nice { .. } | Setting::IoPrio { .. } | Setting::TimerSlack { .. } => {
+                Err(unsupported_knob(NAME, &setting.knob(), target))
+            }
         }
     }
 }
@@ -550,7 +552,7 @@ impl Actuator for SystemdActuator {
                 Some(Setting::IoMax { device: dev.clone(), limit })
             }
             Knob::UclampMin | Knob::UclampMax => self.read_uclamp(target, unit, iface, knob)?,
-            Knob::Nice | Knob::IoPrio => return Err(unsupported_knob(NAME, knob, target)),
+            Knob::Nice | Knob::IoPrio | Knob::TimerSlack => return Err(unsupported_knob(NAME, knob, target)),
         })
     }
 
@@ -580,7 +582,7 @@ impl Actuator for SystemdActuator {
                 })
             }
             Knob::UclampMin | Knob::UclampMax => self.reset_uclamp(target, unit, iface, knob, original),
-            Knob::Nice | Knob::IoPrio => return Err(unsupported_knob(NAME, knob, target)),
+            Knob::Nice | Knob::IoPrio | Knob::TimerSlack => return Err(unsupported_knob(NAME, knob, target)),
             Knob::IoWeight | Knob::IoMax(_) | Knob::MemoryLow | Knob::MemoryHigh => {
                 let setting = match original {
                     Some(s) => s.clone(),

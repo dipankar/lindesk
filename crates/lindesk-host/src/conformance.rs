@@ -278,6 +278,8 @@ fn unit(name: &str, class: QosClass, comm: &str, foreground: bool) -> UnitState 
         usage: Some(Usage { cpu_usage_us: 400_000, io_wbytes: 50 << 20, interval_ms: 1000, ..Default::default() }),
         applied: Vec::new(),
         top_comm: Some(comm.into()),
+        visible: None,
+        audible: None,
     }
 }
 

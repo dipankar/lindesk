@@ -24,6 +24,7 @@ pub mod cgroupv2;
 pub mod process;
 pub mod relay;
 pub mod systemd;
+pub mod timer_slack;
 
 use std::fmt;
 use std::io;
@@ -37,6 +38,7 @@ pub use cgroupv2::CgroupV2Actuator;
 pub use process::ProcessActuator;
 pub use relay::{RelayActuator, RelayTable};
 pub use systemd::SystemdActuator;
+pub use timer_slack::TimerSlackActuator;
 
 /// Plugin name of [`systemd::SystemdActuator`].
 pub const SYSTEMD: &str = systemd::NAME;
@@ -48,6 +50,8 @@ pub const CGROUP_V1: &str = cgroupv1::NAME;
 pub const PROCESS: &str = process::NAME;
 /// Plugin name of [`relay::RelayActuator`].
 pub const RELAY: &str = relay::NAME;
+/// Plugin name of [`timer_slack::TimerSlackActuator`].
+pub const TIMER_SLACK: &str = timer_slack::NAME;
 
 /// Prefix of the [`PluginError::Failed`] message that marks a vanished target.
 pub const GONE: &str = "target gone";

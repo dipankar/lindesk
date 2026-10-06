@@ -512,6 +512,7 @@ pub fn setting_short(s: &lindesk_plugin_api::Setting) -> String {
             IoPrioClass::Idle => "ioprio idle".into(),
             IoPrioClass::BestEffort => format!("ioprio be/{level}"),
         },
+        Setting::TimerSlack { ns } => format!("timer slack {}ms", ns / 1_000_000),
     }
 }
 

@@ -39,6 +39,8 @@ pub trait QoS {
     /// Focus moved to an app known only by its id.
     fn set_foreground_app(&self, app_id: &str) -> zbus::Result<()>;
     /// Start or extend an interaction epoch.
+    /// Every process with a window on screen right now (shell adapters; the complete list).
+    fn set_visible_processes(&self, pids: Vec<i32>) -> zbus::Result<()>;
     fn begin_interaction(&self, pid: i32) -> zbus::Result<()>;
     /// End an interaction epoch early.
     fn end_interaction(&self, pid: i32) -> zbus::Result<()>;
@@ -108,6 +110,9 @@ pub mod broker {
         fn register_session(&self) -> zbus::Result<String>;
         fn report_foreground(&self, pid: i32, app_id: &str) -> zbus::Result<()>;
         fn interaction(&self, pid: i32, end: bool) -> zbus::Result<()>;
+        /// The caller's apps that are `kind` right now (`"visible"`: have a window on
+        /// screen; `"audible"`: play or record sound). The complete list each time.
+        fn report_presence(&self, kind: &str, pids: Vec<i32>, app_ids: Vec<String>) -> zbus::Result<()>;
         fn set_class(&self, pid: i32, class: &str) -> zbus::Result<()>;
         fn get_status(&self) -> zbus::Result<String>;
         fn explain(&self, what: &str) -> zbus::Result<String>;

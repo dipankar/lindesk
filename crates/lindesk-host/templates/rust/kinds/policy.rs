@@ -79,6 +79,8 @@ mod tests {
                 usage: None,
                 applied: vec![],
                 top_comm: None,
+                visible: None,
+                audible: None,
             });
         }
         s

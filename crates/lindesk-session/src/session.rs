@@ -101,7 +101,8 @@ impl SessionHooks {
     /// the shell extension / KWin script, which a running Wayland shell only loads after a
     /// login.
     pub fn foreground_tracking(&self) -> String {
-        if self.focus_seen || self.adapters.iter().any(|a| a.connected()) {
+        let focus = |a: &dyn Adapter| lindesk_builtins::adapters::reports_focus(&a.info().name);
+        if self.focus_seen || self.adapters.iter().any(|a| focus(a.as_ref()) && a.connected()) {
             return "active".into();
         }
         match crate::desktop::desktop_of(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref()) {
@@ -110,7 +111,9 @@ impl SessionHooks {
                 "waiting for the KWin script (enable it in System Settings > KWin Scripts, or log out and in)".into()
             }
             // A built-in adapter (Hyprland, COSMIC, X11) that has not reached its compositor.
-            crate::desktop::Desktop::Other if !self.adapters.is_empty() => "waiting for the compositor".into(),
+            crate::desktop::Desktop::Other if self.adapters.iter().any(|a| focus(a.as_ref())) => {
+                "waiting for the compositor".into()
+            }
             crate::desktop::Desktop::Other => "no foreground adapter for this desktop".into(),
         }
     }

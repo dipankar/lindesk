@@ -111,6 +111,8 @@ fn build_actuators(backend: Backend) -> (Vec<Box<dyn Actuator>>, RelayTable) {
     let table = relay.table();
     let mut all: Vec<Box<dyn Actuator>> = vec![Box::new(relay)];
     all.extend(actuators::for_backend(backend, Bus::System));
+    // Timer slack is per thread and needs CAP_SYS_NICE: done here for every user's units.
+    all.push(Box::new(actuators::TimerSlackActuator::default()));
     (all, table)
 }
 

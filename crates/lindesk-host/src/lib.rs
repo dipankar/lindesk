@@ -57,7 +57,9 @@ pub mod supervisor;
 
 pub use conformance::{ConformanceReport, run_conformance};
 pub use discovery::{DiscoveredPlugin, Discovery, DiscoveryOptions, discover};
-pub use engine::{Engine, EngineError, EngineOptions, StateError, validate_overrides};
+pub use engine::{
+    Engine, EngineError, EngineOptions, PRESENCE_RESEND_MS, PRESENCE_TTL_MS, StateError, validate_overrides,
+};
 pub use env::{Environment, MemoryEnvironment};
 pub use external::{ExternalPlugin, HostReceiver, HostSender, host_queues};
 pub use registry::{Origin, PluginHealth, Registry, RegistryError};

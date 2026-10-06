@@ -132,6 +132,10 @@ struct State {
     aimd: BTreeMap<(Target, String), Aimd>,
     /// Latched `memory.high` per batch target.
     mem_high: BTreeMap<Target, u64>,
+    /// Apps that have had a window on screen (or focus): the only ones that can nap.
+    had_window: BTreeSet<Target>,
+    /// Since when each of them has had no window on screen.
+    hidden_since: BTreeMap<Target, TimestampMs>,
     /// When each app last had focus (for the warm set).
     last_focus: BTreeMap<Target, TimestampMs>,
     /// The app the last `Focus` event named (to tell a switch from a re-focus).
@@ -452,6 +456,26 @@ impl ThresholdPolicy {
         }
     }
 
+    /// Since when a unit that had a window has had none on screen. `None` while it is
+    /// visible, while nobody can tell, and for units that never had a window (a service or
+    /// a terminal tab is not an app that was put away).
+    fn hidden_since(&mut self, now: TimestampMs, u: &UnitState) -> Option<TimestampMs> {
+        match u.visible {
+            Some(true) => {
+                self.st.had_window.insert(u.target.clone());
+                self.st.hidden_since.remove(&u.target);
+                None
+            }
+            Some(false) if self.st.had_window.contains(&u.target) => {
+                Some(*self.st.hidden_since.entry(u.target.clone()).or_insert(now))
+            }
+            _ => {
+                self.st.hidden_since.remove(&u.target);
+                None
+            }
+        }
+    }
+
     /// Advance (or create) the AIMD state for one (target, device) and return it. `sharing`
     /// is the number of units doing I/O under a limit on the device: they share its floor.
     fn aimd_step(
@@ -605,6 +629,8 @@ impl Policy for ThresholdPolicy {
         for u in &snap.units {
             let t = &u.target;
             if is_fg(u) {
+                self.st.had_window.insert(t.clone());
+                self.st.hidden_since.remove(t);
                 // The foreground is boosted below and never throttled, whatever its class.
                 if u.class == QosClass::Critical {
                     let w = v.critical_weight;
@@ -657,7 +683,22 @@ impl Policy for ThresholdPolicy {
                         plan.set(t, Setting::MemoryHigh { bytes: Some(b) }, r);
                     }
                 }
-                QosClass::Normal | QosClass::Interactive => {}
+                QosClass::Normal | QosClass::Interactive => {
+                    if let Some(since) = self.hidden_since(now, u)
+                        && cfg.nap
+                        // Silent for sure: where nothing reports sound, nothing naps.
+                        && u.audible == Some(false)
+                        && now - since >= ms(cfg.nap_after)
+                    {
+                        let r = format!(
+                            "nap: no window on screen for over {}, silent (timers coalesced, efficient cores)",
+                            humantime_short(cfg.nap_after)
+                        );
+                        plan.set(t, Setting::UclampMax { percent: cfg.nap_uclamp_max }, &r);
+                        let ns = u64::try_from(cfg.nap_timer_slack.as_nanos()).unwrap_or(u64::MAX);
+                        plan.set(t, Setting::TimerSlack { ns }, &r);
+                    }
+                }
             }
             if limited.contains(t) {
                 let who = if u.class.yields() { "" } else { " heavy I/O next to the app in use;" };
@@ -679,6 +720,11 @@ impl Policy for ThresholdPolicy {
 
         // Garbage-collect state for targets that vanished, changed class or gained focus.
         self.st.aimd.retain(|k, _| live_aimd.contains(k));
+        if self.st.had_window.len() + self.st.hidden_since.len() > 0 {
+            let known: BTreeSet<&Target> = snap.units.iter().map(|u| &u.target).collect();
+            self.st.had_window.retain(|t| known.contains(t));
+            self.st.hidden_since.retain(|t, _| known.contains(t));
+        }
         self.st.mem_high.retain(|t, _| live_batch.contains(t));
 
         for &t in &fg_set {

@@ -393,7 +393,7 @@ fn start_adapters(
 ) -> Vec<Box<dyn Adapter>> {
     let session = SessionEnv::from_process();
     let names = adapters::detect(&session);
-    if names.is_empty() {
+    if !names.iter().any(|n| adapters::reports_focus(n)) {
         tracing::info!(
             "no built-in adapter for this session ({}); shells push focus over org.lindesk.QoS1",
             session.current_desktop.as_deref().unwrap_or("unknown desktop")

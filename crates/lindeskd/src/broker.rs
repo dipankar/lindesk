@@ -87,6 +87,8 @@ pub fn event_audience(e: &Event, pid_uid: impl Fn(i32) -> Option<u32>) -> Audien
         Event::Focus { pid: Some(pid), .. } | Event::Interaction { pid: Some(pid), .. } => by_pid(*pid),
         // An app id we couldn't resolve to a unit: don't tell other users about it.
         Event::Focus { .. } | Event::Interaction { .. } => Some(0),
+        // What someone has on screen, or is listening to, is theirs alone.
+        Event::Visible { pids, .. } | Event::Audible { pids, .. } => pids.first().map_or(Some(0), |p| by_pid(*p)),
         Event::ClassSet { target, .. } | Event::ActionApplied { target, .. } | Event::ActionReverted { target, .. } => {
             by_target(target)
         }

@@ -40,6 +40,15 @@ pub enum Forward {
         pid: i32,
         class: String,
     },
+    /// `ReportPresence("visible", ..)`: the apps with a window on screen.
+    Visible {
+        pids: Vec<i32>,
+        app_ids: Vec<String>,
+    },
+    /// `ReportPresence("audible", ..)`: the processes making sound.
+    Audible {
+        pids: Vec<i32>,
+    },
 }
 
 impl Forward {
@@ -50,6 +59,10 @@ impl Forward {
                 Some(Forward::Focus { pid: pid.unwrap_or(0), app_id: app_id.clone().unwrap_or_default() })
             }
             Event::Interaction { pid: Some(pid), end, .. } => Some(Forward::Interaction { pid: *pid, end: *end }),
+            Event::Visible { pids, app_ids, .. } => {
+                Some(Forward::Visible { pids: pids.clone(), app_ids: app_ids.clone() })
+            }
+            Event::Audible { pids, .. } => Some(Forward::Audible { pids: pids.clone() }),
             _ => None,
         }
     }
@@ -95,6 +108,8 @@ async fn send(p: &BrokerProxy<'static>, f: Forward) {
         Forward::Focus { pid, app_id } => p.report_foreground(*pid, app_id).await,
         Forward::Interaction { pid, end } => p.interaction(*pid, *end).await,
         Forward::SetClass { pid, class } => p.set_class(*pid, class).await,
+        Forward::Visible { pids, app_ids } => p.report_presence("visible", pids.clone(), app_ids.clone()).await,
+        Forward::Audible { pids } => p.report_presence("audible", pids.clone(), Vec::new()).await,
     };
     if let Err(e) = r {
         tracing::debug!("forwarding {f:?} to the broker failed: {e}");

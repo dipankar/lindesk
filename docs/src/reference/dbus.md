@@ -13,6 +13,7 @@ Owned by `lindesk-session`. Object `/org/lindesk/QoS1`, interface `org.lindesk.Q
 | Member | Signature | What it does |
 |---|---|---|
 | `SetForegroundProcess(pid)` | `i` → | Focus moved to a window owned by `pid` (GNOME extension, KWin script). |
+| `SetVisibleProcesses(pids)` | `ai` → | Every process with a window on screen right now; the complete list, sent when it changes. Lets apps that are off screen nap. |
 | `SetForegroundApp(app_id)` | `s` → | Focus moved to an app known only by its id. |
 | `BeginInteraction(pid)` | `i` → | Start or extend an interaction epoch (input, app-initiated work). |
 | `EndInteraction(pid)` | `i` → | End it early. |
@@ -34,6 +35,7 @@ Callers are identified by their bus credentials; polkit decides.
 | `RegisterSession()` | → `s` | none; returns the caller's `SessionState` JSON |
 | `ReportForeground(pid, app_id)` | `is` → | `org.lindesk.set-class-own` (the pid must be the caller's) |
 | `Interaction(pid, end)` | `ib` → | same |
+| `ReportPresence(kind, pids, app_ids)` | `saias` → | none (only the caller's own processes are kept) |
 | `SetClass(pid, class)` | `is` → | own pid: `org.lindesk.set-class-own`; others: `org.lindesk.set-class-any` |
 | `GetStatus()` | → `s` | none |
 | `Explain(what)` | `s` → `s` | none |

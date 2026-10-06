@@ -307,7 +307,7 @@ impl SysEnvironment {
     }
 
     /// The cgroup of a unit target, from the last walk or by looking in the usual places.
-    fn unit_cgroup(&self, target: &Target) -> Option<String> {
+    pub fn unit_cgroup(&self, target: &Target) -> Option<String> {
         let Target::Unit { manager, name } = target else { return None };
         if let Some(w) = lock(&self.cache).as_ref()
             && let Some(cg) = w.targets.iter().find(|w| &w.target == target).and_then(|w| w.cgroup.clone())
@@ -382,6 +382,21 @@ impl SysEnvironment {
         self.pids_oldest_first(w.cgroup.as_deref()?).first().copied()
     }
 
+    /// The units an application runs in: those of `pid` and of its descendants that run the
+    /// same program. A different program is something the application started for the
+    /// person (every tab of a terminal is a descendant of the terminal), not the app.
+    fn units_of_app(&self, procs: &Processes, pid: i32) -> Vec<Target> {
+        let mut out: Vec<Target> = Vec::new();
+        for p in procs.same_program(pid) {
+            if let Some(t) = self.target_for_pid(p)
+                && !out.contains(&t)
+            {
+                out.push(t);
+            }
+        }
+        out
+    }
+
     /// Units under the `app.slice` of every user manager this host looks at.
     fn app_units(&self) -> Vec<WatchedTarget> {
         let mut out = Vec::new();
@@ -433,6 +448,67 @@ fn start_time(proc_root: &Path, pid: i32) -> Option<u64> {
 }
 
 /// The slice directly containing the last component of a cgroup path.
+/// One look at the process table: who started whom, and which program each runs.
+struct Processes {
+    children: BTreeMap<i32, Vec<i32>>,
+    parent: BTreeMap<i32, i32>,
+    proc_root: std::path::PathBuf,
+}
+
+impl Processes {
+    fn scan(proc_root: &Path) -> Self {
+        let mut children: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
+        let mut parent = BTreeMap::new();
+        for p in procfs::list_pids(proc_root).unwrap_or_default() {
+            if let Some(pp) = ppid(proc_root, p) {
+                children.entry(pp).or_default().push(p);
+                parent.insert(p, pp);
+            }
+        }
+        Processes { children, parent, proc_root: proc_root.to_path_buf() }
+    }
+
+    /// The program a process runs: its executable's name, else its comm.
+    fn program(&self, pid: i32) -> Option<String> {
+        procfs::exe_name(&self.proc_root, pid).or_else(|| procfs::comm(&self.proc_root, pid).ok())
+    }
+
+    /// The topmost ancestor of `pid` still running the same program (`pid` itself for the
+    /// process an app was started as).
+    fn app_root(&self, pid: i32) -> i32 {
+        let Some(app) = self.program(pid) else { return pid };
+        let mut root = pid;
+        for _ in 0..64 {
+            match self.parent.get(&root) {
+                Some(pp) if *pp > 1 && self.program(*pp).as_ref() == Some(&app) => root = *pp,
+                _ => break,
+            }
+        }
+        root
+    }
+
+    /// `pid` and its descendants that run the same program as `pid`.
+    fn same_program(&self, pid: i32) -> Vec<i32> {
+        let mut out = vec![pid];
+        let Some(app) = self.program(pid) else { return out };
+        let mut stack = vec![pid];
+        let mut seen = 0usize;
+        while let Some(p) = stack.pop() {
+            seen += 1;
+            if seen > MAX_FAMILY_PROCS {
+                break;
+            }
+            for c in self.children.get(&p).into_iter().flatten() {
+                stack.push(*c);
+                if self.program(*c).as_ref() == Some(&app) {
+                    out.push(*c);
+                }
+            }
+        }
+        out
+    }
+}
+
 fn parent_slice(cg: &str) -> Option<String> {
     let mut comps: Vec<&str> = cg.split('/').filter(|c| !c.is_empty()).collect();
     comps.pop()?;
@@ -456,32 +532,23 @@ impl Environment for SysEnvironment {
     }
 
     fn related_targets(&self, pid: i32) -> Vec<Target> {
-        // The same program in another unit is the same application (a browser's renderers).
-        // A different program is something the application started for the person: every
-        // tab of a terminal is a descendant of the terminal, and each is its own workload.
-        let program = |p: i32| procfs::exe_name(&self.roots.proc, p).or_else(|| procfs::comm(&self.roots.proc, p).ok());
-        let Some(app) = program(pid) else { return Vec::new() };
-        // parent → children for every live process, then the units of `pid`'s descendants.
-        let mut children: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
-        for p in procfs::list_pids(&self.roots.proc).unwrap_or_default() {
-            if let Some(pp) = ppid(&self.roots.proc, p) {
-                children.entry(pp).or_default().push(p);
-            }
+        let procs = Processes::scan(&self.roots.proc);
+        let primary = self.target_for_pid(pid);
+        self.units_of_app(&procs, pid).into_iter().filter(|t| Some(t) != primary.as_ref()).collect()
+    }
+
+    fn app_targets(&self, pids: &[i32]) -> Vec<Target> {
+        if pids.is_empty() {
+            return Vec::new();
         }
+        let procs = Processes::scan(&self.roots.proc);
         let mut out: Vec<Target> = Vec::new();
-        let mut stack = vec![pid];
-        let mut seen = 0usize;
-        while let Some(p) = stack.pop() {
-            seen += 1;
-            if seen > MAX_FAMILY_PROCS {
-                break;
-            }
-            for c in children.get(&p).into_iter().flatten() {
-                stack.push(*c);
-                if program(*c).as_ref() == Some(&app)
-                    && let Some(t) = self.target_for_pid(*c)
-                    && !out.contains(&t)
-                {
+        for pid in pids {
+            // From any process of the app up to the one that started it (same program all
+            // the way), then down again over everything that program runs.
+            let root = procs.app_root(*pid);
+            for t in self.units_of_app(&procs, root) {
+                if !out.contains(&t) {
                     out.push(t);
                 }
             }

@@ -3,6 +3,8 @@
 // Reports to lindesk-session (session bus name org.lindesk.QoS1):
 //   * focus changes      -> SetForegroundProcess(pid)
 //   * user input         -> BeginInteraction(pid of the focused window), at most every 250 ms
+//   * visible windows    -> SetVisibleProcesses(pids) when the set changes (workspace switch,
+//                           minimize, open, close), and every 5 minutes regardless
 //   * frame overruns     -> ReportMetric(...) every 5 s (off by default, see FRAME_METRICS)
 //
 // Every call is asynchronous and fire-and-forget. Errors (most commonly "lindesk is not
@@ -27,6 +29,9 @@ const INTERFACE_XML = `
     </method>
     <method name="BeginInteraction">
       <arg type="i" name="pid" direction="in"/>
+    </method>
+    <method name="SetVisibleProcesses">
+      <arg type="ai" name="pids" direction="in"/>
     </method>
     <method name="ReportMetric">
       <arg type="s" name="name" direction="in"/>
@@ -61,6 +66,31 @@ const INPUT_EVENT_TYPES = new Set([
     Clutter.EventType.SCROLL,
 ]);
 
+// Changes to what is on screen come in bursts (a workspace switch maps and unmaps many
+// windows); one report after they settle is enough.
+const VISIBLE_SETTLE_MS = 500;
+// lindesk forgets a list that isn't sent again for 15 minutes.
+const VISIBLE_RESEND_SECONDS = 300;
+
+// Pids with a window the person can see: not minimized, and on the active workspace (or on
+// all of them, which includes windows on the other monitors when workspaces span only the
+// primary one).
+function visiblePids() {
+    const active = global.workspace_manager.get_active_workspace();
+    const pids = new Set();
+    for (const actor of global.get_window_actors()) {
+        const win = actor.meta_window;
+        if (!win || win.minimized || !win.showing_on_its_workspace())
+            continue;
+        if (!win.is_on_all_workspaces() && win.get_workspace() !== active)
+            continue;
+        const pid = win.get_pid();
+        if (pid > 0)
+            pids.add(pid);
+    }
+    return [...pids].sort((a, b) => a - b);
+}
+
 function focusPid() {
     const win = global.display.focus_window;
     if (!win)
@@ -78,6 +108,9 @@ export default class LindeskExtension extends Extension {
         this._signals = [];
         this._activeWatchId = 0;
         this._activePollId = 0;
+        this._visibleSettleId = 0;
+        this._visibleResendId = 0;
+        this._lastVisible = null;
         this._idleMonitor = null;
         this._frames = new Map();
         this._viewLabels = new WeakMap();
@@ -99,13 +132,25 @@ export default class LindeskExtension extends Extension {
                 }
                 // When lindesk-session (re)starts, tell it what is focused right now.
                 this._ownerId = this._proxy.connect('notify::g-name-owner', () => {
-                    if (this._proxy?.g_name_owner)
+                    if (this._proxy?.g_name_owner) {
                         this._sendFocus(true);
+                        this._sendVisible(true);
+                    }
                 });
                 this._sendFocus(true);
+                this._sendVisible(true);
             });
 
-        this._connect(global.display, 'notify::focus-window', () => this._sendFocus(false));
+        this._connect(global.display, 'notify::focus-window', () => {
+            this._sendFocus(false);
+            this._visibleChanged();
+        });
+        for (const signal of ['switch-workspace', 'minimize', 'unminimize', 'map', 'destroy'])
+            this._connect(global.window_manager, signal, () => this._visibleChanged());
+        this._visibleResendId = GLib.timeout_add_seconds(GLib.PRIORITY_LOW, VISIBLE_RESEND_SECONDS, () => {
+            this._sendVisible(true);
+            return GLib.SOURCE_CONTINUE;
+        });
         this._connect(global.stage, 'captured-event', (_actor, event) => {
             if (INPUT_EVENT_TYPES.has(event.type()))
                 this._noteInput();
@@ -144,6 +189,13 @@ export default class LindeskExtension extends Extension {
         if (this._activePollId)
             GLib.source_remove(this._activePollId);
         this._activePollId = 0;
+        if (this._visibleSettleId)
+            GLib.source_remove(this._visibleSettleId);
+        this._visibleSettleId = 0;
+        if (this._visibleResendId)
+            GLib.source_remove(this._visibleResendId);
+        this._visibleResendId = 0;
+        this._lastVisible = null;
 
         if (this._frameReportId)
             GLib.source_remove(this._frameReportId);
@@ -179,6 +231,31 @@ export default class LindeskExtension extends Extension {
             return;
         this._lastFocusPid = pid;
         this._call('SetForegroundProcess', new GLib.Variant('(i)', [pid]));
+    }
+
+    _visibleChanged() {
+        if (this._visibleSettleId)
+            return;
+        this._visibleSettleId = GLib.timeout_add(GLib.PRIORITY_LOW, VISIBLE_SETTLE_MS, () => {
+            this._visibleSettleId = 0;
+            this._sendVisible(false);
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _sendVisible(force) {
+        let pids;
+        try {
+            pids = visiblePids();
+        } catch (e) {
+            console.debug(`lindesk: cannot list windows: ${e}`);
+            return;
+        }
+        const key = pids.join(',');
+        if (!force && key === this._lastVisible)
+            return;
+        this._lastVisible = key;
+        this._call('SetVisibleProcesses', new GLib.Variant('(ai)', [pids]));
     }
 
     // Hot path: called for every key/button/touch/scroll. Keep it to a clock read and a compare.

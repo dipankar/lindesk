@@ -100,6 +100,7 @@ to the agent's uid.
 | Member | Signature | Notes |
 |---|---|---|
 | `SetForegroundProcess(pid)` | `i` → | Focus moved to a window owned by `pid` (GNOME extension, KWin script). |
+| `SetVisibleProcesses(pids)` | `ai` → | Every process with a window on screen right now; the complete list, sent when it changes (GNOME extension). Lets apps that are off screen nap. |
 | `SetForegroundApp(app_id)` | `s` → | Focus moved to an app known only by id (COSMIC-like shells). |
 | `BeginInteraction(pid)` | `i` → | Starts/extends an interaction epoch. Coalesced: at most one event per pid per 100 ms. |
 | `EndInteraction(pid)` | `i` → | Ends it early (never coalesced; resets the 100 ms window). |
@@ -130,6 +131,7 @@ is asked non-interactively unless the call has `ALLOW_INTERACTIVE_AUTHORIZATION`
 | `RegisterSession()` | → `s` | none; the caller's uid and unique name are recorded and the user's units become watched. Returns the current `SessionState` JSON. |
 | `ReportForeground(pid, app_id)` | `is` → | `pid > 0`: the pid must belong to the caller (`/proc/<pid>` owner), else polkit `org.lindesk.set-class-any`. `pid <= 0`: `app_id` is resolved among the caller's own units only. |
 | `Interaction(pid, end)` | `ib` → | as `ReportForeground` with a pid |
+| `ReportPresence(kind, pids, app_ids)` | `saias` → | `kind = "visible"`: the caller's apps with a window on screen; `"audible"`: its processes playing or recording sound. The complete list each time; pids that aren't the caller's are dropped. |
 | `SetClass(pid, class)` | `is` → | own pid: polkit `org.lindesk.set-class-own`; other users' pids: `org.lindesk.set-class-any` |
 | `GetStatus()` | → `s` | none |
 | `Explain(what)` | `s` → `s` | none |

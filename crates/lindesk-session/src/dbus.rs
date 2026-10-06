@@ -102,6 +102,9 @@ impl QoS {
     }
 }
 
+/// Most entries accepted in one list of visible processes.
+const MAX_PRESENCE: usize = 1024;
+
 #[interface(name = "org.lindesk.QoS1")]
 impl QoS {
     /// Focus moved to a window owned by `pid`.
@@ -123,6 +126,16 @@ impl QoS {
         self.push(
             Event::Focus { ts: now_ms(), pid: None, app_id: Some(app_id.clone()), target: None, source: "dbus".into() },
             Some(Forward::Focus { pid: 0, app_id }),
+        )
+    }
+
+    /// Every process with a window on screen right now (not minimized, on a visible
+    /// workspace). The complete list; shell adapters send it whenever it changes.
+    async fn set_visible_processes(&self, pids: Vec<i32>) -> fdo::Result<()> {
+        let pids: Vec<i32> = pids.into_iter().filter(|p| *p > 0).take(MAX_PRESENCE).collect();
+        self.push(
+            Event::Visible { ts: now_ms(), pids: pids.clone(), app_ids: Vec::new(), source: "dbus".into() },
+            Some(Forward::Visible { pids, app_ids: Vec::new() }),
         )
     }
 

@@ -18,6 +18,9 @@ The first release.
   for it to be paged in.
 - **A swapped-out app is read back in when you switch to it**, in one go and in the
   background, instead of one stalled page fault at a time (`[plugins.pagein]`).
+- **App Nap.** An app whose windows are all off screen and that is silent has its timers
+  coalesced and is steered to the efficient cores. Nothing is frozen or capped; it wakes
+  when it is seen or heard (GNOME and Hyprland; needs PipeWire).
 - **An app is all of its processes.** Browsers put the window's process in one unit and
   their renderers in another; focusing the window protects every unit the app runs in.
 - **Builds yield.** A terminal tab or app scope running compilers and linkers is background

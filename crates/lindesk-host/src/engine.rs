@@ -50,6 +50,11 @@ const ACTUATE_MIN_ACTIONS: usize = 4;
 /// Called by [`Engine::step`] with what it is about to do (a stage, or one action).
 pub type ProgressHook = Box<dyn Fn(&str) + Send>;
 
+/// A source's list of visible or audible apps is dropped when it hasn't been sent again for
+/// this long. Adapters resend at least every [`PRESENCE_RESEND_MS`], changed or not.
+pub const PRESENCE_TTL_MS: i64 = 15 * 60 * 1000;
+/// How often an adapter should resend its lists even when nothing changed.
+pub const PRESENCE_RESEND_MS: u64 = 5 * 60 * 1000;
 /// How often the focused application's other units are looked up again.
 const FAMILY_REFRESH_MS: i64 = 5_000;
 /// Every target is reclassified this often, so classifiers that look at what a unit is doing
@@ -265,6 +270,14 @@ pub struct Engine {
     foreground_pid: Option<i32>,
     foreground_family: Vec<Target>,
     family_checked: TimestampMs,
+    /// The last `Event::Visible` of each source (an adapter, or one user's session), as
+    /// reported: when, pids, app ids. Empty until an adapter sends one.
+    visible_apps: BTreeMap<String, (TimestampMs, Vec<i32>, Vec<String>)>,
+    /// The units of those apps. `None`: nobody can tell what is hidden.
+    visible: Option<BTreeSet<Target>>,
+    /// The last `Event::Audible` of each source, and the units of those apps.
+    audible_pids: BTreeMap<String, (TimestampMs, Vec<i32>)>,
+    audible: BTreeSet<Target>,
     pending: Vec<Event>,
     carry: Vec<Event>,
     unsent: Vec<Event>,
@@ -322,6 +335,10 @@ impl Engine {
             foreground_pid: None,
             foreground_family: Vec::new(),
             family_checked: 0,
+            visible_apps: BTreeMap::new(),
+            visible: None,
+            audible_pids: BTreeMap::new(),
+            audible: BTreeSet::new(),
             pending: Vec::new(),
             carry: Vec::new(),
             unsent: Vec::new(),
@@ -478,6 +495,16 @@ impl Engine {
     /// The cgroup of a known target, relative to the cgroup mount.
     pub fn target_cgroup(&self, target: &Target) -> Option<String> {
         self.targets.get(target)?.cgroup.clone()
+    }
+
+    /// The units with a window on screen, when an adapter reports visibility.
+    pub fn visible_targets(&self) -> Option<&BTreeSet<Target>> {
+        self.visible.as_ref()
+    }
+
+    /// The units of apps that are playing or recording sound.
+    pub fn audible_targets(&self) -> &BTreeSet<Target> {
+        &self.audible
     }
 
     /// What lindesk currently has applied (simulated in `dry_run`).
@@ -764,6 +791,16 @@ impl Engine {
                 }
                 (*pid, target.clone())
             }
+            Event::Visible { ts, pids, app_ids, source } => {
+                self.visible_apps.insert(source.clone(), (*ts, pids.clone(), app_ids.clone()));
+                self.refresh_presence();
+                return;
+            }
+            Event::Audible { ts, pids, source } => {
+                self.audible_pids.insert(source.clone(), (*ts, pids.clone()));
+                self.refresh_presence();
+                return;
+            }
             _ => return,
         };
         if let Some(t) = target {
@@ -791,6 +828,31 @@ impl Engine {
         }
     }
 
+    /// Recompute which units belong to an app with a visible window, and which to one that
+    /// is making sound, from what the adapters last reported. Apps gain and lose processes
+    /// (and units) all the time, so this runs again with the family refresh.
+    fn refresh_presence(&mut self) {
+        // A source that stopped reporting (its adapter or session went away) is forgotten:
+        // a list nobody keeps up to date would make every new window look hidden.
+        let fresh = self.last_now - PRESENCE_TTL_MS;
+        self.visible_apps.retain(|_, (at, ..)| *at >= fresh);
+        self.audible_pids.retain(|_, (at, _)| *at >= fresh);
+        self.visible = (!self.visible_apps.is_empty()).then(|| {
+            let pids: Vec<i32> = self.visible_apps.values().flat_map(|(_, pids, _)| pids.iter().copied()).collect();
+            let mut set: BTreeSet<Target> = self.env.app_targets(&pids).into_iter().collect();
+            let app_ids = self.visible_apps.values().flat_map(|(_, _, ids)| ids);
+            set.extend(app_ids.filter_map(|a| self.env.target_for_app_id(a)));
+            set
+        });
+        let pids: Vec<i32> = self.audible_pids.values().flat_map(|(_, pids)| pids.iter().copied()).collect();
+        self.audible = self.env.app_targets(&pids).into_iter().collect();
+    }
+
+    /// Whether `t` has a window the person can see, when an adapter can tell.
+    fn is_visible(&self, t: &Target) -> Option<bool> {
+        self.visible.as_ref().map(|v| v.contains(t) || self.is_foreground(t))
+    }
+
     fn is_foreground(&self, t: &Target) -> bool {
         self.foreground.as_ref() == Some(t) || self.foreground_family.contains(t)
     }
@@ -798,8 +860,14 @@ impl Engine {
     fn classify(&mut self, cx: &mut Ctx) {
         let now = cx.now;
         // A browser spawns renderers into other scopes as you open tabs.
-        if self.foreground_pid.is_some() && now - self.family_checked >= FAMILY_REFRESH_MS {
-            self.refresh_family();
+        if now - self.family_checked >= FAMILY_REFRESH_MS {
+            if self.foreground_pid.is_some() {
+                self.refresh_family();
+            }
+            self.family_checked = now;
+            if !self.visible_apps.is_empty() || !self.audible_pids.is_empty() {
+                self.refresh_presence();
+            }
         }
         let keys: Vec<Target> = self.targets.keys().cloned().collect();
         let mut errors: Vec<(Target, String, PluginError)> = Vec::new();
@@ -873,6 +941,8 @@ impl Engine {
                 usage: st.usage.clone(),
                 applied: self.applied.for_target(t).map(|e| e.current.clone()).collect(),
                 top_comm: st.proc.as_ref().map(|p| p.comm.clone()).filter(|c| !c.is_empty()),
+                visible: self.is_visible(t),
+                audible: (!self.audible_pids.is_empty()).then(|| self.audible.contains(t)),
             })
             .collect();
         Snapshot {

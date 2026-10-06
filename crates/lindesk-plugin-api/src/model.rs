@@ -274,6 +274,7 @@ pub enum Knob {
     MemoryHigh,
     Nice,
     IoPrio,
+    TimerSlack,
 }
 
 impl fmt::Display for Knob {
@@ -289,6 +290,7 @@ impl fmt::Display for Knob {
             Knob::MemoryHigh => f.write_str("memory.high"),
             Knob::Nice => f.write_str("nice"),
             Knob::IoPrio => f.write_str("ioprio"),
+            Knob::TimerSlack => f.write_str("timer.slack"),
         }
     }
 }
@@ -317,6 +319,10 @@ pub enum Setting {
     Nice { value: i8 },
     /// Process I/O priority (per-process backend). Never realtime.
     IoPrio { class: IoPrioClass, level: u8 },
+    /// Timer slack of every thread of the target, nanoseconds: how far the kernel may delay
+    /// their timers to let them expire together (the default is 50 µs). Not a cgroup
+    /// attribute; needs `CAP_SYS_NICE`.
+    TimerSlack { ns: u64 },
 }
 
 impl Setting {
@@ -332,6 +338,7 @@ impl Setting {
             Setting::MemoryHigh { .. } => Knob::MemoryHigh,
             Setting::Nice { .. } => Knob::Nice,
             Setting::IoPrio { .. } => Knob::IoPrio,
+            Setting::TimerSlack { .. } => Knob::TimerSlack,
         }
     }
 }
@@ -362,6 +369,7 @@ impl fmt::Display for Setting {
             },
             Setting::Nice { value } => write!(f, "nice={value}"),
             Setting::IoPrio { class, level } => write!(f, "ioprio={class:?}/{level}"),
+            Setting::TimerSlack { ns } => write!(f, "timer.slack={}ms", *ns as f64 / 1e6),
         }
     }
 }
@@ -458,6 +466,26 @@ pub enum Event {
         #[serde(default)]
         source: String,
     },
+    /// The apps with a window the person can see right now (on a visible workspace, not
+    /// minimized). The complete list: it replaces the previous one. Adapters that can tell
+    /// send it whenever it changes; until one does, nothing is known to be hidden.
+    Visible {
+        ts: TimestampMs,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pids: Vec<i32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        app_ids: Vec<String>,
+        #[serde(default)]
+        source: String,
+    },
+    /// The processes playing or recording sound right now. The complete list.
+    Audible {
+        ts: TimestampMs,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pids: Vec<i32>,
+        #[serde(default)]
+        source: String,
+    },
     /// A target's class was set or changed.
     ClassSet { ts: TimestampMs, target: Target, class: QosClass, source: String },
     /// A policy changed health level.
@@ -492,6 +520,8 @@ impl Event {
             | Event::ActionApplied { ts, .. }
             | Event::ActionReverted { ts, .. }
             | Event::PluginError { ts, .. }
+            | Event::Visible { ts, .. }
+            | Event::Audible { ts, .. }
             | Event::Notice { ts, .. } => *ts,
         }
     }
@@ -506,6 +536,8 @@ impl Event {
             Event::ActionReverted { .. } => "action_reverted",
             Event::PluginError { .. } => "plugin_error",
             Event::Notice { .. } => "notice",
+            Event::Visible { .. } => "visible",
+            Event::Audible { .. } => "audible",
         }
     }
 }
@@ -542,6 +574,15 @@ pub struct UnitState {
     /// Representative process name for display (e.g. "rustc").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_comm: Option<String>,
+    /// Whether the app has a window the person can see: `Some(false)` when an adapter
+    /// reports visibility and none of the app's windows is on screen, `None` when nobody
+    /// can tell (no such adapter, or the unit never had a window).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    /// Whether the app is playing or recording sound; `None` when nothing on this host
+    /// reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audible: Option<bool>,
 }
 
 /// What the host can do on this machine (a summary of the probe).

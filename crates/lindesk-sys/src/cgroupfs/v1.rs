@@ -186,7 +186,7 @@ impl V1Fs {
                 .read_opt("memory", cg, "memory.soft_limit_in_bytes")?
                 .map(|s| parse_u64(&s).map(|v| Setting::MemoryHigh { bytes: (v < UNLIMITED_THRESHOLD).then_some(v) }))
                 .transpose()?,
-            Knob::MemoryLow | Knob::Nice | Knob::IoPrio => return Err(unsupported(knob)),
+            Knob::MemoryLow | Knob::Nice | Knob::IoPrio | Knob::TimerSlack => return Err(unsupported(knob)),
         })
     }
 
@@ -222,7 +222,7 @@ impl V1Fs {
                 let v = bytes.map_or_else(|| "-1".to_string(), |b| b.to_string());
                 self.write("memory", cg, "memory.soft_limit_in_bytes", &v)
             }
-            Setting::MemoryLow { .. } | Setting::Nice { .. } | Setting::IoPrio { .. } => {
+            Setting::MemoryLow { .. } | Setting::Nice { .. } | Setting::IoPrio { .. } | Setting::TimerSlack { .. } => {
                 Err(unsupported(&setting.knob()))
             }
         }

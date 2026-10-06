@@ -112,11 +112,18 @@ impl SafetyCaps {
             },
             Setting::Nice { value } => Setting::Nice { value: value.clamp(self.nice_min, 19) },
             Setting::IoPrio { class, level } => Setting::IoPrio { class, level: level.min(7) },
+            Setting::TimerSlack { ns } => Setting::TimerSlack { ns: ns.min(TIMER_SLACK_MAX_NS) },
             other @ (Setting::CpuIdle { .. } | Setting::MemoryHigh { bytes: None }) => other,
         };
         if &clamped == s { Verdict::Ok(clamped) } else { Verdict::Clamped { setting: clamped, from: s.clone() } }
     }
 }
+
+/// The kernel's default timer slack; anything above it delays a thread's timers.
+pub const TIMER_SLACK_DEFAULT_NS: u64 = 50_000;
+/// No plugin may ask for more slack than this: a tenth of a second is already visible in
+/// anything that animates.
+pub const TIMER_SLACK_MAX_NS: u64 = 100_000_000;
 
 fn clamp_pct(p: f32, lo: f32, hi: f32) -> f32 {
     if p.is_nan() { lo } else { p.clamp(lo, hi) }
@@ -132,6 +139,7 @@ pub fn is_throttle(s: &Setting) -> bool {
         Setting::MemoryHigh { bytes } => bytes.is_some(),
         Setting::Nice { value } => *value > 0,
         Setting::IoPrio { class, .. } => *class == lindesk_plugin_api::IoPrioClass::Idle,
+        Setting::TimerSlack { ns } => *ns > TIMER_SLACK_DEFAULT_NS,
         Setting::UclampMin { .. } | Setting::MemoryLow { .. } => false,
     }
 }

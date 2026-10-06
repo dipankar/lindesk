@@ -38,6 +38,22 @@ pub trait Environment: Send {
     fn related_targets(&self, _pid: i32) -> Vec<Target> {
         Vec::new()
     }
+
+    /// Every unit of the applications these processes belong to. Unlike
+    /// [`Environment::related_targets`] the processes need not be the ones that own a
+    /// window: a browser's audio process is a child of the browser, and the app is all of
+    /// it. The default knows only each process's own unit and its descendants'.
+    fn app_targets(&self, pids: &[i32]) -> Vec<Target> {
+        let mut out: Vec<Target> = Vec::new();
+        for pid in pids {
+            for t in self.target_for_pid(*pid).into_iter().chain(self.related_targets(*pid)) {
+                if !out.contains(&t) {
+                    out.push(t);
+                }
+            }
+        }
+        out
+    }
 }
 
 impl<E: Environment + Sync + ?Sized> Environment for Arc<E> {
@@ -61,6 +77,9 @@ impl<E: Environment + Sync + ?Sized> Environment for Arc<E> {
     }
     fn related_targets(&self, pid: i32) -> Vec<Target> {
         (**self).related_targets(pid)
+    }
+    fn app_targets(&self, pids: &[i32]) -> Vec<Target> {
+        (**self).app_targets(pids)
     }
 }
 

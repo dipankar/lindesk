@@ -438,7 +438,7 @@ pub fn knob_file(knob: &Knob) -> Option<&'static str> {
         Knob::IoMax(_) => "io.max",
         Knob::MemoryLow => "memory.low",
         Knob::MemoryHigh => "memory.high",
-        Knob::Nice | Knob::IoPrio => return None,
+        Knob::Nice | Knob::IoPrio | Knob::TimerSlack => return None,
     })
 }
 
@@ -457,7 +457,7 @@ pub fn parse_setting(knob: &Knob, raw: &str) -> io::Result<Setting> {
         }
         Knob::MemoryLow => Setting::MemoryLow { bytes: parse_max_u64(raw)?.unwrap_or(u64::MAX) },
         Knob::MemoryHigh => Setting::MemoryHigh { bytes: parse_max_u64(raw)? },
-        Knob::Nice | Knob::IoPrio => return Err(unsupported(knob)),
+        Knob::Nice | Knob::IoPrio | Knob::TimerSlack => return Err(unsupported(knob)),
     })
 }
 
@@ -487,7 +487,9 @@ pub fn format_setting(setting: &Setting) -> io::Result<(&'static str, String)> {
             }
         }
         Setting::MemoryHigh { bytes } => bytes.map_or_else(|| "max".to_string(), |b| b.to_string()),
-        Setting::Nice { .. } | Setting::IoPrio { .. } => return Err(unsupported(&setting.knob())),
+        Setting::Nice { .. } | Setting::IoPrio { .. } | Setting::TimerSlack { .. } => {
+            return Err(unsupported(&setting.knob()));
+        }
     };
     Ok((file, value))
 }
@@ -510,6 +512,8 @@ pub fn default_setting(knob: &Knob) -> Option<Setting> {
         Knob::MemoryHigh => Setting::MemoryHigh { bytes: None },
         Knob::Nice => Setting::Nice { value: 0 },
         Knob::IoPrio => Setting::IoPrio { class: IoPrioClass::BestEffort, level: 4 },
+        // 0 is "the thread's own default", which is what a reset writes.
+        Knob::TimerSlack => Setting::TimerSlack { ns: 0 },
     })
 }
 

@@ -82,6 +82,8 @@ fn python_plugin_serves_several_kinds() {
             usage: None,
             applied: vec![],
             top_comm: None,
+            visible: None,
+            audible: None,
         }],
         events: vec![],
         foreground: None,
