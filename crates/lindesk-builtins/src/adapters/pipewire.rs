@@ -90,13 +90,18 @@ impl Graph {
                 None => self.clients.remove(&id),
             };
         } else if kind.ends_with(":Node") {
-            let class = prop("media.class").and_then(Value::as_str).unwrap_or_default();
-            // Playback and capture streams of apps; not devices, not video.
-            if !(class.starts_with("Stream/") && class.ends_with("/Audio")) {
-                self.streams.remove(&id);
+            // A change may carry only what changed: without properties, a node is whatever
+            // it was already known to be.
+            if props.is_some() {
+                let class = prop("media.class").and_then(Value::as_str).unwrap_or_default();
+                // Playback and capture streams of apps; not devices, not video.
+                if !(class.starts_with("Stream/") && class.ends_with("/Audio")) {
+                    self.streams.remove(&id);
+                    return;
+                }
+            } else if !self.streams.contains_key(&id) {
                 return;
             }
-            // A change may carry only what changed: keep what is already known.
             let known = self.streams.entry(id).or_default();
             if let Some(state) = info.get("state").and_then(Value::as_str) {
                 known.running = state == "running";

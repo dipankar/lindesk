@@ -602,9 +602,9 @@ mod tests {
     fn actuators_relay_first_then_the_backend() {
         let (acts, _) = build_actuators(Backend::Systemd);
         let names: Vec<String> = acts.iter().map(|a| a.info().name).collect();
-        assert_eq!(names, ["relay", "systemd", "proc"]);
+        assert_eq!(names, ["relay", "systemd", "proc", "timer-slack"]);
         let (acts, _) = build_actuators(Backend::CgroupV2Raw);
         let names: Vec<String> = acts.iter().map(|a| a.info().name).collect();
-        assert_eq!(names, ["relay", "cgroup-v2-raw", "proc"]);
+        assert_eq!(names, ["relay", "cgroup-v2-raw", "proc", "timer-slack"]);
     }
 }
