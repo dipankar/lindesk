@@ -33,6 +33,12 @@ dry_run = false
 # (scheduler "none"), so io.weight actually does something. "auto" | "on" | "off".
 # The original setting is restored on exit.
 iocost = "auto"
+# When lindesk enables iocost, also give it latency targets (10 ms reads / 40 ms writes on
+# NVMe, looser on SATA and spinning disks). Without targets the kernel never slows anyone
+# down and io.weight decides nothing while requests queue for seconds. With them, heavy
+# writers are slowed until the disk answers in time again, and what it can do is shared by
+# weight. "off": the kernel's parameters (maximum throughput, no latency control).
+iocost_latency_targets = "auto"
 # Block devices ("MAJ:MIN") to manage. Empty = the devices backing / and /home.
 devices = []
 

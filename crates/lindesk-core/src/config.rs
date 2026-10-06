@@ -80,6 +80,10 @@ pub enum Toggle {
 pub struct IoConfig {
     /// Enable the iocost controller on devices with no proportional I/O scheduler.
     pub iocost: Toggle,
+    /// Give iocost latency targets when lindesk enables it, so `io.weight` is enforced and
+    /// the device queue stays short. `off`: enable it with the kernel's parameters, which
+    /// have no targets.
+    pub iocost_latency_targets: Toggle,
     /// Devices (`MAJ:MIN`) to manage. Empty = those backing `/` and `/home`.
     pub devices: Vec<String>,
 }

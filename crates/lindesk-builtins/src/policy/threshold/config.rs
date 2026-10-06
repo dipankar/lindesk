@@ -237,6 +237,10 @@ pub struct ThresholdConfig {
     /// Time between AIMD adjustments.
     #[serde(with = "dur")]
     pub aimd_interval: Duration,
+    /// In RED, also limit units that are not background or batch by class but are doing
+    /// real I/O next to the stalling foreground (a test run or a build in another terminal
+    /// tab, a sync client). Critical units and the focused application are never limited.
+    pub limit_heavy_neighbours: bool,
 
     /// `memory.high` for batch targets under sustained memory pressure, as a fraction of
     /// their `memory.current` when it was first set. The value is latched (not recomputed
@@ -272,6 +276,7 @@ impl Default for ThresholdConfig {
             aimd_step: Auto::Auto,
             aimd_decrease: 0.5,
             aimd_interval: Duration::from_secs(1),
+            limit_heavy_neighbours: true,
             switch_epoch: Duration::from_secs(3),
             warm_for: Duration::from_secs(30 * 60),
             warm_memory_low_max: 1024 * 1024 * 1024,

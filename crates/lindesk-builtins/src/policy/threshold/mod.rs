@@ -216,6 +216,16 @@ fn latest(samples: &[Sample], r: Resource) -> Option<&Sample> {
 }
 
 /// Bytes per second from a byte delta over `interval_ms`.
+/// I/O below this (bytes/s, reads plus writes) is not "doing I/O" for the adaptive limit.
+const ACTIVE_IO: u64 = 1024 * 1024;
+/// However many units share a device's floor, none goes below this (or the floor itself).
+const SHARED_FLOOR_MIN: u64 = 4 * 1024 * 1024;
+
+/// A unit's I/O rate over its last usage interval, bytes/s, both directions.
+fn io_rate(u: &UnitState) -> u64 {
+    u.usage.as_ref().map_or(0, |us| rate(us.io_rbytes.saturating_add(us.io_wbytes), us.interval_ms))
+}
+
 fn rate(bytes: u64, interval_ms: u32) -> u64 {
     if interval_ms == 0 { 0 } else { bytes.saturating_mul(1000) / u64::from(interval_ms) }
 }
@@ -442,7 +452,8 @@ impl ThresholdPolicy {
         }
     }
 
-    /// Advance (or create) the AIMD state for one (target, device) and return it.
+    /// Advance (or create) the AIMD state for one (target, device) and return it. `sharing`
+    /// is the number of units doing I/O under a limit on the device: they share its floor.
     fn aimd_step(
         &mut self,
         now: TimestampMs,
@@ -450,10 +461,13 @@ impl ThresholdPolicy {
         device: &str,
         unit: &UnitState,
         stalling: bool,
+        sharing: usize,
     ) -> &Aimd {
         let cfg = &self.cfg;
         let (floor, step) = self.res.aimd_for(device);
+        let floor = (floor / sharing.max(1) as u64).max(SHARED_FLOOR_MIN.min(floor));
         let key = (target.clone(), device.to_string());
+        let active = io_rate(unit) >= ACTIVE_IO;
         let st = self.st.aimd.entry(key).or_insert_with(|| {
             let (r, w) = unit
                 .usage
@@ -462,7 +476,9 @@ impl ThresholdPolicy {
             let init = |obs: u64| ((obs.max(floor) as f64 * cfg.aimd_decrease) as u64).max(floor);
             Aimd { rbps: init(r), wbps: init(w), last_step: now, step: 1, action: "initial" }
         });
-        if now - st.last_step >= ms(cfg.aimd_interval) {
+        // A unit that isn't doing I/O keeps the limit it has: moving it every second changes
+        // nothing for anyone and costs a write per unit.
+        if active && now - st.last_step >= ms(cfg.aimd_interval) {
             let next = |v: u64| {
                 if stalling {
                     ((v as f64 * cfg.aimd_decrease) as u64).max(floor)
@@ -567,6 +583,25 @@ impl Policy for ThresholdPolicy {
         let mut live_aimd: BTreeSet<(Target, String)> = BTreeSet::new();
         let mut live_batch: BTreeSet<Target> = BTreeSet::new();
 
+        // Who the adaptive I/O limit applies to in RED: everything that yields by class, and
+        // whatever else is doing real I/O next to the stalling foreground. Once limited, a
+        // neighbour stays limited until RED ends (its rate drops because of the limit).
+        let limited: BTreeSet<&Target> = if level == Level::Red && snap.caps.io_max {
+            snap.units
+                .iter()
+                .filter(|u| !is_fg(u) && u.class != QosClass::Critical)
+                .filter(|u| {
+                    u.class.yields()
+                        || (cfg.limit_heavy_neighbours
+                            && (io_rate(u) >= ACTIVE_IO || self.st.aimd.keys().any(|(t, _)| t == &u.target)))
+                })
+                .map(|u| &u.target)
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        let sharing = snap.units.iter().filter(|u| limited.contains(&u.target) && io_rate(u) >= ACTIVE_IO).count();
+
         for u in &snap.units {
             let t = &u.target;
             if is_fg(u) {
@@ -622,14 +657,15 @@ impl Policy for ThresholdPolicy {
                         plan.set(t, Setting::MemoryHigh { bytes: Some(b) }, r);
                     }
                 }
-                QosClass::Normal | QosClass::Interactive => continue,
+                QosClass::Normal | QosClass::Interactive => {}
             }
-            if level == Level::Red && u.class.yields() && snap.caps.io_max {
+            if limited.contains(t) {
+                let who = if u.class.yields() { "" } else { " heavy I/O next to the app in use;" };
                 for dev in &snap.caps.devices {
                     live_aimd.insert((t.clone(), dev.clone()));
-                    let a = self.aimd_step(now, t, dev, u, stalling).clone();
+                    let a = self.aimd_step(now, t, dev, u, stalling, sharing).clone();
                     let r = format!(
-                        "RED: {cause}; io.max AIMD step {} ({}, r={} w={})",
+                        "RED: {cause};{who} io.max AIMD step {} ({}, r={} w={})",
                         a.step,
                         a.action,
                         mib(a.rbps),

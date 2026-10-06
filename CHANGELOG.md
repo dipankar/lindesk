@@ -20,6 +20,10 @@ The first release.
   their renderers in another; focusing the window protects every unit the app runs in.
 - **Builds yield.** A terminal tab or app scope running compilers and linkers is background
   work while it builds. The focused app is never throttled.
+- **Heavy neighbours yield.** When the app in use is stalling, anything else doing real
+  I/O is limited too, whatever its class.
+- **I/O weights that are enforced.** lindesk gives the kernel's iocost controller latency
+  targets, so a saturated disk is shared by weight instead of first come, first served.
 - **Foreground tracking** for GNOME (Shell extension), KDE (KWin script), COSMIC, Hyprland
   (built in, so it drops into Omarchy) and X11; input activity on Wayland compositors
   through `ext-idle-notify-v1`.

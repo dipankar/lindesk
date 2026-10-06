@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use lindesk_core::config::Toggle;
 use lindesk_sys::blockdev::BlockDev;
-use lindesk_sys::iocost::IoCost;
+use lindesk_sys::iocost::{IoCost, Tuning};
 use serde::{Deserialize, Serialize};
 
 /// File name inside the state directory.
@@ -26,6 +26,9 @@ pub const FILE: &str = "iocost.json";
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Saved {
     pub devices: BTreeMap<String, Option<String>>,
+    /// Saved `io.cost.model` lines of the devices whose cost model was replaced.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, String>,
 }
 
 /// Why a device is (not) enabled.
@@ -79,7 +82,7 @@ impl IoCostManager {
     }
 
     fn save(&self, saved: &Saved) -> io::Result<()> {
-        if saved.devices.is_empty() {
+        if saved.devices.is_empty() && saved.models.is_empty() {
             return match std::fs::remove_file(&self.path) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
                 _ => Ok(()),
@@ -93,8 +96,9 @@ impl IoCostManager {
         std::fs::rename(&tmp, &self.path)
     }
 
-    /// Enable iocost on `devices` according to `toggle`. Returns the devices enabled.
-    pub fn enable(&self, toggle: Toggle, devices: &[BlockDev]) -> Vec<String> {
+    /// Enable iocost on `devices` according to `toggle`, with latency targets unless
+    /// `targets` is off. Returns the devices enabled.
+    pub fn enable(&self, toggle: Toggle, targets: Toggle, devices: &[BlockDev]) -> Vec<String> {
         let mut enabled = Vec::new();
         if toggle == Toggle::Off {
             return enabled;
@@ -129,9 +133,24 @@ impl IoCostManager {
                         saved.devices.remove(&id);
                         continue;
                     }
-                    match self.ioc.enable(&id) {
-                        Ok(_) => {
-                            tracing::info!("iocost: enabled on {} ({id})", dev.name);
+                    let tuning = (targets != Toggle::Off).then(|| Tuning::for_disk(&dev.name, dev.rotational));
+                    let done = match &tuning {
+                        Some(t) => self.ioc.enable_tuned(&id, t).map(|(_, model)| model),
+                        None => self.ioc.enable(&id).map(|_| None),
+                    };
+                    match done {
+                        Ok(model) => {
+                            match &tuning {
+                                Some(t) => tracing::info!("iocost: enabled on {} ({id}) with {}", dev.name, t.qos),
+                                None => tracing::info!("iocost: enabled on {} ({id}), no latency targets", dev.name),
+                            }
+                            if let Some(model) = model {
+                                // As with the QoS line: an entry from a crashed run is the original.
+                                saved.models.entry(id.clone()).or_insert(model);
+                                if let Err(e) = self.save(&saved) {
+                                    tracing::warn!("iocost: cannot record the original cost model of {id}: {e}");
+                                }
+                            }
                             enabled.push(id);
                         }
                         Err(e) => {
@@ -167,6 +186,13 @@ impl IoCostManager {
                     saved.devices.insert(dev, prev);
                     failed += 1;
                 }
+            }
+        }
+        for (dev, prev) in std::mem::take(&mut saved.models) {
+            if let Err(e) = self.ioc.restore_model(&dev, &prev) {
+                tracing::warn!("iocost: restoring the cost model of {dev} failed: {e}");
+                saved.models.insert(dev, prev);
+                failed += 1;
             }
         }
         if let Err(e) = self.save(&saved) {
@@ -216,7 +242,7 @@ mod tests {
         let m = IoCostManager::new(cg.path(), state.path());
         let devs = [dev((259, 0), "nvme0n1", "none"), dev((8, 0), "sda", "bfq")];
         // A plain file is not the kernel's: each write replaces it with the command.
-        assert_eq!(m.enable(Toggle::Auto, &devs), vec!["259:0".to_string()]);
+        assert_eq!(m.enable(Toggle::Auto, Toggle::Off, &devs), vec!["259:0".to_string()]);
         assert_eq!(std::fs::read_to_string(&qos).unwrap(), "259:0 enable=1");
         let saved = m.load().unwrap();
         assert_eq!(saved.devices.len(), 1);
@@ -226,7 +252,7 @@ mod tests {
 
         // Enabling again (restart after a crash) keeps the original original.
         std::fs::write(&qos, "259:0 enable=0 ctrl=auto\n").unwrap();
-        m.enable(Toggle::Auto, &devs);
+        m.enable(Toggle::Auto, Toggle::Off, &devs);
         assert_eq!(m.load().unwrap().devices["259:0"].as_deref(), Some(LINE));
 
         assert_eq!(m.restore(), (1, 0));
@@ -241,9 +267,9 @@ mod tests {
         let state = crate::common::test_dir();
         let m = IoCostManager::new(cg.path(), state.path());
         let devs = [dev((259, 0), "nvme0n1", "none")];
-        assert!(m.enable(Toggle::Auto, &devs).is_empty());
+        assert!(m.enable(Toggle::Auto, Toggle::Off, &devs).is_empty());
         std::fs::write(cg.path().join("io.cost.qos"), "").unwrap();
-        assert!(m.enable(Toggle::Off, &devs).is_empty());
+        assert!(m.enable(Toggle::Off, Toggle::Off, &devs).is_empty());
         assert!(!state.path().join(FILE).exists());
         assert_eq!(m.restore(), (0, 0));
     }
@@ -255,9 +281,34 @@ mod tests {
         let qos = cg.path().join("io.cost.qos");
         std::fs::write(&qos, "").unwrap();
         let m = IoCostManager::new(cg.path(), state.path());
-        assert_eq!(m.enable(Toggle::On, &[dev((8, 0), "sda", "bfq")]), vec!["8:0".to_string()]);
+        assert_eq!(m.enable(Toggle::On, Toggle::Off, &[dev((8, 0), "sda", "bfq")]), vec!["8:0".to_string()]);
         assert_eq!(m.load().unwrap().devices["8:0"], None);
         assert_eq!(m.restore(), (1, 0));
         assert_eq!(std::fs::read_to_string(&qos).unwrap(), "8:0 enable=0");
+    }
+
+    #[test]
+    fn latency_targets_and_the_cost_model_are_restored() {
+        let cg = crate::common::test_dir();
+        let state = crate::common::test_dir();
+        let (qos, model) = (cg.path().join("io.cost.qos"), cg.path().join("io.cost.model"));
+        std::fs::write(&qos, format!("{LINE}\n")).unwrap();
+        let kernel_model = "259:0 ctrl=auto model=linear rbps=3102524156 rseqiops=724816 rrandiops=778122 wbps=1";
+        std::fs::write(&model, format!("{kernel_model}\n")).unwrap();
+        let m = IoCostManager::new(cg.path(), state.path());
+        let devs = [dev((259, 0), "nvme0n1", "kyber")];
+
+        assert_eq!(m.enable(Toggle::Auto, Toggle::Auto, &devs), vec!["259:0".to_string()]);
+        let written = std::fs::read_to_string(&qos).unwrap();
+        assert!(written.starts_with("259:0 enable=1 ctrl=user rpct=95.00 rlat=10000"), "{written}");
+        assert!(std::fs::read_to_string(&model).unwrap().starts_with("259:0 ctrl=user model=linear rbps=488636629"));
+        let saved = m.load().unwrap();
+        assert_eq!(saved.devices["259:0"].as_deref(), Some(LINE));
+        assert_eq!(saved.models["259:0"], kernel_model);
+
+        assert_eq!(m.restore(), (1, 0));
+        assert_eq!(std::fs::read_to_string(&qos).unwrap(), "259:0 enable=0 ctrl=auto");
+        assert_eq!(std::fs::read_to_string(&model).unwrap(), "259:0 ctrl=auto");
+        assert!(!state.path().join(FILE).exists());
     }
 }

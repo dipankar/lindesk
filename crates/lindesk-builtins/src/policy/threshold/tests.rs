@@ -440,6 +440,83 @@ fn aimd_halves_while_stalling_respects_floor_and_increases_additively() {
 }
 
 #[test]
+fn heavy_neighbours_are_limited_in_red_whatever_their_class() {
+    // A test run in another terminal tab: "normal" by every rule, and the reason the app in
+    // front is stalling.
+    let heavy = 60 * MIB_U;
+    let snap = |now: i64, editor_w: u64| {
+        desktop(now, 0.3)
+            .unit("idle.scope", QosClass::Normal)
+            .usage("editor.scope", 0, editor_w, 1 << 30)
+            .usage("session.slice", 0, heavy, 1 << 30)
+            .usage("app.scope", 0, heavy, 1 << 30)
+            .fg("app.scope", 0.3)
+            .build()
+    };
+    let mut p = ThresholdPolicy::new(crisp());
+    for now in (0..1000).step_by(TICK as usize) {
+        let out = p.evaluate(&snap(now, heavy)).unwrap();
+        assert!(io_max(&out, "editor.scope").is_none(), "nothing is limited outside RED");
+    }
+    let out = p.evaluate(&snap(1000, heavy)).unwrap();
+    assert_eq!(out.level, Some(Level::Red));
+    assert_eq!(io_max(&out, "editor.scope").unwrap().wbps, Some(30 * MIB_U), "half of what it was doing");
+    let why =
+        &out.intents.iter().find(|i| i.target == unit("editor.scope") && i.setting.knob() == Knob::IoMax(DEV.into()));
+    assert!(why.unwrap().reason.contains("heavy I/O next to the app in use"), "{}", why.unwrap().reason);
+    // Never: the compositor, the app in use, a neighbour that is doing nothing.
+    assert!(io_max(&out, "session.slice").is_none());
+    assert!(io_max(&out, "app.scope").is_none());
+    assert!(io_max(&out, "idle.scope").is_none());
+
+    // The limit works, so its rate drops; it stays limited (and keeps stepping down while
+    // the foreground stalls) for as long as RED lasts.
+    let out = p.evaluate(&snap(2000, 2 * MIB_U)).unwrap();
+    assert_eq!(io_max(&out, "editor.scope").unwrap().wbps, Some(16 * MIB_U));
+    let out = p.evaluate(&snap(3000, 0)).unwrap();
+    assert_eq!(io_max(&out, "editor.scope").unwrap().wbps, Some(16 * MIB_U));
+
+    // Switched off: only what yields by class is limited.
+    let mut p = ThresholdPolicy::new(ThresholdConfig { limit_heavy_neighbours: false, ..crisp() });
+    for now in (0..=1000).step_by(TICK as usize) {
+        p.evaluate(&snap(now, heavy)).unwrap();
+    }
+    let out = p.evaluate(&snap(1250, heavy)).unwrap();
+    assert_eq!(out.level, Some(Level::Red));
+    assert!(io_max(&out, "editor.scope").is_none());
+    assert!(io_max(&out, "build.scope").is_some());
+}
+
+#[test]
+fn limited_units_share_the_floor_and_idle_ones_are_left_alone() {
+    let w = 100 * MIB_U;
+    let snap = |now: i64, stall: f64| {
+        desktop(now, stall).usage("build.scope", 0, w, 1 << 30).usage("editor.scope", 0, w, 1 << 30).build()
+    };
+    let mut p = ThresholdPolicy::new(crisp());
+    for now in (0..1000).step_by(TICK as usize) {
+        p.evaluate(&snap(now, 0.3)).unwrap();
+    }
+    // Two units doing I/O: each may keep half the device's floor, so the two together can't
+    // hold more of the disk than one would.
+    let mut last = None;
+    for now in (1000..=6000).step_by(1000) {
+        last = Some(p.evaluate(&snap(now, 0.3)).unwrap());
+    }
+    let out = last.unwrap();
+    assert_eq!(io_max(&out, "build.scope").unwrap().wbps, Some(8 * MIB_U));
+    assert_eq!(io_max(&out, "editor.scope").unwrap().wbps, Some(8 * MIB_U));
+    // The idle tracker got its limit once and is not stepped: nothing to write every second.
+    assert_eq!(io_max(&out, "tracker.service").unwrap().wbps, Some(8 * MIB_U));
+    for now in (7000..=9000).step_by(1000) {
+        let out = p.evaluate(&snap(now, 0.07)).unwrap();
+        assert_eq!(out.level, Some(Level::Red));
+        assert_eq!(io_max(&out, "tracker.service").unwrap().wbps, Some(8 * MIB_U), "idle: held, not raised");
+        assert!(io_max(&out, "build.scope").unwrap().wbps.unwrap() > 8 * MIB_U, "active: raised again");
+    }
+}
+
+#[test]
 fn aimd_needs_io_max_support_and_forgets_vanished_targets() {
     let mut p = ThresholdPolicy::new(crisp());
     for now in (0..=1000).step_by(TICK as usize) {

@@ -39,9 +39,11 @@ and your input:
 The window's process is mapped to its systemd unit (the app's scope), and that unit is what
 gets tuned. An app isn't always one unit: Chromium-based browsers (Chrome, Wavebox, Edge,
 Electron apps) put the window's process in one scope and their renderer and GPU processes
-in another. lindesk follows the focused process's descendants, so every unit the app runs
-in is foreground: all of them get the boost, none is throttled, and a stall in any of them
-counts as you waiting. The set is refreshed every 5 s as tabs open and close. On GNOME Wayland the extension loads at the next login after the first install;
+in another. lindesk follows the focused process's descendants that run the same program,
+so every unit the app runs in is foreground: all of them get the boost, none is throttled,
+and a stall in any of them counts as you waiting. The set is refreshed every 5 s as tabs
+open and close. Descendants running a *different* program are not the app: every tab of a
+terminal is a child of the terminal, and a build in one of them is still a build. On GNOME Wayland the extension loads at the next login after the first install;
 `lindeskctl status` says `foreground tracking: waiting for GNOME extension` until then.
 
 ## 2. Classes
@@ -135,15 +137,32 @@ minimum time (3 s YELLOW, 2 s RED), and recovery steps down one level at a time 
 calm. A sawtooth load doesn't make it flap.
 
 **The adaptive I/O limit (RED only).** Each background and batch unit gets an `io.max` limit
-per managed disk, starting at half of what it was just doing. Every second the foreground is
-still stalling, the limit halves; once it stops stalling, the limit grows again; leaving RED
-removes it. Floors scale with the disk (about 2 % of its speed, never below the safety
+per managed disk, starting at half of what it was just doing. So does anything else that is
+doing real I/O (more than 1 MiB/s) next to your stalling app, whatever its class: a test
+run in another terminal tab is "normal" by every rule and still the reason you are waiting
+(`limit_heavy_neighbours = false` turns that off). Critical units and the app in use are
+never limited. Every second the foreground is still stalling, the limit halves; once it
+stops stalling, the limit grows again; leaving RED removes it. Floors scale with the disk
+(about 2 % of its speed, shared between the units being limited, never below the safety
 floor), so nothing is starved. This is admission control: the disk queue stays short enough
 for your app's reads to get through.
 
-`io.weight` needs a controller behind it. On disks using `none`, `mq-deadline` or `kyber`,
-`lindeskd` enables the kernel's iocost controller (`[io] iocost = "auto"`) and puts the
-previous setting back when it stops; on BFQ, weights already work.
+**Weights that mean something.** `io.weight` needs a controller behind it. On disks using
+`none`, `mq-deadline` or `kyber`, `lindeskd` enables the kernel's iocost controller
+(`[io] iocost = "auto"`); on BFQ, weights already work. Enabling iocost is not enough,
+though: with the kernel's own parameters it has no latency target, never slows anyone
+down, and lets requests queue in the disk for seconds while every unit, whatever its
+weight, gets all it asks for. So lindesk also gives it targets
+(`iocost_latency_targets = "auto"`): the 95th percentile of completions should stay under
+10 ms for reads and 40 ms for writes on NVMe (20/60 ms on SATA SSDs, 150/300 ms on
+spinning disks). When the disk can't keep that up, the kernel slows issuance until it can,
+and what the disk manages within the target is shared by weight: your app first. The cost
+is throughput for background work while the disk is saturated; an idle or healthy disk is
+not slowed. Both the QoS line and the cost model are put back when lindesk stops.
+
+This matters most on consumer SSDs that collapse under sustained writes (a hot or nearly
+full QLC drive can drop from gigabytes to a few megabytes per second). Nothing makes such
+a disk fast; the targets decide who waits for it.
 
 ## 6. Staying responsive itself
 

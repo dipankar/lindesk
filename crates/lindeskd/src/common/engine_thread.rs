@@ -575,6 +575,10 @@ impl<H: Hooks> Loop<H> {
             } else {
                 (tick.saturating_sub(since), true)
             };
+            // Pressure triggers exist to notice trouble starting. Once the level is up they
+            // fire every window on every resource, and the tick already looks four times a
+            // second: waking for each would only multiply the steps.
+            let watch_fds = watch_fds && self.engine.level() == Level::Green;
             let (cmd_ready, fd_fired) = self.wait(if watch_fds { &fds } else { &[] }, timeout);
             if cmd_ready {
                 let mut buf = [0u8; 8];

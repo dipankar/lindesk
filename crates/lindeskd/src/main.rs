@@ -246,7 +246,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Vec::new()
     } else {
-        let v = ioc.enable(config.io.iocost, &devices);
+        let v = ioc.enable(config.io.iocost, config.io.iocost_latency_targets, &devices);
         if !v.is_empty() {
             probe = lindesk_sys::probe(&roots, &Env::from_process());
         }

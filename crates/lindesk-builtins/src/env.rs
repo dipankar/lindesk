@@ -456,6 +456,11 @@ impl Environment for SysEnvironment {
     }
 
     fn related_targets(&self, pid: i32) -> Vec<Target> {
+        // The same program in another unit is the same application (a browser's renderers).
+        // A different program is something the application started for the person: every
+        // tab of a terminal is a descendant of the terminal, and each is its own workload.
+        let program = |p: i32| procfs::exe_name(&self.roots.proc, p).or_else(|| procfs::comm(&self.roots.proc, p).ok());
+        let Some(app) = program(pid) else { return Vec::new() };
         // parent → children for every live process, then the units of `pid`'s descendants.
         let mut children: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
         for p in procfs::list_pids(&self.roots.proc).unwrap_or_default() {
@@ -473,7 +478,8 @@ impl Environment for SysEnvironment {
             }
             for c in children.get(&p).into_iter().flatten() {
                 stack.push(*c);
-                if let Some(t) = self.target_for_pid(*c)
+                if program(*c).as_ref() == Some(&app)
+                    && let Some(t) = self.target_for_pid(*c)
                     && !out.contains(&t)
                 {
                     out.push(t);
@@ -985,5 +991,25 @@ mod tests {
         assert_eq!(family, vec![Target::user_unit(1000, "app-gnome-wavebox-3000.scope")]);
         assert!(!family.contains(&main));
         assert!(env.related_targets(3100).is_empty(), "an app in one scope has no other units");
+
+        // A terminal: every tab's shell is its child, in a scope of its own. The tabs are
+        // not the terminal; a build in one of them must not become "the focused app".
+        let server = format!("{UM}/app.slice/app-org.gnome.Terminal.slice/gnome-terminal-server.service");
+        process(&f, 4000, 1000, "gnome-terminal-", &server, 1010, None);
+        for (pid, tab) in [(4001, "vte-spawn-a.scope"), (4002, "vte-spawn-b.scope")] {
+            let scope = format!("{UM}/app.slice/app-org.gnome.Terminal.slice/{tab}");
+            process(&f, pid, 1000, "bash", &scope, 1011, None);
+            f.file(
+                &format!("proc/{pid}/stat"),
+                format!("{pid} (bash) S 4000 {pid} {pid} 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 1011 1 1\n"),
+            );
+            process(&f, pid + 100, 1000, "rustc", &scope, 1012, None);
+            f.file(
+                &format!("proc/{}/stat", pid + 100),
+                format!("{} (rustc) S {pid} {pid} {pid} 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 1012 1 1\n", pid + 100),
+            );
+        }
+        assert!(env.target_for_pid(4001).is_some());
+        assert!(env.related_targets(4000).is_empty(), "a terminal's tabs are not the terminal");
     }
 }
