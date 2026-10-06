@@ -435,6 +435,46 @@ The control-plane members (CONTROL-PLANE.md §5) are implemented once in
 interface's own authorization (polkit on the system bus, same-uid on the session bus);
 they use the generic `Hardware`, `Profiles` and `Calibrated` commands and `Reload`.
 
+### Engine behaviour the daemons rely on
+
+* **Bounded actuation.** A step spends at most `ACTUATE_BUDGET` (400 ms, and always at least
+  `ACTUATE_MIN_ACTIONS` = 4 actions) applying the plan; reverts go first; what doesn't fit
+  is planned again on the next step from the same applied state. An actuator can be slow
+  (systemd under load takes seconds per `SetUnitProperties`), and one long step used to
+  outlast the systemd watchdog. Consequence: after a pause, a level change or a restore
+  request, settings converge over a few steps instead of one.
+* **Liveness.** `Engine::set_progress_hook` is called after every actuator call. The
+  daemons store "alive now" from it, and their watchdog task pets systemd only while that
+  timestamp is fresh, so the watchdog fires on a stuck engine, not on a busy one.
+* **Reclassification.** Every target is reclassified every 15 s (`RECLASSIFY_MS`), as well as
+  when its main process changes, so classifiers that look at what a unit is doing right now
+  (`workload`) are heard. `ClassSet` events are emitted only when the class changes.
+* **Classifier order.** `rules` (priority 0), then `workload` (-10), then external
+  classifiers by their priority; explicit `set` and `[[override]]` win over all of them.
+* **lindesk's own units** (`lindeskd.service`, `lindesk-session.service`,
+  `lindesk-mcp.service`) are judged like critical ones by the safety caps (boosts allowed,
+  throttles rejected, whoever asks) but are *not classed* critical: their unit files give
+  them more (`CPUWeight`/`IOWeight` 1000 and 500, `MemoryMin`, `MemorySwapMax=0`,
+  `LimitMEMLOCK`, `OOMScoreAdjust`) than the class would, and both daemons `mlockall` at
+  startup (`lindesk_sys::syscalls::lock_memory`, on fault).
+* **iocost.** With `[io] iocost = "auto"` the broker enables iocost on every managed device
+  that is not on BFQ (`none`, `mq-deadline`, `kyber`), records the previous `io.cost.qos`
+  line in `<state-dir>/iocost.json`, and restores it on shutdown and `--restore`.
+
+### The `threshold` policy's contract with the host
+
+The policy is declarative (it returns the complete intent set each evaluation) and keeps
+its own state between evaluations: smoothed pressure, the level and its timers, the
+interaction epoch, AIMD limits per (unit, device), latched `memory.high` values, and **when
+each unit last had focus**. From that last map it derives the *warm set* (focus within
+`warm_for`, class normal or interactive, not the current foreground) and emits
+`cpu.weight`/`io.weight` = `warm_weight` and a `memory.low` within `warm_memory_budget` of
+RAM, most recently used first. A `Focus` event naming a different unit than the previous
+one starts a *switch epoch* (`switch_epoch`, capped at 1 s on battery); an `Interaction`
+extends the epoch by `epoch`. `memory.low` values are rounded up to `memory_low_step` so
+small changes in usage don't produce a new action every evaluation. The user-facing
+description is docs/src/guide/responsiveness.md.
+
 ### Operational notes
 
 * The state directory must be on tmpfs (the defaults `/run/lindesk`, `$XDG_RUNTIME_DIR/lindesk`
@@ -487,5 +527,5 @@ Newline-delimited JSON-RPC 2.0 over stdio; the host sends `initialize` first.
 ## Safety invariants (enforced in `lindesk-core::safety`, never in plugins)
 
 * No realtime CPU or I/O classes. Nothing below the configured floors (`io.max`, `memory.high`, `uclamp.max`).
-* Critical workloads can be boosted but never throttled.
+* Critical workloads, lindesk's own units and the focused app can be boosted but never throttled.
 * All changes are runtime-only and recorded with their original value, then restored on exit, on crash recovery, or with `lindeskctl restore`.

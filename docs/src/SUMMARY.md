@@ -4,6 +4,7 @@
 
 # User guide
 - [Installation](guide/install.md)
+- [How lindesk keeps the desktop responsive](guide/responsiveness.md)
 - [doctor: what your system supports](guide/doctor.md)
 - [Other priority daemons (conflicts)](guide/conflicts.md)
 - [Everyday use](guide/usage.md)

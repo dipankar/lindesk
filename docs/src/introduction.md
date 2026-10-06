@@ -4,6 +4,10 @@
 while compiles, copies, indexers and package upgrades run in the background. It needs no
 kernel patch and works on any distro.
 
+**The goal: a Linux desktop that stays as responsive under load as a Mac does.**
+[How lindesk keeps the desktop responsive](guide/responsiveness.md) lists every mechanism
+that serves it, with its defaults, and where lindesk still falls short of macOS.
+
 ```text
 before:  cargo build -j32 + 40 GB copy  →  desktop stutters, typing lags
 after:   same build, same copy          →  build and copy slow down a little,

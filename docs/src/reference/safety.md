@@ -15,7 +15,7 @@ never by plugins, so no plugin can break them.
    `io_iops_floor` (100) per direction; `cpu.uclamp.max` never below `uclamp_max_floor`
    (20%); `memory.high` never below `memory_high_floor` (256 MiB) nor below
    `memory_high_ratio_floor` (50%) of the target's current usage. Nothing is starved.
-4. **Critical workloads can be boosted but never throttled.** An intent that would throttle
+4. **Critical workloads, lindesk's own services and the focused app can be boosted but never throttled.** An intent that would throttle
    a `critical` target is rejected.
 5. **`memory.low` is bounded** to `memory_low_max_ratio` (25%) of RAM.
 6. **Runtime-only, always reversible.** Every change is made with runtime semantics

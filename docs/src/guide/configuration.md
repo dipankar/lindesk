@@ -62,6 +62,23 @@ warning: [plugins.steam-game]: no built-in or installed plugin has this name (ty
 | `[plugins.<name>]` | `enabled`, `priority`, `config = { … }` for any plugin, built-in or external |
 | `[[override]]` | admin rules that always win: pin a `class` and/or `settings` on units (`unit` glob) or processes (`comm` glob) |
 
+## Built-in plugins and their tunables
+
+`packaging/config/lindesk.toml` (also `lindeskctl config show`) documents every key with its
+default; `lindeskctl config show --resolved` prints the values after hardware scaling, with
+the reason for each.
+
+| Plugin | Kind | What you can tune under `[plugins.<name>.config]` |
+|---|---|---|
+| `threshold` | policy | level thresholds and timing (`enter.*`, `exit_ratio`, `foreground_yellow`, `foreground_red`, `red_after`, `recover_after`, dwell times); boosts (`epoch`, `switch_epoch`, `values.*`); warm apps (`warm_for`, `warm_weight`, `warm_memory_low_max`, `warm_memory_budget`); memory protection (`critical_memory_low`, `fg_memory_low_max`, `memory_low_step`, `memory_high_ratio`); the adaptive I/O limit (`aimd_*`) |
+| `workload` | classifier | what counts as a build (`min_processes`, `comms`, `extra_comms`), how long it stays background afterwards (`hold`), and the class it gets (`background` or `batch`) |
+| `rules` | classifier | `dirs`: where rule files are read from |
+| `psi` | sensor | PSI triggers (`triggers`, `stall`, `window`) |
+| `systemd`, `x11`, `cosmic` | actuator, adapters | bus, display |
+
+What each of these does, and why the defaults are what they are:
+[How lindesk keeps the desktop responsive](responsiveness.md).
+
 ## Turning plugins on and off
 
 ```console

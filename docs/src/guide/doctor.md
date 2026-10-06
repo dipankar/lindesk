@@ -79,6 +79,31 @@ action and 1 when something does, so `lindeskctl doctor -q && echo ok` works in 
 `findings`, `probe`, `services`, `control_plane`, `telemetry`, `requirements`,
 `needs_action`).
 
+## Tuning lindesk didn't make
+
+lindesk only makes runtime changes, so anything *persistent* that caps or reprioritises a
+unit, or pins an I/O scheduler, came from somewhere else: a tuning guide, another tool, an
+old experiment. `doctor` lists them, because their effect looks like a hardware problem.
+
+```console
+Tuning lindesk didn't make
+Limit outside lindesk    app-org.gnome.Terminal.slice: IOWeight=10, IOWriteBandwidthMax=/dev/nvme0n1 20M (~/.config/systemd/user/app-org.gnome.Terminal.slice.d/60-io-protection.conf)
+                         → everything in app-org.gnome.Terminal.slice shares this cap, which shows up as pressure with an
+                           idle disk/CPU; if you didn't mean it: rm … && systemctl --user daemon-reload
+I/O scheduler rule       ATTR{queue/scheduler}="bfq" (/etc/udev/rules.d/99-local-desktop-bfq.rules)
+                         → a udev rule pins the I/O scheduler; BFQ on a fast NVMe can collapse throughput under many
+                           parallel writers
+```
+
+It scans drop-ins under `/etc/systemd/system`, `/etc/systemd/user` and
+`~/.config/systemd/user` for resource-control settings (`IO*Max`, `IOWeight`, `CPUQuota`,
+`CPUWeight`, `AllowedCPUs`, `MemoryHigh`, `MemoryMax`, …) and `/etc/udev/rules.d` for rules
+that set `queue/scheduler`. A hard cap is a warning; a fixed weight is informational.
+After removing a drop-in, run `systemctl [--user] daemon-reload`; if the old `io.max` is
+still in the cgroup file, the `rm … && daemon-reload` line in the remedy is not enough on
+some systemd versions: write `MAJ:MIN rbps=max wbps=max riops=max wiops=max` to the slice's
+`io.max`, or restart the slice.
+
 ## Preflight
 
 Installers and package scripts run:

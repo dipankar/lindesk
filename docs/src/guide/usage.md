@@ -197,6 +197,25 @@ Every change lindesk makes is runtime-only and restored when its daemon stops (e
 crash). `restore` is the manual escape hatch; a running daemon would re-apply its
 settings, hence `--stop`.
 
+## What you'll see as you work
+
+Reasons in `explain`, `watch` and `events` are sentences, and they map one to one onto what
+lindesk does (all of it explained in [How lindesk keeps the desktop responsive](responsiveness.md)):
+
+| Reason starts with | Meaning |
+|---|---|
+| `foreground: interaction epoch boost` | you just clicked, typed or switched to this app |
+| `foreground: focused, no recent input (mild boost)` | it has focus and you're reading |
+| `warm: in front 40s ago; kept ready to switch back to` | you used it recently; its memory is protected |
+| `critical: protected (static)` | compositor, audio, session |
+| `YELLOW: system io pressure 65% > 20%; background yields` | the machine is busy |
+| `RED: foreground io stall 14% > 10%; AIMD step 3` | your app was actually stalling; background I/O is being limited |
+| `broker: …` | the setting came from `lindeskd` and was applied by your session agent |
+
+And in the class line: `← classifier 'rules': 50-background.toml:…` (a rule matched),
+`← classifier 'workload': build running (14 processes: rustc×9, cc1×5)` (a build was found
+in that unit), `← explicit` (`lindeskctl set`), or `(default)`.
+
 ## On, off, pause
 
 `lindeskctl status` (and plain `lindeskctl`) always says which of four states lindesk is in:

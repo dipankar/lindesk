@@ -24,7 +24,8 @@ with lindesk:     the same build, the same copy →  they slow down a little;
                                                    the window you're in stays smooth
 ```
 
-No kernel patch. No reboot. Any distro. Everything it changes, it undoes.
+The goal is a Linux desktop that stays as responsive under load as a Mac does. No kernel
+patch. No reboot. Any distro. Everything it changes, it undoes.
 
 > **Status: 0.1.0, early.** It runs daily on the author's GNOME/Wayland workstation; KDE,
 > COSMIC and X11 adapters exist and are tested in isolation. It has not yet earned the
@@ -102,14 +103,22 @@ memory control, uclamp, systemd's per-app units. What it lacks is something that
    while your foreground is still held up, and loosens as soon as it isn't.
 4. **A short boost when you act.** For about half a second after you click or type, the app
    you're using gets a bounded boost. Not a permanent priority: your battery will notice.
-5. **It is not allowed to hurt.** No realtime classes. Every throttle has a floor, so
+5. **The app you just left stays ready.** For half an hour after you leave a window, its
+   memory stays protected and it keeps a raised share, so switching back to your browser
+   doesn't mean waiting for it to be paged in again.
+6. **It is not allowed to hurt.** No realtime classes. Every throttle has a floor, so
    nothing is starved. Critical processes can be boosted, never throttled. Every change is
    runtime-only, recorded with the value it replaced, and reverted on exit, on a crash and
    on uninstall.
 
 It also notices builds: a terminal tab full of `rustc` and `cc1` is background work while it
 compiles, even though you started it by hand. The window you're looking at is never
-throttled, whatever is running in it.
+throttled, whatever is running in it. And it guarantees its own small share of the machine,
+so it can't stall along with the load it is managing.
+
+Every mechanism, its defaults and how to watch it work:
+[How lindesk keeps the desktop responsive](docs/src/guide/responsiveness.md), including an
+honest table of where this stands against macOS.
 
 ## It tells you what's wrong, including when it's not lindesk
 
