@@ -111,6 +111,9 @@ finish() {
 	for f in "$@"; do
 		[[ -n ${LINDESK_CHOWN:-} ]] && chown "$LINDESK_CHOWN" "$f"
 		info "built $f"
+		# apt reads a .deb as its unprivileged _apt user and prints a (harmless) notice when
+		# the file is in a directory that user can't enter, such as a home directory.
+		case $f in *.deb) info "  install: sudo dpkg -i $f   (or copy it to /tmp for 'apt install')" ;; esac
 	done
 	if [[ -n ${LINDESK_CHOWN:-} ]]; then chown "$LINDESK_CHOWN" "$DIST"; fi
 }

@@ -316,7 +316,9 @@ exec sleep 600
         })
         .collect();
     took.sort();
-    assert!(took[474] < Duration::from_millis(5), "p95 record() {:?}", took[474]);
+    // The claim is "never waits for the plugin" (which would be seconds), not a latency SLO:
+    // leave room for a loaded test machine.
+    assert!(took[474] < Duration::from_millis(50), "p95 record() {:?}", took[474]);
     assert!(took[499] < Duration::from_millis(200), "max record() {:?}", took[499]);
     assert!(p.stats().dropped > 100, "batches beyond the queue are dropped: {:?}", p.stats());
     assert_eq!(p.health(), Health::Running, "dropping is not a failure");

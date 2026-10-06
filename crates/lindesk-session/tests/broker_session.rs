@@ -308,8 +308,15 @@ async fn broker_control_plane_and_event_privacy() {
     })
     .await;
     assert_eq!(hw["latency"]["cpus"], map["cpus"]);
-    let recent = json(&plain.recent_events(500).await.unwrap());
-    assert!(recent.as_array().unwrap().iter().any(|e| e["name"] == "calibration.done"));
+    // The notice is emitted by the engine on its next step.
+    eventually("calibration.done notice", Duration::from_secs(10), || {
+        let plain = plain.clone();
+        async move {
+            let recent = json(&plain.recent_events(500).await.ok()?);
+            recent.as_array()?.iter().any(|e| e["name"] == "calibration.done").then_some(())
+        }
+    })
+    .await;
 
     assert!(broker.terminate().success());
 }

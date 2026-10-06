@@ -14,6 +14,14 @@ ExecStopPost=/usr/bin/lindesk-session --restore
 Restart=on-failure
 RestartSec=2s
 Slice=session.slice
+# Guaranteed minimum for the agent itself (see lindeskd.service): a high share when
+# contended, a working set that is neither reclaimed nor swapped, pages locked in RAM.
+CPUWeight=500
+IOWeight=500
+MemoryMin=24M
+MemoryLow=48M
+MemorySwapMax=0
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=graphical-session.target

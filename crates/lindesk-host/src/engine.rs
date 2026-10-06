@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use globset::{Glob, GlobMatcher};
 use lindesk_core::cgroup_path;
@@ -41,6 +41,12 @@ use crate::supervisor::SupervisorConfig;
 const PROC_REFRESH_MS: i64 = 5_000;
 /// How long a target whose classification hit a plugin error waits before retrying.
 const CLASSIFY_RETRY_MS: i64 = 5_000;
+/// Time one step may spend applying settings. An actuator can be slow (systemd under heavy
+/// load takes seconds per call), and a step that applies dozens of changes must not stall
+/// sensing and the daemon's liveness; what doesn't fit is planned again on the next step.
+const ACTUATE_BUDGET: Duration = Duration::from_millis(400);
+/// Actions always attempted per step, however slow, so a slow actuator still makes progress.
+const ACTUATE_MIN_ACTIONS: usize = 4;
 /// Every target is reclassified this often, so classifiers that look at what a unit is doing
 /// right now (a build starting or finishing) are heard without the unit's main process changing.
 const RECLASSIFY_MS: i64 = 15_000;
@@ -261,6 +267,8 @@ pub struct Engine {
     prev_step: Option<TimestampMs>,
     last_now: TimestampMs,
     state_dirty: bool,
+    /// Called after every actuator call and plugin poll: "the engine is alive, just busy".
+    progress: Option<Box<dyn Fn() + Send>>,
     /// Observe-only (`set_paused`): sensing and policy run, nothing is applied.
     paused: bool,
 }
@@ -313,6 +321,7 @@ impl Engine {
             prev_step: None,
             last_now: 0,
             state_dirty: false,
+            progress: None,
         })
     }
 
@@ -472,6 +481,18 @@ impl Engine {
     }
 
     /// File descriptors (PSI triggers) that should wake the daemon loop early.
+    /// Install a liveness callback, called after every actuator call during a step. Daemons
+    /// use it to tell "slow because the system is slow" from "stuck" for their watchdog.
+    pub fn set_progress_hook(&mut self, hook: Box<dyn Fn() + Send>) {
+        self.progress = Some(hook);
+    }
+
+    fn tick_progress(&self) {
+        if let Some(p) = &self.progress {
+            p();
+        }
+    }
+
     pub fn wake_fds(&self) -> Vec<RawFd> {
         self.registry.sensors.iter().filter(|s| s.meta.is_builtin()).flat_map(|s| s.plugin.wake_fds()).collect()
     }
@@ -541,8 +562,21 @@ impl Engine {
         // 6. Actuate.
         let t = Instant::now();
         self.applied.refresh_provenance(&resolution.desired);
-        for action in self.applied.plan(&resolution.desired) {
+        let plan = self.applied.plan(&resolution.desired);
+        let planned = plan.len();
+        let mut done = 0;
+        for action in plan {
+            // Reverts first (the plan lists them first) and a minimum of progress always; past
+            // the budget the rest waits for the next step, which plans from the same state.
+            if done >= ACTUATE_MIN_ACTIONS && t.elapsed() >= ACTUATE_BUDGET {
+                break;
+            }
             self.execute(action, "no longer requested by any policy", &mut cx);
+            done += 1;
+            self.tick_progress();
+        }
+        if done < planned {
+            tracing::debug!(done, planned, "actuation budget reached; the rest is applied on the next step");
         }
         for t in std::mem::take(&mut cx.gone) {
             self.forget_target(&t);
@@ -1200,6 +1234,7 @@ impl Engine {
         let mut cx = Ctx::new(self.last_now.max(lindesk_core::clock::now_ms()));
         for action in self.applied.restore_all() {
             self.execute(action, "restored", &mut cx);
+            self.tick_progress();
         }
         self.state_dirty = true;
         self.autosave();

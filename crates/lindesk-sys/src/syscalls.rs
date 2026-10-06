@@ -120,6 +120,18 @@ pub fn get_nice(pid: i32) -> io::Result<i8> {
     }
 }
 
+/// Lock this process's memory in RAM: pages already mapped and, as they are touched, every
+/// future one (`MCL_ONFAULT`, so nothing is prefaulted and the footprint stays what it is).
+///
+/// For the lindesk daemons: under heavy I/O or memory pressure an evicted code page means a
+/// major fault queued behind the very disk they are trying to relieve, which can stall them
+/// for seconds. Needs `CAP_IPC_LOCK` or enough `RLIMIT_MEMLOCK`; failure is harmless.
+pub fn lock_memory() -> io::Result<()> {
+    // SAFETY: mlockall takes flags only and affects this process's own mappings.
+    let rc = unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE | libc::MCL_ONFAULT) };
+    if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
 /// Set a thread's niceness (-20..=19). Lowering it needs `CAP_SYS_NICE` or an
 /// `RLIMIT_NICE` allowance.
 pub fn set_nice(pid: i32, nice: i8) -> io::Result<()> {

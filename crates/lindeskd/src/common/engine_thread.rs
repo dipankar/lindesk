@@ -505,6 +505,10 @@ struct Loop<H: Hooks> {
 impl<H: Hooks> Loop<H> {
     fn run(&mut self, ready: mpsc::Sender<()>) {
         let tick = self.engine.config().general.tick.max(MIN_STEP_SPACING);
+        // A step that applies many settings through a slow systemd is alive, not hung: the
+        // engine reports progress after each action so the watchdog only fires on a real stall.
+        let alive = self.alive.clone();
+        self.engine.set_progress_hook(Box::new(move || alive.store(now_ms(), Ordering::Relaxed)));
         self.load_pause();
         self.step();
         let _ = ready.send(());

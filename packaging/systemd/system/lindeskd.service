@@ -20,10 +20,25 @@ RuntimeDirectory=lindesk
 RuntimeDirectoryPreserve=yes
 StateDirectory=lindesk
 StateDirectoryMode=0750
-# The broker must stay responsive itself.
-CPUWeight=200
-IOWeight=200
-MemoryLow=32M
+# The broker must stay responsive itself, whatever the rest of the machine is doing: a
+# governor that stalls with the workload it governs is no use. It needs very little, so it
+# is guaranteed that little.
+#  - CPU and I/O: a high share when contended (it uses a fraction of a core) and a small
+#    nice boost. Never realtime.
+#  - Memory: its working set is never reclaimed (MemoryMin) or swapped (MemorySwapMax=0),
+#    and it locks its pages in RAM (mlockall, hence LimitMEMLOCK and CAP_IPC_LOCK), so a
+#    page fault can't park it behind the disk queue it is trying to relieve.
+#  - It is the last thing the OOM killer should pick.
+CPUWeight=1000
+IOWeight=1000
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=0
+MemoryMin=32M
+MemoryLow=64M
+MemorySwapMax=0
+LimitMEMLOCK=infinity
+OOMScoreAdjust=-900
 # Hardening. /sys and /sys/fs/cgroup must stay writable (no ProtectKernelTunables /
 # ProtectControlGroups): writing cgroup attributes is the daemon's job.
 NoNewPrivileges=yes
@@ -38,7 +53,7 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
-CapabilityBoundingSet=CAP_SYS_NICE CAP_SYS_RESOURCE CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL CAP_CHOWN CAP_FOWNER
+CapabilityBoundingSet=CAP_IPC_LOCK CAP_SYS_NICE CAP_SYS_RESOURCE CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL CAP_CHOWN CAP_FOWNER
 
 [Install]
 WantedBy=multi-user.target

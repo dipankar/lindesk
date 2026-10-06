@@ -26,6 +26,12 @@ $ makepkg -si                                       # Arch (packaging/aur; also 
 $ sudo apt install ./lindesk-telemetry_*_amd64.deb  # or ./lindesk-telemetry-*.rpm, pacman -U lindesk-telemetry-*
 ```
 
+If apt prints `N: Download is performed unsandboxed as root as file '…deb' couldn't be
+accessed by user '_apt'`, that is a notice, not an error: the package sits in a directory
+(usually your home) that apt's unprivileged `_apt` user can't read, so apt reads it as root
+instead. The install is complete. To avoid the notice, install from a world-readable place
+(`cp lindesk_*.deb /tmp/ && sudo apt install /tmp/lindesk_*.deb`) or use `sudo dpkg -i`.
+
 Installing `lindesk-telemetry` needs no configuration: its post-install reloads `lindeskd`
 (`systemctl reload-or-restart lindeskd`, a SIGHUP that loads new plugins without undoing
 anything) and every running `lindesk-session`, which discover the `telemetry` plugin and

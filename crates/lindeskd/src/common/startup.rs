@@ -39,6 +39,11 @@ pub fn check_requirements(
         }
         warnings.push(serde_json::to_value(w).unwrap_or(Value::Null));
     }
+    // Keep our own pages in RAM so a page fault can never queue us behind a saturated disk.
+    match lindesk_sys::syscalls::lock_memory() {
+        Ok(()) => tracing::debug!("memory locked (mlockall, on fault)"),
+        Err(e) => tracing::info!("could not lock memory ({e}); continuing, pages may be reclaimed under pressure"),
+    }
     tracing::info!(
         "lindesk starting: level {}, backend {}, {}",
         probe.support_level(),
