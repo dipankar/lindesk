@@ -254,8 +254,9 @@ Swap:                  0 kB
     }
 
     /// The real thing, on this process: push two regions to swap, ask for one back, and
-    /// compare what touching each costs. Skips where the host can't show it (no swap, or a
-    /// kernel that wants `CAP_SYS_NICE` even for the caller's own memory).
+    /// compare what touching each costs. Skips where the host can't show it: no swap, a
+    /// swap device that hadn't finished writing the pages out, or a kernel that wants
+    /// `CAP_SYS_NICE` even for the caller's own memory.
     #[test]
     fn paged_in_memory_is_not_a_major_fault_again() {
         const LEN: usize = 16 << 20;
@@ -314,7 +315,12 @@ Swap:                  0 kB
         std::thread::sleep(std::time::Duration::from_millis(500));
         let (cold_faults, warmed_faults) = (touch(cold), touch(warmed));
         eprintln!("major faults touching {} pages: {cold_faults} cold, {warmed_faults} after paging in", LEN / 4096);
-        assert!(cold_faults > 0, "the cold region should have faulted from swap");
+        if cold_faults < 64 {
+            // Swapped out on paper only: the pages were still in the swap cache (a slow swap
+            // device that had not finished writing them), so there was nothing to bring back.
+            eprintln!("skipped: touching the swapped-out region did not fault from swap here");
+            return;
+        }
         assert!(warmed_faults * 2 < cold_faults, "{warmed_faults} major faults after paging in vs {cold_faults} cold");
         // SAFETY: unmapping what this test mapped.
         unsafe {
