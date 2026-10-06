@@ -16,6 +16,8 @@ The first release.
 - **Apps you just left stay warm.** A recently used app keeps a raised share and its memory
   protected while you are in another window, so switching back to your browser doesn't wait
   for it to be paged in.
+- **An app is all of its processes.** Browsers put the window's process in one unit and
+  their renderers in another; focusing the window protects every unit the app runs in.
 - **Builds yield.** A terminal tab or app scope running compilers and linkers is background
   work while it builds. The focused app is never throttled.
 - **Foreground tracking** for GNOME (Shell extension), KDE (KWin script), COSMIC and X11.

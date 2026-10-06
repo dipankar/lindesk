@@ -276,7 +276,7 @@ impl ThresholdPolicy {
         self.st.level
     }
 
-    fn signals(&mut self, snap: &Snapshot, fg_unit: Option<&UnitState>) -> Signals {
+    fn signals(&mut self, snap: &Snapshot, fg_units: &[&UnitState]) -> Signals {
         let cfg = &self.cfg;
         for r in Resource::ALL {
             if let Some(s) = snap.system_pressure(r) {
@@ -289,12 +289,14 @@ impl ThresholdPolicy {
                 }
             }
         }
-        let fg = fg_unit.and_then(|u| {
-            Resource::ALL
-                .into_iter()
-                .filter_map(|r| latest(&u.pressure, r).map(|s| (r, f64::from(s.some_ratio()))))
-                .max_by(|a, b| a.1.total_cmp(&b.1))
-        });
+        // An application can span several units (a browser's renderers): the worst stall
+        // in any of them is the one the person feels.
+        let fg = fg_units
+            .iter()
+            .flat_map(|u| {
+                Resource::ALL.into_iter().filter_map(|r| latest(&u.pressure, r).map(|s| (r, f64::from(s.some_ratio()))))
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1));
         Signals { some: self.st.some.map(|e| e.value), mem_full: self.st.mem_full.value, fg }
     }
 
@@ -531,10 +533,12 @@ impl Policy for ThresholdPolicy {
 
         let fg_target: Option<Target> =
             snap.foreground.clone().or_else(|| snap.foreground_unit().map(|u| u.target.clone()));
-        let fg_unit = snap.units.iter().find(|u| Some(&u.target) == fg_target.as_ref());
         let is_fg = |u: &UnitState| u.foreground || Some(&u.target) == fg_target.as_ref();
+        // Every unit of the focused application: the window's own and those of its children.
+        let fg_units: Vec<&UnitState> = snap.units.iter().filter(|u| is_fg(u)).collect();
+        let fg_set: BTreeSet<&Target> = fg_units.iter().map(|u| &u.target).chain(fg_target.as_ref()).collect();
 
-        let sig = self.signals(snap, fg_unit);
+        let sig = self.signals(snap, &fg_units);
         self.process_events(snap, fg_target.as_ref());
         self.update_level(now, &sig);
         let epoch = self.epoch_active(now, fg_target.as_ref());
@@ -641,8 +645,11 @@ impl Policy for ThresholdPolicy {
         self.st.aimd.retain(|k, _| live_aimd.contains(k));
         self.st.mem_high.retain(|t, _| live_batch.contains(t));
 
-        if let Some(t) = &fg_target {
-            let mem_low = fg_unit
+        for &t in &fg_set {
+            let mem_low = snap
+                .units
+                .iter()
+                .find(|u| &u.target == t)
                 .and_then(|u| u.usage.as_ref())
                 .filter(|u| u.mem_current > 0)
                 .map(|u| round_up(u.mem_current, cfg.memory_low_step).min(fg_memory_low_max));
@@ -674,7 +681,7 @@ impl Policy for ThresholdPolicy {
 
         // Warm apps: used recently, not in front right now. Keep their memory resident and
         // give them a little more than the default share, so coming back to them is instant.
-        if let Some(t) = &fg_target {
+        for &t in &fg_set {
             self.st.last_focus.insert(t.clone(), now);
         }
         let warm_ms = ms(cfg.warm_for);
@@ -684,13 +691,8 @@ impl Policy for ThresholdPolicy {
             let mut budget = (snap.caps.hardware.mem_total as f64 * cfg.warm_memory_budget) as u64;
             let unlimited = snap.caps.hardware.mem_total == 0;
             // Most recently used first: they get the memory budget before older ones.
-            let mut warm: Vec<(&Target, TimestampMs)> = self
-                .st
-                .last_focus
-                .iter()
-                .filter(|(t, _)| Some(*t) != fg_target.as_ref())
-                .map(|(t, at)| (t, *at))
-                .collect();
+            let mut warm: Vec<(&Target, TimestampMs)> =
+                self.st.last_focus.iter().filter(|(t, _)| !fg_set.contains(*t)).map(|(t, at)| (t, *at)).collect();
             warm.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
             for (t, at) in warm {
                 let Some(u) = snap.units.iter().find(|u| &u.target == t) else { continue };

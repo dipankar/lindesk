@@ -36,7 +36,11 @@ and your input:
 | any X11 session | built into `lindesk-session` (EWMH), with XInput2 for input |
 
 The window's process is mapped to its systemd unit (the app's scope), and that unit is what
-gets tuned. On GNOME Wayland the extension loads at the next login after the first install;
+gets tuned. An app isn't always one unit: Chromium-based browsers (Chrome, Wavebox, Edge,
+Electron apps) put the window's process in one scope and their renderer and GPU processes
+in another. lindesk follows the focused process's descendants, so every unit the app runs
+in is foreground: all of them get the boost, none is throttled, and a stall in any of them
+counts as you waiting. The set is refreshed every 5 s as tabs open and close. On GNOME Wayland the extension loads at the next login after the first install;
 `lindeskctl status` says `foreground tracking: waiting for GNOME extension` until then.
 
 ## 2. Classes

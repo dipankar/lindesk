@@ -1105,3 +1105,54 @@ fn usage_mem(s: &mut Snapshot, name: &str, bytes: u64) {
     let u = s.units.iter_mut().find(|u| u.target == unit(name)).expect("unit in the snapshot");
     u.usage = Some(Usage { mem_current: bytes, interval_ms: 1000, ..Default::default() });
 }
+
+#[test]
+fn every_unit_of_the_focused_app_is_foreground() {
+    // A browser: the window's process in one scope, the renderers in another. The host marks
+    // both as foreground; both must get the boost, and a stall in either one counts.
+    let mut p = ThresholdPolicy::default();
+    let mk = |now: i64, renderer_stall: f64| {
+        let mut s = Snap::at(now)
+            .unit("browser-main.scope", QosClass::Normal)
+            .unit("browser-renderers.scope", QosClass::Normal)
+            .unit("indexer.service", QosClass::Background)
+            .fg("browser-main.scope", 0.0)
+            .build();
+        let r = s.units.iter_mut().find(|u| u.target == unit("browser-renderers.scope")).unwrap();
+        r.foreground = true;
+        r.pressure = vec![sample(
+            now,
+            Scope::Cgroup("/browser-renderers.scope".into()),
+            Resource::Io,
+            renderer_stall,
+            Some(0.0),
+        )];
+        r.usage = Some(Usage { mem_current: 900 << 20, interval_ms: 1000, ..Default::default() });
+        s
+    };
+    let mut s = mk(1000, 0.0);
+    s.events.push(Event::Focus {
+        ts: 1000,
+        pid: None,
+        app_id: None,
+        target: Some(unit("browser-main.scope")),
+        source: "test".into(),
+    });
+    let out = p.evaluate(&s).unwrap();
+    for u in ["browser-main.scope", "browser-renderers.scope"] {
+        assert_eq!(get(&out, u, Knob::CpuWeight), Some(Setting::CpuWeight { value: 500 }), "{u}");
+        assert_eq!(get(&out, u, Knob::IoWeight), Some(Setting::IoWeight { value: 500 }), "{u}");
+        assert!(get(&out, u, Knob::UclampMin).is_some(), "{u}");
+    }
+    assert_eq!(get(&out, "browser-renderers.scope", Knob::MemoryLow), Some(Setting::MemoryLow { bytes: 960 << 20 }));
+
+    // The renderers stall on I/O (the main process doesn't): that is the person waiting.
+    let mut level = None;
+    for i in 1..=8 {
+        level = p.evaluate(&mk(1000 + i * 250, 0.5)).unwrap().level;
+    }
+    assert_eq!(level, Some(Level::Red), "a stall in the renderers' unit drives the level");
+    // And neither unit is ever among the throttled.
+    let out = p.evaluate(&mk(4000, 0.5)).unwrap();
+    assert!(out.intents.iter().filter(|i| i.target != unit("indexer.service")).all(|i| !is_throttle(&i.setting)));
+}

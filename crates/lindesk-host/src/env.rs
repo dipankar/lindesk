@@ -31,6 +31,13 @@ pub trait Environment: Send {
 
     /// Total RAM in bytes (used by safety caps).
     fn mem_total(&self) -> Option<u64>;
+
+    /// Other units that are part of the same application as `pid`: the units of its
+    /// descendant processes. Browsers put their window-owning process in one scope and
+    /// their renderers in another; focusing the window must protect both.
+    fn related_targets(&self, _pid: i32) -> Vec<Target> {
+        Vec::new()
+    }
 }
 
 impl<E: Environment + Sync + ?Sized> Environment for Arc<E> {
@@ -51,6 +58,9 @@ impl<E: Environment + Sync + ?Sized> Environment for Arc<E> {
     }
     fn mem_total(&self) -> Option<u64> {
         (**self).mem_total()
+    }
+    fn related_targets(&self, pid: i32) -> Vec<Target> {
+        (**self).related_targets(pid)
     }
 }
 

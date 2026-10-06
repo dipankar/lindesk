@@ -47,6 +47,8 @@ const CLASSIFY_RETRY_MS: i64 = 5_000;
 const ACTUATE_BUDGET: Duration = Duration::from_millis(400);
 /// Actions always attempted per step, however slow, so a slow actuator still makes progress.
 const ACTUATE_MIN_ACTIONS: usize = 4;
+/// How often the focused application's other units are looked up again.
+const FAMILY_REFRESH_MS: i64 = 5_000;
 /// Every target is reclassified this often, so classifiers that look at what a unit is doing
 /// right now (a build starting or finishing) are heard without the unit's main process changing.
 const RECLASSIFY_MS: i64 = 15_000;
@@ -255,6 +257,11 @@ pub struct Engine {
     targets: BTreeMap<Target, TargetState>,
     explicit: BTreeMap<Target, (QosClass, String)>,
     foreground: Option<Target>,
+    /// The focused window's process, and the other units its descendants run in (an app
+    /// split over several scopes, e.g. a browser's renderers): foreground too.
+    foreground_pid: Option<i32>,
+    foreground_family: Vec<Target>,
+    family_checked: TimestampMs,
     pending: Vec<Event>,
     carry: Vec<Event>,
     unsent: Vec<Event>,
@@ -309,6 +316,9 @@ impl Engine {
             targets: BTreeMap::new(),
             explicit: BTreeMap::new(),
             foreground: None,
+            foreground_pid: None,
+            foreground_family: Vec::new(),
+            family_checked: 0,
             pending: Vec::new(),
             carry: Vec::new(),
             unsent: Vec::new(),
@@ -506,6 +516,8 @@ impl Engine {
         self.notes.remove(target);
         if self.foreground.as_ref() == Some(target) {
             self.foreground = None;
+            self.foreground_pid = None;
+            self.foreground_family.clear();
         }
         self.state_dirty = true;
         self.autosave();
@@ -711,6 +723,8 @@ impl Engine {
                         .or_else(|| app_id.as_deref().and_then(|a| self.env.target_for_app_id(a)));
                 }
                 self.foreground = target.clone();
+                self.foreground_pid = *pid;
+                self.refresh_family();
                 (*pid, target.clone())
             }
             Event::Interaction { pid, target, .. } => {
@@ -731,8 +745,31 @@ impl Engine {
         }
     }
 
+    /// Recompute which other units belong to the focused application.
+    fn refresh_family(&mut self) {
+        self.family_checked = self.last_now;
+        let primary = self.foreground.clone();
+        self.foreground_family = match (self.foreground_pid, &primary) {
+            (Some(pid), Some(_)) => {
+                self.env.related_targets(pid).into_iter().filter(|t| Some(t) != primary.as_ref()).collect()
+            }
+            _ => Vec::new(),
+        };
+        for t in self.foreground_family.clone() {
+            self.targets.entry(t).or_default();
+        }
+    }
+
+    fn is_foreground(&self, t: &Target) -> bool {
+        self.foreground.as_ref() == Some(t) || self.foreground_family.contains(t)
+    }
+
     fn classify(&mut self, cx: &mut Ctx) {
         let now = cx.now;
+        // A browser spawns renderers into other scopes as you open tabs.
+        if self.foreground_pid.is_some() && now - self.family_checked >= FAMILY_REFRESH_MS {
+            self.refresh_family();
+        }
         let keys: Vec<Target> = self.targets.keys().cloned().collect();
         let mut errors: Vec<(Target, String, PluginError)> = Vec::new();
         for t in keys {
@@ -795,7 +832,7 @@ impl Engine {
             .map(|(t, st)| UnitState {
                 target: t.clone(),
                 class: st.class(),
-                foreground: self.foreground.as_ref() == Some(t),
+                foreground: self.is_foreground(t),
                 pressure: st
                     .cgroup
                     .as_ref()
@@ -1341,7 +1378,7 @@ impl Engine {
             target: t.clone(),
             comm: st.and_then(|s| s.proc.as_ref()).map(|p| p.comm.clone()).filter(|c| !c.is_empty()),
             class: st.and_then(|s| s.decision.as_ref()).map(|d| d.class),
-            foreground: self.foreground.as_ref() == Some(t),
+            foreground: self.is_foreground(t),
             settings: self.applied.for_target(t).map(|e| e.current.clone()).collect(),
         }
     }

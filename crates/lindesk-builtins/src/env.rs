@@ -414,6 +414,16 @@ fn sort_oldest_first(pids: &mut [i32], mut start: impl FnMut(i32) -> Option<u64>
 }
 
 /// Start time of a process in clock ticks since boot (`/proc/<pid>/stat` field 22).
+/// Descendants inspected when collecting an application's units.
+const MAX_FAMILY_PROCS: usize = 4096;
+
+/// A process's parent pid, from `/proc/<pid>/stat`.
+fn ppid(proc_root: &Path, pid: i32) -> Option<i32> {
+    let stat = std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok()?;
+    let rest = stat.get(stat.rfind(')')? + 1..)?;
+    rest.split_whitespace().nth(1)?.parse().ok()
+}
+
 fn start_time(proc_root: &Path, pid: i32) -> Option<u64> {
     let stat = std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok()?;
     // `comm` may contain spaces and parentheses: fields resume after the last ')'.
@@ -442,6 +452,34 @@ impl Environment for SysEnvironment {
     fn target_for_pid(&self, pid: i32) -> Option<Target> {
         let cg = procfs::cgroup(&self.roots.proc, pid).ok()??;
         cgroup_path::parse(&cg).target().filter(|t| self.manages(t))
+    }
+
+    fn related_targets(&self, pid: i32) -> Vec<Target> {
+        // parent → children for every live process, then the units of `pid`'s descendants.
+        let mut children: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
+        for p in procfs::list_pids(&self.roots.proc).unwrap_or_default() {
+            if let Some(pp) = ppid(&self.roots.proc, p) {
+                children.entry(pp).or_default().push(p);
+            }
+        }
+        let mut out: Vec<Target> = Vec::new();
+        let mut stack = vec![pid];
+        let mut seen = 0usize;
+        while let Some(p) = stack.pop() {
+            seen += 1;
+            if seen > MAX_FAMILY_PROCS {
+                break;
+            }
+            for c in children.get(&p).into_iter().flatten() {
+                stack.push(*c);
+                if let Some(t) = self.target_for_pid(*c)
+                    && !out.contains(&t)
+                {
+                    out.push(t);
+                }
+            }
+        }
+        out
     }
 
     fn target_for_app_id(&self, app_id: &str) -> Option<Target> {
@@ -919,5 +957,32 @@ mod tests {
         }
         println!("mem_total: {:?}", e.mem_total());
         assert!(!w.is_empty());
+    }
+
+    #[test]
+    fn an_app_split_over_two_scopes_is_one_family() {
+        let (_dir, f) = host();
+        // Like Wavebox/Chromium: the window's process in one scope, its renderers in another.
+        let main_scope = format!("{UM}/app.slice/app-org.chromium.Chromium-3000.scope");
+        let child_scope = format!("{UM}/app.slice/app-gnome-wavebox-3000.scope");
+        let other_scope = format!("{UM}/app.slice/app-gnome-editor-3100.scope");
+        process(&f, 3000, 1000, "wavebox", &main_scope, 1000, None);
+        process(&f, 3001, 1000, "wavebox", &child_scope, 1001, None);
+        process(&f, 3002, 1000, "wavebox", &child_scope, 1002, None);
+        process(&f, 3100, 1000, "editor", &other_scope, 1003, None);
+        let stat = |pid: i32, ppid: i32| {
+            f.file(
+                &format!("proc/{pid}/stat"),
+                format!("{pid} (wave box) S {ppid} {pid} {pid} 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 1000 1 1\n"),
+            );
+        };
+        stat(3001, 3000); // renderer: child of the main process
+        stat(3002, 3001); // grandchild
+        let env = SysEnvironment::new(Roots::under(f.root()), Mode::User(1000));
+        let main = env.target_for_pid(3000).unwrap();
+        let family = env.related_targets(3000);
+        assert_eq!(family, vec![Target::user_unit(1000, "app-gnome-wavebox-3000.scope")]);
+        assert!(!family.contains(&main));
+        assert!(env.related_targets(3100).is_empty(), "an app in one scope has no other units");
     }
 }
