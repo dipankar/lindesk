@@ -613,7 +613,7 @@ impl Policy for ThresholdPolicy {
         let limited: BTreeSet<&Target> = if level == Level::Red && snap.caps.io_max {
             snap.units
                 .iter()
-                .filter(|u| !is_fg(u) && u.class != QosClass::Critical)
+                .filter(|u| !is_fg(u) && u.class != QosClass::Critical && !u.serving)
                 .filter(|u| {
                     u.class.yields()
                         || (cfg.limit_heavy_neighbours
@@ -638,6 +638,12 @@ impl Policy for ThresholdPolicy {
                     plan.set(t, Setting::IoWeight { value: w }, "critical: protected (static)");
                     plan.set(t, Setting::MemoryLow { bytes: critical_memory_low }, "critical: protected (static)");
                 }
+                continue;
+            }
+            // The app in use is connected to this unit and waits on what it does: holding it
+            // back would hold the foreground back. Nothing is set, so anything applied
+            // earlier is taken off.
+            if u.serving && u.class != QosClass::Critical {
                 continue;
             }
             match u.class {

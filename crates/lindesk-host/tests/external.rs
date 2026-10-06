@@ -84,6 +84,7 @@ fn python_plugin_serves_several_kinds() {
             top_comm: None,
             visible: None,
             audible: None,
+            serving: false,
         }],
         events: vec![],
         foreground: None,

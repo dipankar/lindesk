@@ -278,6 +278,8 @@ pub struct Engine {
     /// The last `Event::Audible` of each source, and the units of those apps.
     audible_pids: BTreeMap<String, (TimestampMs, Vec<i32>)>,
     audible: BTreeSet<Target>,
+    /// Units the app in use has an open local connection to (set by the host daemon).
+    serving: BTreeSet<Target>,
     pending: Vec<Event>,
     carry: Vec<Event>,
     unsent: Vec<Event>,
@@ -339,6 +341,7 @@ impl Engine {
             visible: None,
             audible_pids: BTreeMap::new(),
             audible: BTreeSet::new(),
+            serving: BTreeSet::new(),
             pending: Vec::new(),
             carry: Vec::new(),
             unsent: Vec::new(),
@@ -500,6 +503,29 @@ impl Engine {
     /// The units with a window on screen, when an adapter reports visibility.
     pub fn visible_targets(&self) -> Option<&BTreeSet<Target>> {
         self.visible.as_ref()
+    }
+
+    /// Units the app in use is connected to and waiting on; policies leave them unthrottled.
+    /// Replaces the previous set.
+    pub fn set_serving(&mut self, serving: BTreeSet<Target>) {
+        if serving != self.serving {
+            self.serving = serving;
+        }
+    }
+
+    /// The units that are throttled now, or would be if they weren't serving the app in
+    /// use, with their cgroups: the only ones worth checking for a connection to it.
+    pub fn serving_candidates(&self) -> Vec<(Target, String)> {
+        self.targets
+            .iter()
+            .filter(|(t, st)| !self.is_foreground(t) && st.class() != QosClass::Critical)
+            .filter(|(t, st)| {
+                st.class().yields()
+                    || self.serving.contains(*t)
+                    || self.applied.for_target(t).any(|e| lindesk_core::safety::is_throttle(&e.current))
+            })
+            .filter_map(|(t, st)| Some((t.clone(), st.cgroup.clone()?)))
+            .collect()
     }
 
     /// The units of apps that are playing or recording sound.
@@ -943,6 +969,7 @@ impl Engine {
                 top_comm: st.proc.as_ref().map(|p| p.comm.clone()).filter(|c| !c.is_empty()),
                 visible: self.is_visible(t),
                 audible: (!self.audible_pids.is_empty()).then(|| self.audible.contains(t)),
+                serving: self.serving.contains(t),
             })
             .collect();
         Snapshot {

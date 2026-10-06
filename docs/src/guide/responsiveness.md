@@ -247,6 +247,24 @@ This matters most on consumer SSDs that collapse under sustained writes (a hot o
 full QLC drive can drop from gigabytes to a few megabytes per second). Nothing makes such
 a disk fast; the targets decide who waits for it.
 
+**What your app is waiting on is not held back.** macOS lends a thread's priority to
+whoever it is waiting on, even in another process. Linux can't, and nothing outside the
+kernel can add that. What lindesk can do is not make it worse. A browser showing a page
+from a dev server that is rebuilding in a terminal tab is the everyday case: the tab is a
+build, it yields, and the page you are looking at loads slowly *because of lindesk*. So
+while the level is raised, lindesk looks at the local connections of the app in front and
+finds which throttled units hold the other ends. Those are left alone for as long as the
+connection is there (`lindeskctl events` says `… is connected to …: not throttling it`).
+
+It sees TCP on the loopback interface: a dev server, a local database, a language server
+on a port. It does not see Unix sockets, D-Bus, or containers with their own network.
+
+```toml
+[plugins.serving]
+enabled = true
+config = { refresh = "5s" }
+```
+
 ## 7. Staying responsive itself
 
 A governor that stalls with the workload it governs is no use. lindesk needs little, and
@@ -313,7 +331,7 @@ that isn't there.
 | Background QoS throttles CPU and I/O | weights enforced by latency targets, `cpu.idle`, uclamp, adaptive `io.max` | the limits are driven by measured stalls, so they react within about a second rather than pre-emptively |
 | Memory compression and keeping recent apps ready | warm apps (`memory.low`), and an app that did get swapped out is paged back in when you switch to it; works with zram and zswap | macOS also compresses and decompresses per app ahead of time; here it starts at the moment of the switch |
 | App Nap, timer coalescing | apps that are off screen and silent nap: timers coalesced, efficient cores | gentler than macOS (nothing is throttled or frozen), it doesn't look at power assertions, and it needs the desktop to say what is on screen (GNOME and Hyprland so far) |
-| Priority inheritance across IPC | critical services (compositor, audio, portals, D-Bus, the journal) are always protected | true inheritance is a kernel matter and out of reach. What can be approximated: never throttling what the foreground is waiting on, found by tracing wake-ups (eBPF), or running a sched_ext scheduler that follows wake-up chains |
+| Priority inheritance across IPC | critical services (compositor, audio, portals, D-Bus, the journal) are always protected, and a unit the app in use has an open local TCP connection to is not throttled | not inheritance: nothing is boosted, lindesk only stops holding back what you are waiting on, and only where it can see the connection. Unix sockets, D-Bus and containers are not seen. Closer would need tracing wake-ups in the kernel (eBPF) or a sched_ext scheduler that follows wake-up chains |
 | One vendor tuned the whole stack for known hardware | hardware detection, profiles, calibration | every machine is different; that's why the bench is there |
 
 We'd rather show the gap than hide it. The parts that matter most for "it doesn't stutter

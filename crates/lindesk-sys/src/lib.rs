@@ -28,6 +28,7 @@ pub mod procfs;
 pub mod psi;
 pub mod requirements;
 pub mod roots;
+pub mod sockets;
 pub mod swap;
 pub mod syscalls;
 pub mod telemetry;

@@ -228,6 +228,12 @@ yellow_batch_uclamp_max = 40.0
 # enabled = true
 # config = { ui_nice = -4, background_nice = 5, refresh = "5s" }
 
+# Don't throttle what the app in use is connected to over loopback TCP (a dev server in a
+# build tab, a local database), for as long as the connection is open.
+# [plugins.serving]
+# enabled = true
+# config = { refresh = "5s" }
+
 # The built-in `rules` classifier: TOML rule files, see packaging/config/rules.d/.
 # Directories are read in this order and files within a directory by name; later files
 # are consulted first, so /etc beats /usr/share and the user's rules beat both. A file

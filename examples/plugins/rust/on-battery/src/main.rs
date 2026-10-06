@@ -295,6 +295,7 @@ mod tests {
             top_comm: None,
             visible: None,
             audible: None,
+            serving: false,
         }
     }
 

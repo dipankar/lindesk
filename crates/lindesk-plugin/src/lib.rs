@@ -251,6 +251,7 @@ mod tests {
             top_comm: None,
             visible: None,
             audible: None,
+            serving: false,
         });
         let out = h.evaluate(&s).unwrap();
         assert_eq!(out.level, Some(Level::Yellow));

@@ -80,6 +80,7 @@ impl Snap {
             top_comm: None,
             visible: None,
             audible: None,
+            serving: false,
         });
         self
     }
@@ -586,6 +587,40 @@ fn apps_put_away_nap_until_they_are_seen_or_heard() {
     p.evaluate(&snap(0, Some(true), false)).unwrap();
     p.evaluate(&snap(1000, Some(false), false)).unwrap();
     assert!(awake(&p.evaluate(&snap(500_000, Some(false), false)).unwrap(), "editor.scope"));
+}
+
+#[test]
+fn what_the_app_in_use_is_connected_to_is_not_throttled() {
+    // The browser in front talks to a dev server in a build tab (batch) and to a database
+    // (background). Both would yield, and in RED be limited.
+    let snap = |now: i64, serving: bool| {
+        let mut s = desktop(now, 0.3).usage("build.scope", 0, 100 * MIB_U, 1 << 30).build();
+        let served = ["build.scope", "tracker.service", "session.slice"].map(unit);
+        for u in s.units.iter_mut().filter(|u| served.contains(&u.target)) {
+            u.serving = serving;
+        }
+        s
+    };
+    let mut p = ThresholdPolicy::new(crisp());
+    for now in (0..=1000).step_by(TICK as usize) {
+        p.evaluate(&snap(now, false)).unwrap();
+    }
+    let out = p.evaluate(&snap(1250, false)).unwrap();
+    assert_eq!(out.level, Some(Level::Red));
+    assert!(io_max(&out, "build.scope").is_some() && get(&out, "build.scope", Knob::CpuIdle).is_some());
+    assert!(get(&out, "tracker.service", Knob::IoWeight).is_some());
+
+    // The connection is noticed: nothing is asked of either any more, so the host takes
+    // off what was applied. Critical units keep their protection.
+    let out = p.evaluate(&snap(1500, true)).unwrap();
+    assert_eq!(out.level, Some(Level::Red));
+    assert!(knobs(&out, "build.scope").is_empty(), "{:?}", knobs(&out, "build.scope"));
+    assert!(knobs(&out, "tracker.service").is_empty());
+    assert_eq!(get(&out, "session.slice", Knob::IoWeight), Some(Setting::IoWeight { value: 200 }));
+
+    // The connection closes: back to yielding like any other build.
+    let out = p.evaluate(&snap(2500, false)).unwrap();
+    assert!(io_max(&out, "build.scope").is_some());
 }
 
 #[test]

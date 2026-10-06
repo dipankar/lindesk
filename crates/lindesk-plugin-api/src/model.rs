@@ -583,6 +583,10 @@ pub struct UnitState {
     /// reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audible: Option<bool>,
+    /// The app in use has an open local connection to this unit (a dev server, a database):
+    /// it is waiting on what this unit does, so policies should not throttle it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub serving: bool,
 }
 
 /// What the host can do on this machine (a summary of the probe).

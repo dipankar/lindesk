@@ -15,6 +15,7 @@ mod common;
 mod dbus;
 mod iocost;
 mod pagein;
+mod serving;
 mod threadqos;
 
 use std::path::PathBuf;
@@ -154,6 +155,29 @@ fn restore(cli: &Cli) -> ExitCode {
 }
 
 /// Devices `[io] devices` names, else the disks behind `/` and `/home`.
+/// Leaving what the app in use is connected to unthrottled (`[plugins.serving]`), unless
+/// disabled, misconfigured or a dry run.
+fn start_serving(engine: &Engine, config: &Config, roots: &Roots, dry_run: bool) -> Option<serving::Serving> {
+    let pc = config.plugin(serving::NAME);
+    if dry_run || !pc.enabled {
+        return None;
+    }
+    let cfg = match serving::ServingConfig::from_json(&pc.config) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("[plugins.{}] config: {e}; off", serving::NAME);
+            return None;
+        }
+    };
+    match serving::Serving::spawn(cfg, roots.clone(), engine.options().host.clone(), engine.host_sender()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!("serving: cannot start the worker thread: {e}");
+            None
+        }
+    }
+}
+
 /// Per-thread priorities in the app in use (`[plugins.thread-qos]`), unless disabled,
 /// misconfigured or a dry run.
 fn start_threadqos(
@@ -392,6 +416,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     hooks.calibrator = (!dry_run).then_some(calibrator);
     hooks.pagein = start_pagein(&engine, &config, &roots, dry_run);
     hooks.threadqos = start_threadqos(&engine, &config, &roots, &cli.state_dir, dry_run);
+    hooks.serving = start_serving(&engine, &config, &roots, dry_run);
     let summary = format!(
         "lindeskd ready: level {}, profile {profile_name}, {}, mode broker{}, rules {}",
         probe.support_level(),

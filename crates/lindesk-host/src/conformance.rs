@@ -280,6 +280,7 @@ fn unit(name: &str, class: QosClass, comm: &str, foreground: bool) -> UnitState 
         top_comm: Some(comm.into()),
         visible: None,
         audible: None,
+        serving: false,
     }
 }
 

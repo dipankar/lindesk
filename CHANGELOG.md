@@ -21,6 +21,9 @@ The first release.
 - **The threads you are waiting on go first.** In the app in use, the UI threads of
   Chromium- and Firefox-based apps (compositor, I/O, main) are put ahead of their worker
   pools, recognised by thread name; undone when focus moves on (`[plugins.thread-qos]`).
+- **What your app is waiting on is not held back.** A unit the app in use has an open
+  local connection to (a dev server rebuilding in a terminal tab, a database) is not
+  throttled while the connection lasts (`[plugins.serving]`).
 - **App Nap.** An app whose windows are all off screen and that is silent has its timers
   coalesced and is steered to the efficient cores. Nothing is frozen or capped; it wakes
   when it is seen or heard (GNOME and Hyprland; needs PipeWire).

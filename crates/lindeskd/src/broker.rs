@@ -129,6 +129,8 @@ pub struct BrokerHooks {
     pub pagein: Option<crate::pagein::PageIn>,
     /// Puts the UI threads of the app in use ahead of its other threads.
     pub threadqos: Option<crate::threadqos::ThreadQos>,
+    /// Finds what the app in use is connected to, so it isn't throttled.
+    pub serving: Option<crate::serving::Serving>,
     sessions: BTreeSet<u32>,
     last_sent: BTreeMap<u32, String>,
 }
@@ -153,6 +155,7 @@ impl BrokerHooks {
             calibrator: None,
             pagein: None,
             threadqos: None,
+            serving: None,
             sessions: BTreeSet::new(),
             last_sent: BTreeMap::new(),
         }
@@ -276,6 +279,9 @@ impl Hooks for BrokerHooks {
         }
         if let Some(t) = self.threadqos.as_mut() {
             t.observe(engine);
+        }
+        if let Some(s) = self.serving.as_mut() {
+            s.observe(engine);
         }
         let mut states = BTreeMap::new();
         for uid in &self.sessions {
