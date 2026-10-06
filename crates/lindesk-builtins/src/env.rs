@@ -15,8 +15,9 @@
 //!   exists), plus every `.service`/`.scope` directly or nested under them, `init.scope`
 //!   excepted. Only `Manager::User(<uid>)` targets are returned.
 //!
-//! The watched set comes from one walk of the cgroup tree and is cached for about one tick
-//! ([`DEFAULT_CACHE_TTL`]).
+//! The watched set comes from one walk of the cgroup tree and is cached for a couple of
+//! seconds ([`DEFAULT_CACHE_TTL`]). A unit that appears in between is still found at once
+//! when it gets focus: focus is resolved from the window's process, not from the walk.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -33,7 +34,7 @@ use lindesk_sys::{Roots, procfs};
 use crate::actuators::systemd::client::{SystemdClient, UNIT_IFACE, unit_interface};
 
 /// How long a walk of the cgroup tree is reused.
-pub const DEFAULT_CACHE_TTL: Duration = Duration::from_millis(900);
+pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(2);
 
 /// Slices of a user manager that the session agent watches (with every unit below them).
 pub const USER_SLICES: &[&str] = &["session.slice", "app.slice", "background.slice", "lindesk-batch.slice"];

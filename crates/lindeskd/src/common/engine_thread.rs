@@ -929,12 +929,16 @@ impl<H: Hooks> Loop<H> {
         }
         let actions = self.engine.set_paused(paused);
         for a in &actions {
-            tracing::info!(target: "lindesk::action", "{a}");
+            tracing::debug!(target: "lindesk::action", "{a}");
         }
         let host = self.engine.options().host.clone();
         if paused {
             self.pause = Pause { paused: true, since_ms: Some(now), until_ms: until, by: Some(by.to_string()) };
-            tracing::info!("paused by {by}: every setting reverted, observing only ({})", self.pause.text(now));
+            tracing::info!(
+                "paused by {by}: {} settings reverted, observing only ({})",
+                actions.len(),
+                self.pause.text(now)
+            );
             self.engine.push_event(super::startup::notice(
                 "lindesk.paused",
                 &host,
@@ -968,11 +972,11 @@ impl<H: Hooks> Loop<H> {
     }
 
     fn shutdown(&mut self) {
-        tracing::info!("shutting down: restoring everything lindesk changed");
         let actions = self.engine.shutdown();
         for a in &actions {
-            tracing::info!(target: "lindesk::action", "{a}");
+            tracing::debug!(target: "lindesk::action", "{a}");
         }
+        tracing::info!("shutting down: restored everything lindesk changed ({} settings)", actions.len());
         self.hooks.shutdown(&mut self.engine);
         let _ = self.notify.send(Notification::Stopped);
     }

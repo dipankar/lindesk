@@ -71,19 +71,6 @@ async fn pause_resume_and_auto_resume() {
     let st = json(qos.status().await).await;
     assert_eq!(st["daemon"]["state"], "paused");
     assert!(st["text"].as_str().unwrap().contains("⏸ paused (resumes in"), "{}", st["text"]);
-    if managed {
-        // Reverts are applied within the engine's per-step time budget, so with a slow
-        // systemd they take a few steps rather than one long one.
-        let reverted = eventually_opt(Duration::from_secs(5), || {
-            let qos = qos.clone();
-            async move { (!boosted(&serde_json::from_str(&qos.status().await.ok()?).ok()?)).then_some(()) }
-        })
-        .await
-        .is_some();
-        assert!(reverted, "settings reverted on pause: {}", st["status"]["foreground"]);
-    } else {
-        eprintln!("note: test process is not in a user unit; skipping the settings checks");
-    }
     let has = |name: &'static str| {
         let qos = qos.clone();
         async move {
@@ -92,6 +79,15 @@ async fn pause_resume_and_auto_resume() {
         }
     };
     eventually("lindesk.paused notice", Duration::from_secs(10), || has("lindesk.paused")).await;
+    if managed {
+        // What the pause put back is in its notice. (The status can't tell: a paused agent
+        // keeps deciding, and like a dry run it lists what it would apply.)
+        let events: Value = serde_json::from_str(&qos.recent_events(200).await.unwrap()).unwrap();
+        let paused = events.as_array().unwrap().iter().find(|e| e["name"] == "lindesk.paused").unwrap();
+        assert!(paused["data"]["restored"].as_u64().unwrap_or(0) > 0, "settings reverted on pause: {paused}");
+    } else {
+        eprintln!("note: test process is not in a user unit; skipping the settings checks");
+    }
 
     eventually("auto-resume", Duration::from_secs(15), || {
         let qos = qos.clone();
