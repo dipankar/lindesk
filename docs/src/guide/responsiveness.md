@@ -225,12 +225,12 @@ that isn't there.
 
 | macOS | lindesk today | Gap |
 |---|---|---|
-| QoS classes on every thread and queue (user-interactive … background) | five classes per app unit, set by rules, by what's running, and by focus | per unit, not per thread; apps can't yet declare their own (an SDK is planned) |
+| QoS classes on every thread and queue (user-interactive … background) | five classes per app unit, set by rules, by what's running, and by focus | per unit, not per thread. The kernel has the per-thread knobs (nice, uclamp, I/O priority); what Linux lacks is knowing which thread is which. Possible in two parts: an API for apps to declare it, and thread-name rules for the browser engines, which name their threads |
 | The focused app and the window server are favoured | focus tracking, interaction and switch boosts, critical compositor | on GNOME Wayland it needs the Shell extension |
-| Background QoS throttles CPU and I/O | weights, `cpu.idle`, uclamp, adaptive `io.max` | driven by measured stalls, so it reacts within about a second rather than pre-emptively |
-| Memory compression and keeping recent apps ready | warm apps (`memory.low`), works with zram and zswap | no proactive page-in of a swapped app when you focus it (planned) |
-| App Nap, timer coalescing | — | not attempted |
-| Priority inheritance across IPC | — | a kernel matter; out of reach from userspace |
+| Background QoS throttles CPU and I/O | weights enforced by latency targets, `cpu.idle`, uclamp, adaptive `io.max` | the limits are driven by measured stalls, so they react within about a second rather than pre-emptively |
+| Memory compression and keeping recent apps ready | warm apps (`memory.low`), works with zram and zswap | an app that did get swapped out is not paged back in when you focus it. Possible: the kernel lets a privileged process ask for another's pages (`process_madvise` with `MADV_WILLNEED`, Linux 5.10+). Next on the list |
+| App Nap, timer coalescing | — | possible in a careful form: timer slack and a CPU ceiling for apps that are unfocused, silent and hold no inhibitor. Mostly a battery feature; not started |
+| Priority inheritance across IPC | critical services (compositor, audio, portals, D-Bus, the journal) are always protected | true inheritance is a kernel matter and out of reach. What can be approximated: never throttling what the foreground is waiting on, found by tracing wake-ups (eBPF), or running a sched_ext scheduler that follows wake-up chains |
 | One vendor tuned the whole stack for known hardware | hardware detection, profiles, calibration | every machine is different; that's why the bench is there |
 
 We'd rather show the gap than hide it. The parts that matter most for "it doesn't stutter
