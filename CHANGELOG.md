@@ -16,6 +16,8 @@ The first release.
 - **Apps you just left stay warm.** A recently used app keeps a raised share and its memory
   protected while you are in another window, so switching back to your browser doesn't wait
   for it to be paged in.
+- **A swapped-out app is read back in when you switch to it**, in one go and in the
+  background, instead of one stalled page fault at a time (`[plugins.pagein]`).
 - **An app is all of its processes.** Browsers put the window's process in one unit and
   their renderers in another; focusing the window protects every unit the app runs in.
 - **Builds yield.** A terminal tab or app scope running compilers and linkers is background

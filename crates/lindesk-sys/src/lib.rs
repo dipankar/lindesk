@@ -22,6 +22,7 @@ pub mod fixture;
 pub mod foreign;
 pub mod hardware;
 pub mod iocost;
+pub mod pagein;
 pub mod probe;
 pub mod procfs;
 pub mod psi;

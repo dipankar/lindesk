@@ -14,6 +14,7 @@ mod broker;
 mod common;
 mod dbus;
 mod iocost;
+mod pagein;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -146,6 +147,29 @@ fn restore(cli: &Cli) -> ExitCode {
 }
 
 /// Devices `[io] devices` names, else the disks behind `/` and `/home`.
+/// Page-in on focus (`[plugins.pagein]`), unless disabled, misconfigured or a dry run.
+fn start_pagein(engine: &Engine, config: &Config, roots: &Roots, dry_run: bool) -> Option<pagein::PageIn> {
+    let pc = config.plugin(pagein::NAME);
+    if dry_run || !pc.enabled {
+        return None;
+    }
+    let cfg = match pagein::PageInConfig::from_json(&pc.config) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("[plugins.{}] config: {e}; page-in on focus is off", pagein::NAME);
+            return None;
+        }
+    };
+    let host = engine.options().host.clone();
+    match pagein::PageIn::spawn(cfg, roots.clone(), host, engine.host_sender()) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::warn!("page-in on focus: cannot start the worker thread: {e}");
+            None
+        }
+    }
+}
+
 fn managed_devices(config: &Config, probe: &Probe, roots: &Roots) -> Vec<BlockDev> {
     if config.io.devices.is_empty() {
         return probe.devices().into_iter().cloned().collect();
@@ -329,6 +353,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let calibrator = Calibrator::new(calibration.clone(), roots.clone(), lindesk_core::clock::now_ms(), false);
     let calibration = dbus::CalibrationSetup { roots: roots.clone(), path: calibration, busy: calibrator.busy() };
     hooks.calibrator = (!dry_run).then_some(calibrator);
+    hooks.pagein = start_pagein(&engine, &config, &roots, dry_run);
     let summary = format!(
         "lindeskd ready: level {}, profile {profile_name}, {}, mode broker{}, rules {}",
         probe.support_level(),

@@ -216,6 +216,12 @@ yellow_background_uclamp_max = "auto"
 yellow_batch_io_weight = 1
 yellow_batch_uclamp_max = 40.0
 
+# Page-in on focus: when you switch to an app, read whatever of it is in swap back in one
+# go instead of one stalled page fault at a time. Never into the last `reserve` of memory.
+# [plugins.pagein]
+# enabled = true
+# config = { budget = "1GiB", cooldown = "30s", min = "4MiB", reserve = 0.05 }
+
 # The built-in `rules` classifier: TOML rule files, see packaging/config/rules.d/.
 # Directories are read in this order and files within a directory by name; later files
 # are consulted first, so /etc beats /usr/share and the user's rules beat both. A file

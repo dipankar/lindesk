@@ -123,6 +123,8 @@ pub struct BrokerHooks {
     /// Re-checks the requirement warnings (maintenance tick, after a versioned change).
     pub requirements_watch: Option<crate::common::startup::RequirementsWatch>,
     pub calibrator: Option<Calibrator>,
+    /// Pages a swapped-out app back in when it gets focus.
+    pub pagein: Option<crate::pagein::PageIn>,
     sessions: BTreeSet<u32>,
     last_sent: BTreeMap<u32, String>,
 }
@@ -145,6 +147,7 @@ impl BrokerHooks {
             pause_file: None,
             requirements_watch: None,
             calibrator: None,
+            pagein: None,
             sessions: BTreeSet::new(),
             last_sent: BTreeMap::new(),
         }
@@ -262,6 +265,9 @@ impl Hooks for BrokerHooks {
         let epoch = self.metrics.epoch_active();
         if let Some(c) = self.calibrator.as_mut() {
             c.tick(engine, report, epoch);
+        }
+        if let Some(p) = self.pagein.as_mut() {
+            p.observe(engine);
         }
         let mut states = BTreeMap::new();
         for uid in &self.sessions {

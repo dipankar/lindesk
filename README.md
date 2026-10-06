@@ -106,7 +106,8 @@ memory control, uclamp, systemd's per-app units. What it lacks is something that
    you're using gets a bounded boost. Not a permanent priority: your battery will notice.
 5. **The app you just left stays ready.** For half an hour after you leave a window, its
    memory stays protected and it keeps a raised share, so switching back to your browser
-   doesn't mean waiting for it to be paged in again.
+   doesn't mean waiting for it to be paged in again. If it was swapped out anyway, it is
+   read back in one go the moment you switch to it.
 6. **It is not allowed to hurt.** No realtime classes. Every throttle has a floor, so
    nothing is starved. Critical processes can be boosted, never throttled. Every change is
    runtime-only, recorded with the value it replaced, and reverted on exit, on a crash and

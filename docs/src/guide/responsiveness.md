@@ -16,7 +16,7 @@ notice it, with the defaults and where to see each one working.
 |---|---|---|
 | Always | Compositor, audio and the session stay protected; background services and builds get a smaller share | `lindeskctl explain <app>` |
 | You click or type | The focused app gets a strong, bounded boost for 500 ms | `lindeskctl watch` (⚡) |
-| You switch apps | The app you switched to gets that boost for 3 s | `lindeskctl events -f` |
+| You switch apps | The app you switched to gets that boost for 3 s, and whatever of it is in swap is read back in | `lindeskctl events -f` |
 | You leave an app | It stays *warm* for 30 minutes: memory protected, raised share | `lindeskctl explain <app>` → `warm:` |
 | The machine gets busy | Background and batch work yield: lower weights, CPU caps | level **YELLOW** |
 | Your app actually stalls | Background I/O is limited, tightening until the stall stops | level **RED** |
@@ -108,6 +108,25 @@ An app that had focus within the last **30 minutes** is *warm*:
 * all warm apps together may protect at most 25 % of RAM, most recently used first.
 
 Only `normal` and `interactive` apps warm up; a build tab that once had focus still yields.
+
+**And when an app did end up in swap.** Protection has limits: leave an app alone for a
+few hours on a busy machine and part of it is in swap anyway. Normally it then comes back
+one page fault at a time, each one a stalled thread, which is the "window is there but
+nothing answers" feeling. When you switch to an app, lindesk asks the kernel to read that
+app's swapped-out memory back in one go, in the background, while the switch boost gives
+it the CPU and I/O share to repaint. On the development machine, touching 4,096 pages that
+had been swapped out cost 4,096 blocking faults; after paging in, none.
+
+It is held back by what the machine can afford: at most 1 GiB per switch, never into the
+last 5 % of memory (bringing one app back must not push another out), and not again for
+the same app within 30 s. `lindeskctl events` shows each one
+(`bringing 244 MiB of … back from swap`). It needs Linux 5.10 and runs in the broker.
+
+```toml
+[plugins.pagein]
+enabled = true
+config = { budget = "1GiB", cooldown = "30s", min = "4MiB", reserve = 0.05 }
+```
 
 ```toml
 [plugins.threshold.config]
@@ -228,7 +247,7 @@ that isn't there.
 | QoS classes on every thread and queue (user-interactive … background) | five classes per app unit, set by rules, by what's running, and by focus | per unit, not per thread. The kernel has the per-thread knobs (nice, uclamp, I/O priority); what Linux lacks is knowing which thread is which. Possible in two parts: an API for apps to declare it, and thread-name rules for the browser engines, which name their threads |
 | The focused app and the window server are favoured | focus tracking, interaction and switch boosts, critical compositor | on GNOME Wayland it needs the Shell extension |
 | Background QoS throttles CPU and I/O | weights enforced by latency targets, `cpu.idle`, uclamp, adaptive `io.max` | the limits are driven by measured stalls, so they react within about a second rather than pre-emptively |
-| Memory compression and keeping recent apps ready | warm apps (`memory.low`), works with zram and zswap | an app that did get swapped out is not paged back in when you focus it. Possible: the kernel lets a privileged process ask for another's pages (`process_madvise` with `MADV_WILLNEED`, Linux 5.10+). Next on the list |
+| Memory compression and keeping recent apps ready | warm apps (`memory.low`), and an app that did get swapped out is paged back in when you switch to it; works with zram and zswap | macOS also compresses and decompresses per app ahead of time; here it starts at the moment of the switch |
 | App Nap, timer coalescing | — | possible in a careful form: timer slack and a CPU ceiling for apps that are unfocused, silent and hold no inhibitor. Mostly a battery feature; not started |
 | Priority inheritance across IPC | critical services (compositor, audio, portals, D-Bus, the journal) are always protected | true inheritance is a kernel matter and out of reach. What can be approximated: never throttling what the foreground is waiting on, found by tracing wake-ups (eBPF), or running a sched_ext scheduler that follows wake-up chains |
 | One vendor tuned the whole stack for known hardware | hardware detection, profiles, calibration | every machine is different; that's why the bench is there |

@@ -464,6 +464,22 @@ impl Engine {
         self.foreground.as_ref()
     }
 
+    /// The other units of the focused application (a browser's renderers), not including
+    /// [`Engine::foreground`] itself.
+    pub fn foreground_family(&self) -> &[Target] {
+        &self.foreground_family
+    }
+
+    /// The process that owns the focused window, when the adapter reported one.
+    pub fn foreground_pid(&self) -> Option<i32> {
+        self.foreground_pid
+    }
+
+    /// The cgroup of a known target, relative to the cgroup mount.
+    pub fn target_cgroup(&self, target: &Target) -> Option<String> {
+        self.targets.get(target)?.cgroup.clone()
+    }
+
     /// What lindesk currently has applied (simulated in `dry_run`).
     pub fn applied(&self) -> &AppliedState {
         &self.applied
