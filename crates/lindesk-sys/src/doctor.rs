@@ -185,7 +185,9 @@ pub fn findings(p: &Probe) -> Vec<Finding> {
                 Info,
                 "I/O scheduler",
                 status.join(", "),
-                Some("ioprio and io.weight are inert on 'none'/'mq-deadline' unless iocost is enabled"),
+                Some(
+                    "io.weight is inert on 'none'/'mq-deadline'/'kyber' unless iocost is enabled (lindeskd does that with io.iocost = \"auto\")",
+                ),
             );
         } else {
             push(Ok, "I/O scheduler", status.join(", "), None);

@@ -1,10 +1,10 @@
 //! iocost management: enable the iocost controller on managed disks and put the previous
 //! `io.cost.qos` lines back on shutdown and `--restore`.
 //!
-//! With the `none` scheduler (the default for NVMe and most SSDs) `io.weight` does nothing,
-//! so with `[io] iocost = "auto"` the broker enables iocost on every managed device whose
-//! scheduler is `none`; devices on BFQ (whose own `io.weight` works) or another scheduler are
-//! left alone. `"on"` enables it on every managed device; `"off"` never touches it.
+//! Without BFQ (`none`, `mq-deadline`, `kyber`: the defaults for NVMe and most SSDs)
+//! `io.weight` does nothing, so with `[io] iocost = "auto"` the broker enables iocost on every
+//! managed device that isn't on BFQ; BFQ devices (whose own `io.weight` works) are left
+//! alone. `"on"` enables it on every managed device; `"off"` never touches it.
 //!
 //! Before writing, the previous line is persisted in `<state-dir>/iocost.json`, so a crash
 //! between enabling and recording can't lose it. Restoring writes every saved line back and
@@ -43,10 +43,12 @@ pub fn decide(toggle: Toggle, dev: &BlockDev, already_enabled: bool) -> Decision
     match toggle {
         Toggle::Off => Decision::Skip("[io] iocost = \"off\"".into()),
         Toggle::On => Decision::Enable,
+        // iocost is an rq-qos policy, independent of the elevator: with `none`,
+        // `mq-deadline` or `kyber` it is the only thing that makes io.weight effective.
+        // BFQ does its own weighting, and running both would double-control the device.
         Toggle::Auto => match dev.scheduler.as_deref() {
-            Some("none") => Decision::Enable,
             Some("bfq") => Decision::Skip("on BFQ, io.weight already works".into()),
-            Some(other) => Decision::Skip(format!("scheduler is {other}")),
+            Some(_) => Decision::Enable,
             None => Decision::Skip("no I/O scheduler information".into()),
         },
     }
@@ -198,7 +200,8 @@ mod tests {
         let dl = dev((8, 16), "sdb", "mq-deadline");
         assert_eq!(decide(Toggle::Auto, &nvme, false), Decision::Enable);
         assert!(matches!(decide(Toggle::Auto, &hdd, false), Decision::Skip(_)));
-        assert!(matches!(decide(Toggle::Auto, &dl, false), Decision::Skip(_)));
+        assert_eq!(decide(Toggle::Auto, &dl, false), Decision::Enable, "iocost works under any elevator");
+        assert_eq!(decide(Toggle::Auto, &dev((259, 0), "nvme0n1", "kyber"), false), Decision::Enable);
         assert_eq!(decide(Toggle::On, &hdd, false), Decision::Enable);
         assert!(matches!(decide(Toggle::Off, &nvme, false), Decision::Skip(_)));
         assert!(matches!(decide(Toggle::On, &nvme, true), Decision::Skip(_)));
