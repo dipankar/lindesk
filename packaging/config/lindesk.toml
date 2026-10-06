@@ -222,6 +222,12 @@ yellow_batch_uclamp_max = 40.0
 # enabled = true
 # config = { budget = "1GiB", cooldown = "30s", min = "4MiB", reserve = 0.05 }
 
+# Per-thread priorities inside the app in use: the UI threads of browser engines (Chromium,
+# Firefox, Electron apps) go ahead of their worker threads while the app has focus.
+# [plugins.thread-qos]
+# enabled = true
+# config = { ui_nice = -4, background_nice = 5, refresh = "5s" }
+
 # The built-in `rules` classifier: TOML rule files, see packaging/config/rules.d/.
 # Directories are read in this order and files within a directory by name; later files
 # are consulted first, so /etc beats /usr/share and the user's rules beat both. A file

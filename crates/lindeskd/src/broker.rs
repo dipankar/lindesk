@@ -127,6 +127,8 @@ pub struct BrokerHooks {
     pub calibrator: Option<Calibrator>,
     /// Pages a swapped-out app back in when it gets focus.
     pub pagein: Option<crate::pagein::PageIn>,
+    /// Puts the UI threads of the app in use ahead of its other threads.
+    pub threadqos: Option<crate::threadqos::ThreadQos>,
     sessions: BTreeSet<u32>,
     last_sent: BTreeMap<u32, String>,
 }
@@ -150,6 +152,7 @@ impl BrokerHooks {
             requirements_watch: None,
             calibrator: None,
             pagein: None,
+            threadqos: None,
             sessions: BTreeSet::new(),
             last_sent: BTreeMap::new(),
         }
@@ -271,6 +274,9 @@ impl Hooks for BrokerHooks {
         if let Some(p) = self.pagein.as_mut() {
             p.observe(engine);
         }
+        if let Some(t) = self.threadqos.as_mut() {
+            t.observe(engine);
+        }
         let mut states = BTreeMap::new();
         for uid in &self.sessions {
             let json = self.state(engine, *uid);
@@ -285,6 +291,12 @@ impl Hooks for BrokerHooks {
 
     fn pause_file(&self) -> Option<PathBuf> {
         self.pause_file.clone()
+    }
+
+    fn shutdown(&mut self, _engine: &mut Engine) {
+        if let Some(t) = self.threadqos.as_mut() {
+            t.stop();
+        }
     }
 
     fn requirements(&self) -> Value {

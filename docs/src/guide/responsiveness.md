@@ -95,6 +95,32 @@ On hybrid CPUs (Intel P/E cores, ARM big.LITTLE with EAS) `uclamp.min` also stee
 foreground toward the fast cores, and `uclamp.max` on background work keeps it on the
 efficient ones.
 
+**Inside the app: the threads you are waiting on go first.** A browser is not one thing.
+It has a compositor and an I/O thread that decide whether scrolling is smooth, and a pool
+of twenty-odd workers running scripts and decoding images. When the pool is busy the
+kernel gives the compositor one share in twenty-odd, and the page you are looking at
+stutters because of work on the same page. macOS avoids this because apps tag their
+threads with a QoS class. Nothing tags them on Linux, but browser engines *name* them.
+lindesk recognises Chromium (Chrome, Edge, Brave, Wavebox, every Electron app) and Firefox
+by those names, and while such an app has focus it raises its UI threads (the main thread,
+the compositor, the I/O thread, raster: nice −4) and lowers the ones that only keep house.
+Niceness competes inside the app's own cgroup, so this moves CPU between the app's threads
+and takes nothing from anyone else. It is undone when focus moves on, and a thread whose
+priority the app set itself is left alone.
+
+```toml
+[plugins.thread-qos]
+enabled = true
+config = { ui_nice = -4, background_nice = 5, refresh = "5s" }
+
+# Another program that names its threads:
+[[plugins.thread-qos.config.engines]]
+name = "my-toolkit"
+markers = ["MyIOThread"]            # a process with a thread of this name is one
+ui = ["MyRenderThread", "MyIO*"]
+background = ["MyIndexer*"]
+```
+
 ## 4. Apps you just left stay warm
 
 This is what makes switching back to a browser instant. Without it, an app is only
@@ -282,7 +308,7 @@ that isn't there.
 
 | macOS | lindesk today | Gap |
 |---|---|---|
-| QoS classes on every thread and queue (user-interactive … background) | five classes per app unit, set by rules, by what's running, and by focus | per unit, not per thread. The kernel has the per-thread knobs (nice, uclamp, I/O priority); what Linux lacks is knowing which thread is which. Possible in two parts: an API for apps to declare it, and thread-name rules for the browser engines, which name their threads |
+| QoS classes on every thread and queue (user-interactive … background) | five classes per app unit, set by rules, by what's running, and by focus; inside the app in use, the UI threads of browser engines (Chromium, Firefox) go ahead of their workers | threads are told apart by name, so only engines that name them are covered, and with two levels rather than five. Apps can't yet declare their own threads' classes (an API is the missing half) |
 | The focused app and the window server are favoured | focus tracking, interaction and switch boosts, critical compositor | on GNOME Wayland it needs the Shell extension |
 | Background QoS throttles CPU and I/O | weights enforced by latency targets, `cpu.idle`, uclamp, adaptive `io.max` | the limits are driven by measured stalls, so they react within about a second rather than pre-emptively |
 | Memory compression and keeping recent apps ready | warm apps (`memory.low`), and an app that did get swapped out is paged back in when you switch to it; works with zram and zswap | macOS also compresses and decompresses per app ahead of time; here it starts at the moment of the switch |

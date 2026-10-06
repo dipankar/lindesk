@@ -18,6 +18,9 @@ The first release.
   for it to be paged in.
 - **A swapped-out app is read back in when you switch to it**, in one go and in the
   background, instead of one stalled page fault at a time (`[plugins.pagein]`).
+- **The threads you are waiting on go first.** In the app in use, the UI threads of
+  Chromium- and Firefox-based apps (compositor, I/O, main) are put ahead of their worker
+  pools, recognised by thread name; undone when focus moves on (`[plugins.thread-qos]`).
 - **App Nap.** An app whose windows are all off screen and that is silent has its timers
   coalesced and is steered to the efficient cores. Nothing is frozen or capped; it wakes
   when it is seen or heard (GNOME and Hyprland; needs PipeWire).

@@ -15,6 +15,7 @@ mod common;
 mod dbus;
 mod iocost;
 mod pagein;
+mod threadqos;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -145,10 +146,44 @@ fn restore(cli: &Cli) -> ExitCode {
         tracing::info!("restored iocost on {restored} device(s)");
     }
     ok &= failed == 0;
+    let threads = threadqos::restore(&cli.state_dir, &roots);
+    if threads > 0 {
+        tracing::info!("put {threads} thread priorities back");
+    }
     if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
 /// Devices `[io] devices` names, else the disks behind `/` and `/home`.
+/// Per-thread priorities in the app in use (`[plugins.thread-qos]`), unless disabled,
+/// misconfigured or a dry run.
+fn start_threadqos(
+    engine: &Engine,
+    config: &Config,
+    roots: &Roots,
+    state_dir: &std::path::Path,
+    dry_run: bool,
+) -> Option<threadqos::ThreadQos> {
+    let pc = config.plugin(threadqos::NAME);
+    if dry_run || !pc.enabled {
+        return None;
+    }
+    let cfg = match threadqos::ThreadQosConfig::from_json(&pc.config, config.safety.nice_min) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("[plugins.{}] config: {e}; per-thread priorities are off", threadqos::NAME);
+            return None;
+        }
+    };
+    let host = engine.options().host.clone();
+    match threadqos::ThreadQos::spawn(cfg, roots.clone(), state_dir, host, engine.host_sender()) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::warn!("per-thread priorities: cannot start the worker thread: {e}");
+            None
+        }
+    }
+}
+
 /// Page-in on focus (`[plugins.pagein]`), unless disabled, misconfigured or a dry run.
 fn start_pagein(engine: &Engine, config: &Config, roots: &Roots, dry_run: bool) -> Option<pagein::PageIn> {
     let pc = config.plugin(pagein::NAME);
@@ -356,6 +391,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let calibration = dbus::CalibrationSetup { roots: roots.clone(), path: calibration, busy: calibrator.busy() };
     hooks.calibrator = (!dry_run).then_some(calibrator);
     hooks.pagein = start_pagein(&engine, &config, &roots, dry_run);
+    hooks.threadqos = start_threadqos(&engine, &config, &roots, &cli.state_dir, dry_run);
     let summary = format!(
         "lindeskd ready: level {}, profile {profile_name}, {}, mode broker{}, rules {}",
         probe.support_level(),
