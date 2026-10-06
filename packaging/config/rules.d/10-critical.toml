@@ -5,11 +5,6 @@
 # "xdg-desktop-por").
 
 [[rule]]
-name = "lindesk"
-class = "critical"
-unit = ["lindeskd.service", "lindesk-session.service", "lindesk-mcp.service"]
-
-[[rule]]
 name = "compositors"
 class = "critical"
 comm = [

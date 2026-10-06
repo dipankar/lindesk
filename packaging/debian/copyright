@@ -9,3 +9,9 @@ License: MIT or Apache-2.0
  The full license texts are in /usr/share/licenses/lindesk/LICENSE-MIT and
  /usr/share/licenses/lindesk/LICENSE-APACHE. The Apache License 2.0 is also
  available in /usr/share/common-licenses/Apache-2.0.
+
+Comment:
+ The lindesk-session binary links the cosmic-protocols crate (GPL-3.0-only, used by the
+ built-in COSMIC adapter) and is therefore distributed under the GNU General Public License
+ version 3; see /usr/share/licenses/lindesk/THIRD-PARTY.md and
+ /usr/share/common-licenses/GPL-3. The other binaries are MIT or Apache-2.0.

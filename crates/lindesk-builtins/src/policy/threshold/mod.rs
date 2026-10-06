@@ -132,6 +132,10 @@ struct State {
     aimd: BTreeMap<(Target, String), Aimd>,
     /// Latched `memory.high` per batch target.
     mem_high: BTreeMap<Target, u64>,
+    /// When each app last had focus (for the warm set).
+    last_focus: BTreeMap<Target, TimestampMs>,
+    /// The app the last `Focus` event named (to tell a switch from a re-focus).
+    last_focused: Option<Target>,
 }
 
 /// The inputs of one evaluation, after smoothing.
@@ -157,6 +161,19 @@ fn idx(r: Resource) -> usize {
         Resource::Io => 1,
         Resource::Memory => 2,
     }
+}
+
+/// `w`, or the weight already planned for this knob when that is higher.
+fn weight_at_least(plan: &Plan, t: &Target, knob: Knob, w: u64) -> u64 {
+    match plan.get(t, knob) {
+        Some(Setting::CpuWeight { value } | Setting::IoWeight { value }) => w.max(*value),
+        _ => w,
+    }
+}
+
+/// `v` rounded up to a multiple of `step`.
+fn round_up(v: u64, step: u64) -> u64 {
+    if step == 0 { v } else { v.div_ceil(step).saturating_mul(step) }
 }
 
 fn ms(d: Duration) -> i64 {
@@ -284,13 +301,21 @@ impl ThresholdPolicy {
     /// Apply focus/interaction events to the epoch state.
     fn process_events(&mut self, snap: &Snapshot, fg: Option<&Target>) {
         let epoch_ms = i64::try_from(self.res.epoch_ms).unwrap_or(i64::MAX);
+        // On battery the switch boost is capped at one second: enough to repaint, not a habit.
+        let switch_ms =
+            if self.res.on_battery { ms(self.cfg.switch_epoch).min(1000) } else { ms(self.cfg.switch_epoch) };
         let mut events: Vec<&Event> = snap.events.iter().collect();
         events.sort_by_key(|e| e.ts());
         for e in events {
             match e {
                 Event::Focus { ts, target, .. } => {
                     if let Some(t) = target.as_ref().or(fg) {
-                        let until = ts.saturating_add(epoch_ms);
+                        // Switching to another app earns the longer boost: it has to page
+                        // itself back in and repaint. Re-focusing the same one is a keypress.
+                        let switched = self.st.last_focused.as_ref() != Some(t);
+                        self.st.last_focused = Some(t.clone());
+                        let len = if switched { switch_ms.max(epoch_ms) } else { epoch_ms };
+                        let until = ts.saturating_add(len);
                         let until = match &self.st.epoch {
                             Some(ep) if &ep.target == t => ep.until.max(until),
                             _ => until,
@@ -617,8 +642,10 @@ impl Policy for ThresholdPolicy {
         self.st.mem_high.retain(|t, _| live_batch.contains(t));
 
         if let Some(t) = &fg_target {
-            let mem_low =
-                fg_unit.and_then(|u| u.usage.as_ref()).map(|u| u.mem_current.min(fg_memory_low_max)).filter(|b| *b > 0);
+            let mem_low = fg_unit
+                .and_then(|u| u.usage.as_ref())
+                .filter(|u| u.mem_current > 0)
+                .map(|u| round_up(u.mem_current, cfg.memory_low_step).min(fg_memory_low_max));
             let (w, r) = if epoch {
                 (v.fg_epoch_weight, "foreground: interaction epoch boost")
             } else {
@@ -642,6 +669,54 @@ impl Policy for ThresholdPolicy {
                     _ => b,
                 };
                 plan.set(t, Setting::MemoryLow { bytes: b }, r);
+            }
+        }
+
+        // Warm apps: used recently, not in front right now. Keep their memory resident and
+        // give them a little more than the default share, so coming back to them is instant.
+        if let Some(t) = &fg_target {
+            self.st.last_focus.insert(t.clone(), now);
+        }
+        let warm_ms = ms(cfg.warm_for);
+        let live: BTreeSet<&Target> = snap.units.iter().map(|u| &u.target).collect();
+        self.st.last_focus.retain(|t, at| live.contains(t) && now - *at <= warm_ms);
+        if warm_ms > 0 {
+            let mut budget = (snap.caps.hardware.mem_total as f64 * cfg.warm_memory_budget) as u64;
+            let unlimited = snap.caps.hardware.mem_total == 0;
+            // Most recently used first: they get the memory budget before older ones.
+            let mut warm: Vec<(&Target, TimestampMs)> = self
+                .st
+                .last_focus
+                .iter()
+                .filter(|(t, _)| Some(*t) != fg_target.as_ref())
+                .map(|(t, at)| (t, *at))
+                .collect();
+            warm.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+            for (t, at) in warm {
+                let Some(u) = snap.units.iter().find(|u| &u.target == t) else { continue };
+                // Only ordinary apps: critical ones are protected already, and background or
+                // batch work that once had focus (a build's terminal tab) still yields.
+                if !matches!(u.class, QosClass::Normal | QosClass::Interactive) {
+                    continue;
+                }
+                let r = format!("warm: in front {}s ago; kept ready to switch back to", (now - at) / 1000);
+                plan.set(
+                    t,
+                    Setting::CpuWeight { value: weight_at_least(&plan, t, Knob::CpuWeight, cfg.warm_weight) },
+                    r.clone(),
+                );
+                plan.set(
+                    t,
+                    Setting::IoWeight { value: weight_at_least(&plan, t, Knob::IoWeight, cfg.warm_weight) },
+                    r.clone(),
+                );
+                if let Some(used) = u.usage.as_ref().map(|u| u.mem_current).filter(|b| *b > 0) {
+                    let want = round_up(used, cfg.memory_low_step).min(cfg.warm_memory_low_max);
+                    if unlimited || want <= budget {
+                        budget = budget.saturating_sub(want);
+                        plan.set(t, Setting::MemoryLow { bytes: want }, r);
+                    }
+                }
             }
         }
 

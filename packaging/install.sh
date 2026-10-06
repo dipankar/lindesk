@@ -779,6 +779,7 @@ install_core() {
 	put 0644 "$ROOT/adapters/README.md" "$docdir/adapters.md"
 	put 0644 "$ROOT/LICENSE-MIT" "$licensedir/LICENSE-MIT"
 	put 0644 "$ROOT/LICENSE-APACHE" "$licensedir/LICENSE-APACHE"
+	put 0644 "$ROOT/THIRD-PARTY.md" "$licensedir/THIRD-PARTY.md"
 
 	# the uninstaller, and a command that runs it with this install's paths
 	put 0755 "$PKG/uninstall.sh" "$pkgdatadir/uninstall.sh"

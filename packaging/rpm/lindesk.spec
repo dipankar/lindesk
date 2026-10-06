@@ -11,7 +11,8 @@ Name:           lindesk
 Version:        %{?lindesk_version}%{!?lindesk_version:0.1.0}
 Release:        1%{?dist}
 Summary:        macOS-style QoS for the Linux desktop
-License:        MIT OR Apache-2.0
+# Source: MIT OR Apache-2.0. The lindesk-session binary links cosmic-protocols (GPL-3.0-only).
+License:        (MIT OR Apache-2.0) AND GPL-3.0-only
 URL:            https://github.com/dipankar/lindesk
 Source0:        %{name}-%{version}.tar.gz
 
@@ -196,6 +197,7 @@ fi
 %files -f %{name}-generated.files
 %license %{_datadir}/licenses/%{name}/LICENSE-MIT
 %license %{_datadir}/licenses/%{name}/LICENSE-APACHE
+%license %{_datadir}/licenses/%{name}/THIRD-PARTY.md
 %dir %{_datadir}/licenses/%{name}
 %doc %{_docdir}/%{name}
 %{_bindir}/lindeskd

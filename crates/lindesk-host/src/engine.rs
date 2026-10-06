@@ -901,7 +901,10 @@ impl Engine {
         let mem_total = self.env.mem_total();
         let targets = &self.targets;
         let resolution = resolve::resolve(proposals, &self.config.safety, |t| ClampContext {
-            class: targets.get(t).map(TargetState::class),
+            // lindesk's own units are judged like critical ones: boosts allowed, throttles
+            // rejected, whoever asks. (They aren't *classed* critical: their unit files
+            // already give them more than the class would.)
+            class: if is_own_unit(t) { Some(QosClass::Critical) } else { targets.get(t).map(TargetState::class) },
             mem_current: targets.get(t).and_then(|s| s.usage.as_ref()).map(|u| u.mem_current),
             mem_total,
         });
@@ -1473,6 +1476,12 @@ fn pseudo_proc(t: &Target, cgroup: Option<&str>) -> ProcInfo {
         }
         Target::Process { pid } => ProcInfo { pid: *pid, ..Default::default() },
     }
+}
+
+/// lindesk's own services (`lindeskd`, `lindesk-session`, `lindesk-mcp`).
+fn is_own_unit(t: &Target) -> bool {
+    matches!(t, Target::Unit { name, .. }
+        if matches!(name.as_str(), "lindeskd.service" | "lindesk-session.service" | "lindesk-mcp.service"))
 }
 
 fn decide(

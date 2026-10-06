@@ -142,6 +142,22 @@ critical_memory_low = "auto"
 # auto [2GiB]: min(2GiB, 10% of RAM).
 fg_memory_low_max = "auto"
 
+# Switching apps. The boost after you *switch* to another app lasts longer than `epoch`
+# (which is for a click or keypress): the app has to page itself back in and repaint.
+# Capped at 1s on battery.
+switch_epoch = "3s"
+# Warm apps. An app you used within `warm_for` stays warm while you are in another window:
+# `warm_weight` for cpu.weight and io.weight, and its memory protected (memory.low = its
+# usage, at most `warm_memory_low_max` per app and `warm_memory_budget` of RAM for all of
+# them), so switching back to your browser doesn't wait for it to be paged in. Only
+# normal/interactive apps; "0s" turns it off.
+warm_for = "30m"
+warm_weight = 150
+warm_memory_low_max = "1GiB"
+warm_memory_budget = 0.25
+# memory.low values are rounded up to a multiple of this.
+memory_low_step = "64MiB"
+
 # io.max AIMD admission control (RED only, background and batch, per device, needs io.max).
 # Initial limit = max(observed rate, aimd_floor) × aimd_decrease, per direction.
 # Every aimd_interval: × aimd_decrease while the foreground stalls, + aimd_step otherwise.

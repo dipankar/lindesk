@@ -228,7 +228,9 @@ while IFS= read -r line; do
 done
 "#;
     let dir = write_plugin(tmp.path(), "bad", &["classifier"], script, "");
-    let mut p = spawn(&dir, ExternalOptions { supervisor: fast_supervisor(5), ..Default::default() });
+    // A generous timeout: this is about the malformed answer, not about a loaded machine.
+    let mut p =
+        spawn(&dir, ExternalOptions { supervisor: fast_supervisor(5), timeout_scale: 40.0, ..Default::default() });
     assert!(
         matches!(Classifier::classify(&mut p, &proc_info("x")), Err(PluginError::Protocol(m)) if m.contains("urgent"))
     );

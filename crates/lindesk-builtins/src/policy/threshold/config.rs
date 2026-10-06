@@ -201,6 +201,27 @@ pub struct ThresholdConfig {
     #[serde(with = "auto_size")]
     pub fg_memory_low_max: Auto<u64>,
 
+    /// How long the boost lasts after you *switch* to another app (longer than `epoch`, which
+    /// is for a click or keypress): the app has to fault its pages back in and repaint.
+    #[serde(with = "dur")]
+    pub switch_epoch: Duration,
+    /// An app you used within this long stays *warm* while you are in another window: a
+    /// slightly raised share and its memory protected, so switching back to it is instant
+    /// instead of waiting for it to be paged back in. `"0s"` turns this off.
+    #[serde(with = "dur")]
+    pub warm_for: Duration,
+    /// Upper bound for one warm app's `memory.low`.
+    #[serde(with = "size")]
+    pub warm_memory_low_max: u64,
+    /// All warm apps together may protect at most this fraction of RAM.
+    pub warm_memory_budget: f64,
+    /// `cpu.weight` and `io.weight` of a warm app.
+    pub warm_weight: u64,
+    /// `memory.low` values are rounded up to a multiple of this, so a few megabytes of
+    /// growth don't rewrite the setting every few seconds.
+    #[serde(with = "size")]
+    pub memory_low_step: u64,
+
     /// Lower bound for AIMD `io.max` limits (bytes/s, per direction). Also the minimum
     /// "observed" rate the initial limit is derived from.
     /// *auto*: per device, 2% of its nominal bandwidth, at least 4MiB/s.
@@ -251,6 +272,12 @@ impl Default for ThresholdConfig {
             aimd_step: Auto::Auto,
             aimd_decrease: 0.5,
             aimd_interval: Duration::from_secs(1),
+            switch_epoch: Duration::from_secs(3),
+            warm_for: Duration::from_secs(30 * 60),
+            warm_memory_low_max: 1024 * 1024 * 1024,
+            warm_memory_budget: 0.25,
+            warm_weight: 150,
+            memory_low_step: 64 * 1024 * 1024,
             memory_high_ratio: 0.9,
             priority: 0,
             values: ThresholdValues::default(),
@@ -408,6 +435,12 @@ impl ThresholdConfig {
         }
         if self.epoch == Auto::Value(Duration::ZERO) {
             return Err("epoch must be > 0".into());
+        }
+        if !(0.0..=0.5).contains(&self.warm_memory_budget) {
+            return Err("warm_memory_budget must be within 0..=0.5".into());
+        }
+        if self.memory_low_step == 0 {
+            return Err("memory_low_step must be > 0".into());
         }
         if self.aimd_interval.is_zero() {
             return Err("aimd_interval must be > 0".into());

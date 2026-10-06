@@ -65,14 +65,22 @@ async fn pause_resume_and_auto_resume() {
     .is_some();
 
     // A timed pause: everything reverted, still observing, back by itself.
-    let p = json(qos.set_paused(true, 2).await).await;
+    let p = json(qos.set_paused(true, 6).await).await;
     assert_eq!(p["paused"], true);
     assert!(p["until_ms"].as_i64().is_some(), "{p}");
     let st = json(qos.status().await).await;
     assert_eq!(st["daemon"]["state"], "paused");
     assert!(st["text"].as_str().unwrap().contains("⏸ paused (resumes in"), "{}", st["text"]);
     if managed {
-        assert!(!boosted(&st), "settings reverted on pause: {}", st["status"]["foreground"]);
+        // Reverts are applied within the engine's per-step time budget, so with a slow
+        // systemd they take a few steps rather than one long one.
+        let reverted = eventually_opt(Duration::from_secs(5), || {
+            let qos = qos.clone();
+            async move { (!boosted(&serde_json::from_str(&qos.status().await.ok()?).ok()?)).then_some(()) }
+        })
+        .await
+        .is_some();
+        assert!(reverted, "settings reverted on pause: {}", st["status"]["foreground"]);
     } else {
         eprintln!("note: test process is not in a user unit; skipping the settings checks");
     }

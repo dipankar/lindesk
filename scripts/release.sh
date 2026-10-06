@@ -20,36 +20,29 @@ git rev-parse -q --verify "refs/tags/v$new" >/dev/null && die "tag v$new already
 
 old=$(awk -F'"' '/^\[workspace.package\]/ {p=1} p && /^version/ {print $2; exit}' Cargo.toml)
 [[ -n $old ]] || die "cannot read the current version from Cargo.toml"
-[[ $old != "$new" ]] || die "already at $new"
-echo "release: $old -> $new"
 
-# [workspace.package] version and the internal crates' `version = "…"` requirements.
-OLD=$old NEW=$new perl -0pi -e '
-  my ($o, $n) = ($ENV{OLD}, $ENV{NEW});
-  s/(\[workspace\.package\]\s*\nversion = ")\Q$o\E"/$1$n"/;
-  s/(lindesk-[a-z-]+ = \{ path = "[^"]+", version = ")\Q$o\E"/$1$n"/g;
-' Cargo.toml
-grep -q "^version = \"$new\"" Cargo.toml || die "version bump failed"
-cargo update --workspace --quiet
-
-# Changelog: git-cliff when available, otherwise a plain list of commit subjects.
-date=$(date -u +%Y-%m-%d)
-if command -v git-cliff >/dev/null; then
-	git-cliff --config cliff.toml --tag "v$new" --output CHANGELOG.md
+if [[ $old == "$new" ]]; then
+	# The version in Cargo.toml was never released (no tag yet): release it as it is.
+	echo "release: $new (already the version in Cargo.toml; not tagged yet)"
 else
-	echo "release: git-cliff not found (cargo install git-cliff); writing a plain section" >&2
-	last=$(git describe --tags --abbrev=0 2>/dev/null || true)
-	range=${last:+$last..}HEAD
-	{
-		awk '/^## /{exit} {print}' CHANGELOG.md
-		echo "## [$new] - $date"
-		echo
-		git log --no-merges --format='- %s' "$range"
-		echo
-		awk '/^## /{p=1} p && !/^## \[?Unreleased/ {print}' CHANGELOG.md
-	} >CHANGELOG.md.new
-	mv CHANGELOG.md.new CHANGELOG.md
+	echo "release: $old -> $new"
+	# [workspace.package] version and the internal crates' `version = "…"` requirements.
+	OLD=$old NEW=$new perl -0pi -e '
+	  my ($o, $n) = ($ENV{OLD}, $ENV{NEW});
+	  s/(\[workspace\.package\]\s*\nversion = ")\Q$o\E"/$1$n"/;
+	  s/(lindesk-[a-z-]+ = \{ path = "[^"]+", version = ")\Q$o\E"/$1$n"/g;
+	' Cargo.toml
+	grep -q "^version = \"$new\"" Cargo.toml || die "version bump failed"
+	cargo update --workspace --quiet
 fi
+
+# Changelog: the curated "Unreleased" section becomes this version's section, and a fresh
+# empty "Unreleased" goes on top. (Draft entries from commits with: git-cliff --unreleased)
+date=$(date -u +%Y-%m-%d)
+grep -q '^## \[Unreleased\]' CHANGELOG.md || die "CHANGELOG.md has no '## [Unreleased]' section"
+body=$(awk '/^## \[Unreleased\]/ {on=1; next} /^## / {on=0} on' CHANGELOG.md | sed '/^[[:space:]]*$/d')
+[[ -n $body ]] || die "the Unreleased section of CHANGELOG.md is empty: write the release notes first"
+NEW=$new DATE=$date perl -0pi -e 's/^## \[Unreleased\]\n/## [Unreleased]\n\n## [$ENV{NEW}] - $ENV{DATE}\n/m' CHANGELOG.md
 
 cargo check --quiet -p lindesk-version
 git add Cargo.toml Cargo.lock CHANGELOG.md

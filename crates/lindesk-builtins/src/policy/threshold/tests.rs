@@ -214,10 +214,11 @@ fn epoch_starts_on_focus_and_expires() {
     assert_eq!(get(&out, "app.scope", Knob::UclampMin), Some(Setting::UclampMin { percent: 30.0 }));
     assert!(out.metrics.iter().any(|m| m.name == "threshold.epoch" && m.value == 1.0));
 
-    let out = p.evaluate(&desktop(1499, 0.0).build()).unwrap();
+    // Switching to an app earns the longer switch epoch (3s), not the 500ms input epoch.
+    let out = p.evaluate(&desktop(3999, 0.0).build()).unwrap();
     assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 500 }));
 
-    let out = p.evaluate(&desktop(1500, 0.0).build()).unwrap();
+    let out = p.evaluate(&desktop(4000, 0.0).build()).unwrap();
     assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 200 }));
     assert_eq!(get(&out, "app.scope", Knob::UclampMin), None, "uclamp.min reverts after the epoch");
 }
@@ -226,18 +227,18 @@ fn epoch_starts_on_focus_and_expires() {
 fn epoch_is_extended_by_interaction_and_ended_early() {
     let mut p = ThresholdPolicy::default();
     p.evaluate(&desktop(1000, 0.0).focus(1000, "app.scope").build()).unwrap();
-    // Input at 1400 extends the epoch to 1900.
-    let out = p.evaluate(&desktop(1400, 0.0).interaction(1400, false).build()).unwrap();
+    // The switch epoch runs to 4000; input at 3800 extends it by the 500ms input epoch, to 4300.
+    let out = p.evaluate(&desktop(3800, 0.0).interaction(3800, false).build()).unwrap();
     assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 500 }));
-    let out = p.evaluate(&desktop(1800, 0.0).build()).unwrap();
+    let out = p.evaluate(&desktop(4200, 0.0).build()).unwrap();
     assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 500 }));
-    let out = p.evaluate(&desktop(1900, 0.0).build()).unwrap();
+    let out = p.evaluate(&desktop(4300, 0.0).build()).unwrap();
     assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 200 }));
 
     // An interaction alone also starts an epoch; end:true cuts it short.
-    let out = p.evaluate(&desktop(3000, 0.0).interaction(3000, false).build()).unwrap();
+    let out = p.evaluate(&desktop(6000, 0.0).interaction(6000, false).build()).unwrap();
     assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 500 }));
-    let out = p.evaluate(&desktop(3100, 0.0).interaction(3100, true).build()).unwrap();
+    let out = p.evaluate(&desktop(6100, 0.0).interaction(6100, true).build()).unwrap();
     assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 200 }));
     assert_eq!(get(&out, "app.scope", Knob::UclampMin), None);
 }
@@ -255,12 +256,16 @@ fn focus_change_starts_a_new_epoch_for_the_new_target() {
         .build();
     let out = p.evaluate(&snap).unwrap();
     assert_eq!(get(&out, "editor.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 500 }));
-    assert!(knobs(&out, "app.scope").is_empty(), "the old foreground loses its boost");
+    // The app you just left stays warm: a little above the default share, no epoch boost.
+    assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 150 }));
+    assert_eq!(get(&out, "app.scope", Knob::IoWeight), Some(Setting::IoWeight { value: 150 }));
+    assert_eq!(get(&out, "app.scope", Knob::UclampMin), None, "the old foreground loses its boost");
     // Interactions for a target that is not the foreground are ignored.
-    let mut snap = Snap::at(1800).unit("app.scope", QosClass::Interactive).unit("editor.scope", QosClass::Normal);
+    // (After the editor's 3s switch epoch has run out.)
+    let mut snap = Snap::at(4500).unit("app.scope", QosClass::Interactive).unit("editor.scope", QosClass::Normal);
     snap = snap.fg("editor.scope", 0.0);
     snap.s.events.push(Event::Interaction {
-        ts: 1800,
+        ts: 4500,
         pid: None,
         target: Some(unit("app.scope")),
         end: false,
@@ -894,11 +899,11 @@ mod hardware {
                 source: "test".into(),
             });
             let at0 = p.evaluate(&s).unwrap();
-            let at400 = p.evaluate(&mk(400)).unwrap();
+            let at400 = p.evaluate(&mk(1500)).unwrap();
             // Push into YELLOW with system CPU pressure.
             let mut y = None;
             for i in 0..4 {
-                y = Some(p.evaluate(&desktop_with(mk(1000 + i * TICK), Resource::Cpu, 0.5)).unwrap());
+                y = Some(p.evaluate(&desktop_with(mk(4000 + i * TICK), Resource::Cpu, 0.5)).unwrap());
             }
             (at0, at400, y.unwrap())
         };
@@ -906,8 +911,8 @@ mod hardware {
         let (b0, b400, b_y) = run(PowerSource::Battery);
         assert_eq!(get(&ac0, "app.scope", Knob::UclampMin), Some(Setting::UclampMin { percent: 30.0 }));
         assert_eq!(get(&b0, "app.scope", Knob::UclampMin), Some(Setting::UclampMin { percent: 15.0 }));
-        assert!(get(&ac400, "app.scope", Knob::UclampMin).is_some(), "AC epoch lasts 500ms");
-        assert_eq!(get(&b400, "app.scope", Knob::UclampMin), None, "battery epoch is 300ms");
+        assert!(get(&ac400, "app.scope", Knob::UclampMin).is_some(), "on AC the switch epoch lasts 3s");
+        assert_eq!(get(&b400, "app.scope", Knob::UclampMin), None, "on battery it is capped at 1s");
         assert_eq!(ac_y.level, Some(Level::Yellow));
         assert_eq!(b_y.level, Some(Level::Yellow));
         assert_eq!(get(&ac_y, "tracker.service", Knob::UclampMax), Some(Setting::UclampMax { percent: 60.0 }));
@@ -1023,4 +1028,80 @@ mod hardware {
         }
         eprintln!("{}", serde_json::to_string_pretty(&r).unwrap());
     }
+}
+
+#[test]
+fn an_app_you_just_left_stays_warm_then_cools_off() {
+    let mut p = ThresholdPolicy::default();
+    let both = |now: i64| {
+        let mut s = Snap::at(now).unit("browser.scope", QosClass::Normal).unit("editor.scope", QosClass::Normal);
+        s.s.caps.hardware.mem_total = 64 << 30;
+        s
+    };
+    // The browser has focus and uses 700 MiB.
+    let mut s = both(1000).fg("browser.scope", 0.0).focus(1000, "browser.scope").build();
+    usage_mem(&mut s, "browser.scope", 700 << 20);
+    p.evaluate(&s).unwrap();
+
+    // You switch to the editor: the browser keeps a raised share and its memory protected,
+    // rounded up to the 64 MiB step, so coming back doesn't wait for a page-in.
+    let mut s = both(10_000).fg("editor.scope", 0.0).focus(10_000, "editor.scope").build();
+    usage_mem(&mut s, "browser.scope", 700 << 20);
+    let out = p.evaluate(&s).unwrap();
+    assert_eq!(get(&out, "browser.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 150 }));
+    assert_eq!(get(&out, "browser.scope", Knob::IoWeight), Some(Setting::IoWeight { value: 150 }));
+    assert_eq!(get(&out, "browser.scope", Knob::MemoryLow), Some(Setting::MemoryLow { bytes: 704 << 20 }));
+    assert_eq!(get(&out, "browser.scope", Knob::UclampMin), None);
+    let reason = &out.intents.iter().find(|i| i.target == unit("browser.scope")).unwrap().reason;
+    assert!(reason.starts_with("warm: in front 9s ago"), "{reason}");
+
+    // A few megabytes of growth don't rewrite memory.low.
+    let mut s = both(12_000).fg("editor.scope", 0.0).build();
+    usage_mem(&mut s, "browser.scope", 703 << 20);
+    let out = p.evaluate(&s).unwrap();
+    assert_eq!(get(&out, "browser.scope", Knob::MemoryLow), Some(Setting::MemoryLow { bytes: 704 << 20 }));
+
+    // Half an hour later it has cooled off: nothing is held for it any more.
+    let mut s = both(10_000 + 31 * 60_000).fg("editor.scope", 0.0).build();
+    usage_mem(&mut s, "browser.scope", 700 << 20);
+    let out = p.evaluate(&s).unwrap();
+    assert!(knobs(&out, "browser.scope").is_empty(), "{:?}", knobs(&out, "browser.scope"));
+}
+
+#[test]
+fn warm_respects_class_budget_and_the_off_switch() {
+    // Background work that once had focus (a build's terminal tab) still yields.
+    let mut p = ThresholdPolicy::default();
+    let mk = |now: i64, fg: &str| {
+        let mut s = Snap::at(now)
+            .unit("tab.scope", QosClass::Background)
+            .unit("big.scope", QosClass::Normal)
+            .unit("editor.scope", QosClass::Normal);
+        s.s.caps.hardware.mem_total = 4 << 30;
+        s.fg(fg, 0.0)
+    };
+    p.evaluate(&mk(1000, "tab.scope").focus(1000, "tab.scope").build()).unwrap();
+    p.evaluate(&mk(2000, "big.scope").focus(2000, "big.scope").build()).unwrap();
+    let mut s = mk(9000, "editor.scope").focus(9000, "editor.scope").build();
+    usage_mem(&mut s, "big.scope", 3 << 30);
+    let out = p.evaluate(&s).unwrap();
+    assert_eq!(
+        get(&out, "tab.scope", Knob::CpuWeight),
+        Some(Setting::CpuWeight { value: 50 }),
+        "background stays background"
+    );
+    // 1 GiB (the per-app cap) is exactly the 25%-of-4GiB budget: granted.
+    assert_eq!(get(&out, "big.scope", Knob::MemoryLow), Some(Setting::MemoryLow { bytes: 1 << 30 }));
+
+    // warm_for = 0 turns the whole thing off.
+    let mut p = ThresholdPolicy::new(ThresholdConfig { warm_for: Duration::ZERO, ..ThresholdConfig::default() });
+    p.evaluate(&mk(1000, "big.scope").focus(1000, "big.scope").build()).unwrap();
+    let out = p.evaluate(&mk(9000, "editor.scope").focus(9000, "editor.scope").build()).unwrap();
+    assert!(knobs(&out, "big.scope").is_empty());
+}
+
+/// Give a unit a memory footprint in a built snapshot.
+fn usage_mem(s: &mut Snapshot, name: &str, bytes: u64) {
+    let u = s.units.iter_mut().find(|u| u.target == unit(name)).expect("unit in the snapshot");
+    u.usage = Some(Usage { mem_current: bytes, interval_ms: 1000, ..Default::default() });
 }

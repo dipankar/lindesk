@@ -37,6 +37,7 @@
 644 /usr/share/kwin/scripts/lindesk/metadata.json
 644 /usr/share/licenses/lindesk/LICENSE-APACHE
 644 /usr/share/licenses/lindesk/LICENSE-MIT
+644 /usr/share/licenses/lindesk/THIRD-PARTY.md
 644 /usr/share/lindesk/profiles.d/00-balanced.toml
 644 /usr/share/lindesk/profiles.d/10-latency.toml
 644 /usr/share/lindesk/profiles.d/20-battery.toml

@@ -22,8 +22,12 @@ The core binaries must never depend on DuckDB, Vortex or Arrow
 ## Commits
 
 Use [Conventional Commits](https://www.conventionalcommits.org): `feat(session): …`,
-`fix(lake): …`, `docs: …`, `ci: …`, `chore(deps): …`. The changelog is generated from them
-(`cliff.toml`). Mark breaking changes with `!` or a `BREAKING CHANGE:` footer.
+`fix(lake): …`, `docs: …`, `ci: …`, `chore(deps): …`. Mark breaking changes with `!` or a
+`BREAKING CHANGE:` footer.
+
+User-visible changes also get a line under `## [Unreleased]` in `CHANGELOG.md`, written
+for the person using lindesk, not for the reviewer. `git-cliff --unreleased` (config in
+`cliff.toml`) drafts that list from the commits if you want a starting point.
 
 ## CI (`.github/workflows/ci.yml`)
 
@@ -50,7 +54,7 @@ lindeskctl 0.1.0 (2c021b4, 2026-10-05)
 To release:
 
 ```bash
-scripts/release.sh 0.2.0        # bumps the version, updates CHANGELOG.md, commits, tags v0.2.0
+scripts/release.sh 0.2.0        # bumps the version, turns "Unreleased" into 0.2.0, commits, tags v0.2.0
 git push origin main v0.2.0     # the tag starts .github/workflows/release.yml
 ```
 
