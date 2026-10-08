@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use zbus::names::BusName;
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::zvariant::Value;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -57,6 +57,7 @@ pub async fn authorize(
             &(subject, action, details, flags, ""),
         )
         .await?;
-    let (authorized, _challenge, _details): (bool, bool, HashMap<String, OwnedValue>) = reply.body().deserialize()?;
+    // polkit's AuthorizationResult is (bba{ss}): the details are strings, not variants.
+    let (authorized, _challenge, _details): (bool, bool, HashMap<String, String>) = reply.body().deserialize()?;
     if authorized { Ok(()) } else { Err(AuthError::Denied(action.to_string())) }
 }

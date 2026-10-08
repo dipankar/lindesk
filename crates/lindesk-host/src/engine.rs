@@ -1065,11 +1065,30 @@ impl Engine {
     fn resolve(&mut self, proposals: Vec<Proposal>, cx: &mut Ctx) -> resolve::Resolution {
         let mem_total = self.env.mem_total();
         let targets = &self.targets;
+        // The cgroups of the app in use. A slice above one of them contains it: throttling
+        // the slice throttles the app, whatever a policy meant.
+        let fg_cgroups: Vec<&str> = self
+            .foreground
+            .iter()
+            .chain(&self.foreground_family)
+            .filter_map(|t| targets.get(t)?.cgroup.as_deref())
+            .collect();
+        let contains_foreground = |t: &Target| {
+            targets.get(t).and_then(|s| s.cgroup.as_deref()).is_some_and(|cg| {
+                let prefix = format!("{}/", cg.trim_end_matches('/'));
+                fg_cgroups.iter().any(|f| f.starts_with(&prefix))
+            })
+        };
         let resolution = resolve::resolve(proposals, &self.config.safety, |t| ClampContext {
-            // lindesk's own units are judged like critical ones: boosts allowed, throttles
-            // rejected, whoever asks. (They aren't *classed* critical: their unit files
-            // already give them more than the class would.)
-            class: if is_own_unit(t) { Some(QosClass::Critical) } else { targets.get(t).map(TargetState::class) },
+            // lindesk's own units, and anything the app in use runs inside, are judged like
+            // critical ones: boosts allowed, throttles rejected, whoever asks. (They aren't
+            // *classed* critical: their unit files already give them more than the class
+            // would, or they hold far more than the app.)
+            class: if is_own_unit(t) || contains_foreground(t) {
+                Some(QosClass::Critical)
+            } else {
+                targets.get(t).map(TargetState::class)
+            },
             mem_current: targets.get(t).and_then(|s| s.usage.as_ref()).map(|u| u.mem_current),
             mem_total,
         });

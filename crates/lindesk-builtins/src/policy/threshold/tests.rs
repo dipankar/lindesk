@@ -511,6 +511,8 @@ fn heavy_neighbours_are_limited_in_red_whatever_their_class() {
     let snap = |now: i64, editor_w: u64| {
         desktop(now, 0.3)
             .unit("idle.scope", QosClass::Normal)
+            .unit("app.slice", QosClass::Normal)
+            .usage("app.slice", 0, heavy + editor_w, 1 << 30)
             .usage("editor.scope", 0, editor_w, 1 << 30)
             .usage("session.slice", 0, heavy, 1 << 30)
             .usage("app.scope", 0, heavy, 1 << 30)
@@ -532,6 +534,8 @@ fn heavy_neighbours_are_limited_in_red_whatever_their_class() {
     assert!(io_max(&out, "session.slice").is_none());
     assert!(io_max(&out, "app.scope").is_none());
     assert!(io_max(&out, "idle.scope").is_none());
+    // A slice is the sum of what runs below it, the app in use included: never a neighbour.
+    assert!(io_max(&out, "app.slice").is_none());
 
     // The limit works, so its rate drops; it stays limited (and keeps stepping down while
     // the foreground stalls) for as long as RED lasts.

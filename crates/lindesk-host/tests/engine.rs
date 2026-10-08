@@ -471,6 +471,41 @@ fn safety_clamp_surfaces_in_explain() {
 }
 
 #[test]
+fn a_slice_holding_the_app_in_use_is_never_throttled() {
+    // app.slice holds both firefox and the build. A policy that throttles everything not in
+    // front would throttle the slice, and with it the app in use.
+    const APP_SLICE: &str = "/user.slice/user-1000.slice/user@1000.service/app.slice";
+    let w = world();
+    w.env.watch_cgroup(APP_SLICE);
+    let app_slice = Target::user_unit(1000, "app.slice");
+    let mut e = engine(&w);
+    let (limit_all, _) = FnPolicy::new("throttle-all", |s| {
+        Ok(PolicyOutput {
+            intents: s
+                .units
+                .iter()
+                .filter(|u| !u.foreground)
+                .map(|u| intent(&u.target, Setting::CpuWeight { value: 20 }, "yield"))
+                .collect(),
+            ..Default::default()
+        })
+    });
+    e.registry_mut().register_policy(Box::new(limit_all), 0).unwrap();
+    e.step(1000);
+    // Nothing in front: the slice may be limited like anything else.
+    assert_eq!(e.explain(&app_slice).settings.len(), 1);
+
+    e.push_event(Event::Focus { ts: 2000, pid: Some(12), app_id: None, target: None, source: "test".into() });
+    e.step(2000);
+    assert_eq!(e.foreground(), Some(&firefox()));
+    let x = e.explain(&app_slice);
+    assert!(x.settings.is_empty(), "the limit on the slice holding firefox is taken off: {:?}", x.settings);
+    assert!(x.notes.iter().any(|n| n.kind == "rejected"));
+    // A sibling unit is still limited.
+    assert_eq!(e.explain(&cargo()).settings.len(), 1);
+}
+
+#[test]
 fn critical_targets_cannot_be_throttled_and_admin_overrides_win() {
     let w = world();
     let config = Config::from_toml(

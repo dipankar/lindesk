@@ -299,7 +299,8 @@ guarantees itself that little:
 * No realtime CPU or I/O classes, ever.
 * Every throttle has a floor (`[safety]` in the config): I/O limits, `memory.high`,
   `uclamp.max`. Boosts have ceilings.
-* Critical units, lindesk's own units and the focused app cannot be throttled.
+* Critical units, lindesk's own units, the focused app and any slice it runs inside
+  (`app.slice`, `user.slice`) cannot be throttled: limiting a slice limits everything in it.
 * Plugins return *intents*; lindesk resolves and clamps them. A plugin can't lift a cap.
 * Every setting is runtime-only and recorded with the value it replaced. It is restored when
   the daemon stops, after a crash (`ExecStopPost=… --restore`), by `lindeskctl off`, and by

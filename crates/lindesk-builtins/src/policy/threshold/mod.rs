@@ -234,6 +234,11 @@ const ACTIVE_IO: u64 = 1024 * 1024;
 /// However many units share a device's floor, none goes below this (or the floor itself).
 const SHARED_FLOOR_MIN: u64 = 4 * 1024 * 1024;
 
+/// True for a slice unit, which groups other units rather than running anything itself.
+fn is_slice(t: &Target) -> bool {
+    matches!(t, Target::Unit { name, .. } if name.ends_with(".slice"))
+}
+
 /// A unit's I/O rate over its last usage interval, bytes/s, both directions.
 fn io_rate(u: &UnitState) -> u64 {
     u.usage.as_ref().map_or(0, |us| rate(us.io_rbytes.saturating_add(us.io_wbytes), us.interval_ms))
@@ -641,7 +646,10 @@ impl Policy for ThresholdPolicy {
                 .filter(|u| !is_fg(u) && u.class != QosClass::Critical && !u.serving)
                 .filter(|u| {
                     u.class.yields()
+                        // A slice's I/O is everything below it, the app in use included:
+                        // only units of their own are neighbours.
                         || (cfg.limit_heavy_neighbours
+                            && !is_slice(&u.target)
                             && (io_rate(u) >= ACTIVE_IO || self.st.aimd.keys().any(|(t, _)| t == &u.target)))
                 })
                 .map(|u| &u.target)
