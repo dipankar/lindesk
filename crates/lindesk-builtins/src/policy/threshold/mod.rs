@@ -25,6 +25,9 @@
 //! | YELLOW | any smoothed system `some` > `enter.*`, or foreground > `foreground_yellow` | everything below `exit_ratio × enter` for `recover_after`, and `yellow_min_dwell` elapsed |
 //! | RED    | foreground > `foreground_red` for `red_after`, or memory `full` > `memory_full_red` | both below `exit_ratio ×` their thresholds for `recover_after`, and `red_min_dwell` elapsed |
 //!
+//! A level that keeps bouncing (rising again within `flap_window` of stepping down) waits
+//! twice as long to step down after each bounce, up to `recover_backoff_max`.
+//!
 //! The level moves at most one step per evaluation in either direction.
 //!
 //! # Intents
@@ -126,6 +129,12 @@ struct State {
     level: Level,
     entered_at: TimestampMs,
     exit_since: Option<TimestampMs>,
+    /// When the level last stepped down, and how many times in a row it rose again soon
+    /// after (see `recover_backoff_max`).
+    last_down: Option<TimestampMs>,
+    bounces: u32,
+    /// The last input, for the epoch linger.
+    last_input: Option<(Target, TimestampMs)>,
     fg_red_since: Option<TimestampMs>,
     mem_full_since: Option<TimestampMs>,
     epoch: Option<Epoch>,
@@ -317,6 +326,7 @@ impl ThresholdPolicy {
     /// Apply focus/interaction events to the epoch state.
     fn process_events(&mut self, snap: &Snapshot, fg: Option<&Target>) {
         let epoch_ms = i64::try_from(self.res.epoch_ms).unwrap_or(i64::MAX);
+        let linger_ms = if self.res.on_battery { 0 } else { ms(self.cfg.epoch_linger) };
         // On battery the switch boost is capped at one second: enough to repaint, not a habit.
         let switch_ms =
             if self.res.on_battery { ms(self.cfg.switch_epoch).min(1000) } else { ms(self.cfg.switch_epoch) };
@@ -350,7 +360,16 @@ impl ThresholdPolicy {
                             self.st.epoch = None;
                         }
                     } else {
-                        let until = ts.saturating_add(epoch_ms);
+                        // Input soon after the previous input: the person is in the middle of
+                        // something, so hold the boost through the next short pause.
+                        let continuing = self
+                            .st
+                            .last_input
+                            .as_ref()
+                            .is_some_and(|(lt, at)| lt == t && *ts >= *at && *ts - *at <= linger_ms);
+                        self.st.last_input = Some((t.clone(), *ts));
+                        let len = if continuing { epoch_ms.max(linger_ms) } else { epoch_ms };
+                        let until = ts.saturating_add(len);
                         let until = match &self.st.epoch {
                             Some(ep) if &ep.target == t => ep.until.max(until),
                             _ => until,
@@ -395,6 +414,10 @@ impl ThresholdPolicy {
         };
 
         if wanted > st.level {
+            st.bounces = match st.last_down {
+                Some(t) if now - t <= ms(cfg.flap_window) => (st.bounces + 1).min(8),
+                _ => 0,
+            };
             st.level = up(st.level);
             st.entered_at = now;
             st.exit_since = None;
@@ -417,12 +440,14 @@ impl ThresholdPolicy {
             Level::Yellow => cfg.yellow_min_dwell,
             Level::Green => Duration::ZERO,
         };
+        let recover = (ms(cfg.recover_after) << st.bounces).min(ms(cfg.recover_backoff_max).max(ms(cfg.recover_after)));
         if let Some(since) = st.exit_since
-            && now - since >= ms(cfg.recover_after)
+            && now - since >= recover
             && now - st.entered_at >= ms(dwell)
         {
             st.level = down(st.level);
             st.entered_at = now;
+            st.last_down = Some(now);
             // The next step down needs its own full `recover_after`, counted from now.
             st.exit_since = exit_ok(st.level).then_some(now);
         }

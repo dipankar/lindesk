@@ -24,6 +24,9 @@ The first release.
 - **What your app is waiting on is not held back.** A unit the app in use has an open
   local connection to (a dev server rebuilding in a terminal tab, a database) is not
   throttled while the connection lasts (`[plugins.serving]`).
+- **Less churn under bursty load.** A level that keeps bouncing backs off before stepping
+  down again, and the input boost holds through short typing pauses; on the development
+  machine the level had been changing four times a minute.
 - **App Nap.** An app whose windows are all off screen and that is silent has its timers
   coalesced and is steered to the efficient cores. Nothing is frozen or capped; it wakes
   when it is seen or heard (GNOME and Hyprland; needs PipeWire).

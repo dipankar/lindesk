@@ -88,7 +88,10 @@ throttled**:
 | Focused, idle | `cpu.weight` 200, `io.weight` 200, same `memory.low` | while focused |
 
 The boost is deliberately short. A permanent high priority for the focused app would cost
-battery and hide problems; a burst when you act is what makes the app *feel* immediate. The
+battery and hide problems; a burst when you act is what makes the app *feel* immediate.
+While you keep typing or clicking (each input within 2 s of the last) it holds through the
+pauses instead of dropping between words and coming back with the next key
+(`epoch_linger`, not on battery). The
 switch boost is longer because an app you return to has to repaint and fault pages back in.
 
 On hybrid CPUs (Intel P/E cores, ARM big.LITTLE with EAS) `uclamp.min` also steers the
@@ -217,7 +220,11 @@ waiting.
 
 Levels have hysteresis: exit thresholds are half the entry ones, a level is held for a
 minimum time (3 s YELLOW, 2 s RED), and recovery steps down one level at a time after 5 s of
-calm. A sawtooth load doesn't make it flap.
+calm. A sawtooth load doesn't make it flap. Nor does a bursty one: when the level rises
+again within a minute of stepping down, the calm it needs before the next step down
+doubles (10 s, 20 s, … up to a minute), so a disk that stalls for a second every few
+seconds holds YELLOW instead of re-tuning every unit each time. After a calm minute it
+starts over at 5 s.
 
 **The adaptive I/O limit (RED only).** Each background and batch unit gets an `io.max` limit
 per managed disk, starting at half of what it was just doing. So does anything else that is

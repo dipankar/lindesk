@@ -238,18 +238,20 @@ fn epoch_starts_on_focus_and_expires() {
 fn epoch_is_extended_by_interaction_and_ended_early() {
     let mut p = ThresholdPolicy::default();
     p.evaluate(&desktop(1000, 0.0).focus(1000, "app.scope").build()).unwrap();
-    // The switch epoch runs to 4000; input at 3800 extends it by the 500ms input epoch, to 4300.
+    // The switch epoch runs to 4000; input at 3800 extends it by the 500ms input epoch, to
+    // 4300, and a second input at 4100 (the person is typing) holds it for the 2s linger.
     let out = p.evaluate(&desktop(3800, 0.0).interaction(3800, false).build()).unwrap();
     assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 500 }));
-    let out = p.evaluate(&desktop(4200, 0.0).build()).unwrap();
+    p.evaluate(&desktop(4100, 0.0).interaction(4100, false).build()).unwrap();
+    let out = p.evaluate(&desktop(6000, 0.0).build()).unwrap();
     assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 500 }));
-    let out = p.evaluate(&desktop(4300, 0.0).build()).unwrap();
+    let out = p.evaluate(&desktop(6100, 0.0).build()).unwrap();
     assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 200 }));
 
     // An interaction alone also starts an epoch; end:true cuts it short.
-    let out = p.evaluate(&desktop(6000, 0.0).interaction(6000, false).build()).unwrap();
+    let out = p.evaluate(&desktop(9000, 0.0).interaction(9000, false).build()).unwrap();
     assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 500 }));
-    let out = p.evaluate(&desktop(6100, 0.0).interaction(6100, true).build()).unwrap();
+    let out = p.evaluate(&desktop(9100, 0.0).interaction(9100, true).build()).unwrap();
     assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 200 }));
     assert_eq!(get(&out, "app.scope", Knob::UclampMin), None);
 }
@@ -352,6 +354,57 @@ fn sawtooth_around_enter_threshold_does_not_flap() {
         desktop(now, 0.0).global(Resource::Io, v).build()
     });
     assert_eq!(transitions(&trace).len(), 1, "0.15 is above the exit threshold (0.10): stays YELLOW");
+}
+
+#[test]
+fn typing_with_pauses_holds_the_boost_instead_of_toggling_it() {
+    // A key every 900 ms: longer than the 500 ms epoch, shorter than the 2 s linger.
+    let boosted =
+        |out: &PolicyOutput| get(out, "app.scope", Knob::CpuWeight) == Some(Setting::CpuWeight { value: 500 });
+    let mut p = ThresholdPolicy::default();
+    let mut flips = 0;
+    let mut was = false;
+    for now in (10_000..20_000).step_by(100) {
+        let mut s = desktop(now, 0.0);
+        if now % 900 == 0 {
+            s = s.interaction(now, false);
+        }
+        let b = boosted(&p.evaluate(&s.build()).unwrap());
+        flips += usize::from(b != was);
+        was = b;
+    }
+    // On with the first key, off when its 500 ms run out, on again with the second, and
+    // then held for as long as the typing goes on.
+    assert_eq!(flips, 3, "held while typing");
+    // A single key after a long pause still gets only the short epoch.
+    let out = p.evaluate(&desktop(30_000, 0.0).interaction(30_000, false).build()).unwrap();
+    assert!(boosted(&out));
+    assert!(!boosted(&p.evaluate(&desktop(30_600, 0.0).build()).unwrap()));
+}
+
+#[test]
+fn a_bouncing_level_backs_off_instead_of_retuning_every_few_seconds() {
+    // Bursty disk load: io pressure 60 % for one second every 12 s, nothing in between.
+    // Without back-off: YELLOW, 5 s calm, GREEN, and again, ten times a minute.
+    let bursty = |now: i64| desktop(now, 0.0).global(Resource::Io, if now % 12_000 < 1000 { 0.6 } else { 0.0 }).build();
+    let mut p = ThresholdPolicy::new(crisp());
+    let tr = transitions(&run(&mut p, 0, 600_000, bursty));
+    // Two bounces (5 s, then 10 s of calm needed), then 20 s is longer than the gaps.
+    assert_eq!(tr.len(), 5, "{tr:?}");
+    assert_eq!(tr[0].1, Level::Yellow);
+
+    // Once the bursts stop it does come down, and a later single spike recovers in the
+    // ordinary 5 s again.
+    let mut p = ThresholdPolicy::new(crisp());
+    run(&mut p, 0, 120_000, bursty);
+    let tr = transitions(&run(&mut p, 120_250, 400_000, |now| {
+        desktop(now, 0.0).global(Resource::Io, if (300_000..300_500).contains(&now) { 0.6 } else { 0.0 }).build()
+    }));
+    let down = tr.iter().position(|(_, l)| *l == Level::Green).expect("back to GREEN");
+    let spike = tr.iter().position(|(t, l)| *t >= 300_000 && *l == Level::Yellow).expect("the late spike");
+    assert!(down < spike);
+    let back = tr[spike + 1..].iter().find(|(_, l)| *l == Level::Green).expect("recovers from the spike").0;
+    assert!(back - tr[spike].0 <= 6_000, "ordinary recovery after a calm window: {tr:?}");
 }
 
 #[test]

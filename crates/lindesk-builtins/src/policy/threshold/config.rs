@@ -185,6 +185,21 @@ pub struct ThresholdConfig {
     /// continuously for this long.
     #[serde(with = "dur")]
     pub recover_after: Duration,
+    /// When the level keeps bouncing (it rises again within `flap_window` of stepping
+    /// down), each bounce doubles the time it must stay calm before stepping down, up to
+    /// this. A desktop under bursty load then holds one level instead of re-tuning every
+    /// unit every few seconds. A rise after a calm `flap_window` starts over at `recover_after`.
+    #[serde(with = "dur")]
+    pub recover_backoff_max: Duration,
+    /// A rise this soon after a step down counts as a bounce.
+    #[serde(with = "dur")]
+    pub flap_window: Duration,
+    /// While the person keeps typing or clicking, the boost holds through pauses this
+    /// short (the first input still gets just `epoch`). Without it the boost drops to the
+    /// mild one between words and comes back with the next key: several setting changes a
+    /// second for nothing. Not on battery.
+    #[serde(with = "dur")]
+    pub epoch_linger: Duration,
     /// Minimum time spent in YELLOW before stepping down to GREEN.
     #[serde(with = "dur")]
     pub yellow_min_dwell: Duration,
@@ -283,6 +298,9 @@ impl Default for ThresholdConfig {
             memory_full_red: 0.20,
             mem_red_after: Duration::from_secs(3),
             recover_after: Duration::from_secs(5),
+            recover_backoff_max: Duration::from_secs(60),
+            flap_window: Duration::from_secs(60),
+            epoch_linger: Duration::from_secs(2),
             yellow_min_dwell: Duration::from_secs(3),
             red_min_dwell: Duration::from_secs(2),
             critical_memory_low: Auto::Auto,
