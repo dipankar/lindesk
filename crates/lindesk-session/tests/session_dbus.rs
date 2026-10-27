@@ -111,6 +111,18 @@ async fn qos_api_standalone_dry_run() {
     qos.begin_interaction(me).await.unwrap();
     qos.end_interaction(me).await.unwrap();
     qos.report_metric("frames_dropped", 3.0, Default::default()).await.unwrap();
+    let api = lindesk_ipc::QoSProxy::new(&conn).await.unwrap();
+    api.report_metric("desktop.frame_ms", 19.5, Default::default()).await.unwrap();
+    assert!(api.report_metric("desktop.frame_ms", f64::NAN, Default::default()).await.is_err());
+    let latency: Value = serde_json::from_str(&api.latency_report().await.unwrap()).unwrap();
+    assert_eq!(latency["summary"]["desktop.frame_ms"]["p99"], 19.5);
+    assert!(latency["context"].as_array().is_some_and(|v| !v.is_empty()));
+    let server = agent.child.as_ref().unwrap().id() as i32;
+    api.report_dependency(me, server, 1000).await.unwrap();
+    api.report_dependency(me, server, 0).await.unwrap();
+    assert!(api.report_dependency(me, me, 1000).await.is_err());
+    assert!(api.report_dependency(me, 1, 1000).await.is_err());
+    assert!(api.report_dependency(me, 1, 30_001).await.is_err());
     qos.set_foreground_app("org.example.Nope").await.unwrap();
 
     let status = agent.terminate();

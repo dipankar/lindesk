@@ -215,10 +215,11 @@ pub fn render(
     }
     for p in &protected {
         s.push_str(&format!(
-            "  {}  {:<12} {}\n",
+            "  {}  {:<12} {}{}\n",
             pad(&p.label(), 18),
             class_str(p),
-            ui.green(settings_short(&p.settings))
+            ui.green(settings_short(&p.settings)),
+            p.attention.map(|role| ui.dim(format!("  ({})", role.label()))).unwrap_or_default()
         ));
     }
     s.push('\n');
@@ -556,6 +557,7 @@ pub mod tests {
             comm: Some(name.split(['-', '.']).next().unwrap_or(name).into()),
             class: Some(class),
             foreground: false,
+            attention: None,
             settings,
         }
     }
@@ -580,6 +582,19 @@ pub mod tests {
             cpu_delta_pct: Some(-31.0),
             io_delta_pct: Some(-45.0),
         }
+    }
+
+    #[test]
+    fn protected_media_reason_is_visible_and_old_status_still_parses() {
+        let mut st = status(Level::Green, vec![]);
+        let mut media = ts("music.scope", QosClass::Normal, vec![Setting::CpuWeight { value: 200 }]);
+        media.attention = Some(lindesk_core::attention::Attention::Media);
+        st.protected.push(media.clone());
+        let text = render(&Ui::plain(), Daemon::Session, &st, &live::Envelope::default(), None, true);
+        assert!(text.contains("playing or recording audio"), "{text}");
+        let mut old = serde_json::to_value(&media).unwrap();
+        old.as_object_mut().unwrap().remove("attention");
+        assert!(serde_json::from_value::<TargetSummary>(old).unwrap().attention.is_none());
     }
 
     #[test]

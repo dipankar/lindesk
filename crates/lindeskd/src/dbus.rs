@@ -299,6 +299,28 @@ impl Broker {
         self.engine.set_class(pid, class, source).await.map_err(gone)?.map(|_| ()).map_err(fdo::Error::Failed)
     }
 
+    async fn report_dependency(
+        &self,
+        client_pid: i32,
+        server_pid: i32,
+        ttl_ms: u32,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> fdo::Result<()> {
+        let who = self.caller(conn, &hdr).await?;
+        let lease = crate::common::responsiveness::Lease::capture(client_pid, server_pid, who.uid, ttl_ms)
+            .map_err(fdo::Error::InvalidArgs)?;
+        self.engine
+            .call(|reply| crate::common::engine_thread::Command::Dependency { lease, ttl_ms, reply })
+            .await
+            .map_err(gone)?
+            .map_err(fdo::Error::LimitsExceeded)
+    }
+
+    async fn latency_report(&self) -> fdo::Result<String> {
+        self.engine.call(|reply| crate::common::engine_thread::Command::Latency { reply }).await.map_err(gone)
+    }
+
     /// Status JSON (see ARCHITECTURE.md).
     async fn get_status(&self) -> fdo::Result<String> {
         self.engine.status().await.map_err(gone)

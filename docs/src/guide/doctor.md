@@ -7,7 +7,7 @@ $ lindeskctl doctor
 
 System
 Kernel                   7.0.11-76070011-generic
-CPU                      12th Gen Intel Core i9-12950HX — hybrid: 8P (16 threads) + 8E → foreground boosts favour P-cores via uclamp.min (EAS/ITMT); batch is capped with uclamp.max under pressure, which keeps it on E-cores
+CPU                      12th Gen Intel Core i9-12950HX — hybrid: 8P (16 threads) + 8E → uclamp supplies performance hints; frequency and placement effects depend on the driver and scheduler
 ITMT                     off on a hybrid Intel CPU → the scheduler does not rank P-cores first; foreground boosts rely on uclamp alone
 Memory                   62.5 GiB RAM, 20 GiB swap (compressed)
 Storage                  nvme0n1 NVMe (bfq)
@@ -70,7 +70,7 @@ Telemetry                22.0 KiB in ~/.local/state/lindesk/telemetry
    [latency map](hardware.md#the-latency-map) is calibrated (and how old or noisy it is),
    and whether the [MCP server](mcp.md) is installed and its optional user socket enabled.
    These lines are informational: they never make `doctor` exit 1.
-5. **The verdict**: either `✓ lindesk is protecting your desktop (FULL)` or the single
+5. **The verdict**: either `✓ lindesk is running (kernel support: FULL)` or the single
    most important next step.
 
 Every warning carries a remedy after `→`. The exit status is 0 when nothing needs

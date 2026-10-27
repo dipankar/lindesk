@@ -27,6 +27,12 @@ pub const RETRY: Duration = Duration::from_secs(30);
 /// Something to tell the broker.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Forward {
+    Dependency {
+        client_pid: i32,
+        server_pid: i32,
+        ttl_ms: u32,
+        sent: std::time::Instant,
+    },
     /// `ReportForeground(pid, app_id)`; `pid = 0` when only the app id is known.
     Focus {
         pid: i32,
@@ -105,6 +111,10 @@ pub async fn connect_and_register() -> (Option<Connection>, Option<String>) {
 
 async fn send(p: &BrokerProxy<'static>, f: Forward) {
     let r = match &f {
+        Forward::Dependency { client_pid, server_pid, ttl_ms, sent } => {
+            let remaining = ttl_ms.saturating_sub(sent.elapsed().as_millis().min(u32::MAX as u128) as u32);
+            p.report_dependency(*client_pid, *server_pid, remaining).await
+        }
         Forward::Focus { pid, app_id } => p.report_foreground(*pid, app_id).await,
         Forward::Interaction { pid, end } => p.interaction(*pid, *end).await,
         Forward::SetClass { pid, class } => p.set_class(*pid, class).await,
@@ -212,7 +222,11 @@ pub async fn run(
                 let Some(f) = f else { break };
                 if mode == Mode::Connected {
                     let p = broker.clone();
-                    tokio::spawn(async move { send(&p, f).await });
+                    if matches!(f, Forward::Dependency { .. }) {
+                        let _ = tokio::time::timeout(REGISTER_TIMEOUT, send(&p, f)).await;
+                    } else {
+                        tokio::spawn(async move { send(&p, f).await });
+                    }
                 }
             }
             _ = retry.tick() => {

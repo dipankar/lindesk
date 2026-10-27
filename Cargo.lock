@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-bench"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2587,7 +2587,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-builtins"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cosmic-protocols",
  "globset",
@@ -2609,7 +2609,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-changes"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "humantime",
  "lindesk-core",
@@ -2625,7 +2625,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "bytesize",
  "humantime",
@@ -2639,7 +2639,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-data"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytesize",
@@ -2662,7 +2662,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-host"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "crossbeam-channel",
  "globset",
@@ -2679,7 +2679,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-ipc"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "lindesk-plugin-api",
  "serde",
@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-mcp"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2724,7 +2724,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-plugin"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "lindesk-plugin-api",
  "serde",
@@ -2733,7 +2733,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-plugin-api"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "schemars",
  "serde",
@@ -2743,7 +2743,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-query"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "duckdb",
@@ -2762,7 +2762,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-session"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2788,7 +2788,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-store"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "arrow-array 59.3.0",
  "arrow-cast 59.3.0",
@@ -2809,7 +2809,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-sys"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "flate2",
  "libc",
@@ -2822,7 +2822,7 @@ dependencies = [
 
 [[package]]
 name = "lindesk-telemetry-sink"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "lindesk-core",
  "lindesk-host",
@@ -2841,11 +2841,11 @@ dependencies = [
 
 [[package]]
 name = "lindesk-version"
-version = "0.1.0"
+version = "0.3.0"
 
 [[package]]
 name = "lindeskctl"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytesize",
@@ -2877,7 +2877,7 @@ dependencies = [
 
 [[package]]
 name = "lindeskd"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",

@@ -1,5 +1,6 @@
 //! One module per command family.
 
+pub mod batch;
 pub mod changes;
 pub mod config;
 pub mod control;
@@ -11,6 +12,7 @@ pub mod mcp;
 pub mod plugin;
 pub mod power;
 pub mod profile;
+pub mod responsiveness;
 pub mod setup;
 pub mod simulate;
 pub mod status;

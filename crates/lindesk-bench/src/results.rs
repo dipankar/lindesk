@@ -239,6 +239,8 @@ pub struct RunConfig {
     pub scopes: bool,
     pub manage_services: bool,
     pub reassert_foreground: bool,
+    #[serde(default)]
+    pub desktop_focus: bool,
     pub interact: bool,
     pub load: LoadConfig,
     pub scratch_dir: String,

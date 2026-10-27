@@ -3,7 +3,7 @@
 
 use std::fmt::Write;
 
-use crate::results::{PhaseResult, Results};
+use crate::results::{Phase, PhaseResult, Results};
 use crate::safety::MIB;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -313,13 +313,76 @@ pub fn header(results: &[&Results]) -> String {
 pub fn render_results(r: &Results) -> String {
     let cols: Vec<Column<'_>> =
         r.phases.iter().map(|p| Column { title: format!("lindesk {}", p.phase.as_str()), phase: p }).collect();
-    format!("{}{}", header(&[r]), table(&cols))
+    let method = if r.config.desktop_focus {
+        "Real desktop focus was preserved. Probe timings are synthetic reference measurements, not GUI frame or input latency."
+    } else {
+        "Foreground was assigned to a synthetic probe; this does not validate desktop focus tracking."
+    };
+    let classification = if !r.config.scopes {
+        "Workloads inherited the launching process's cgroup; scope isolation and automatic classification were not tested."
+    } else if r.config.slice == "app.slice" {
+        "Background work used an ordinary app slice; inspect classifications to verify which workloads were detected."
+    } else {
+        "Background work was explicitly placed in a batch/background slice; automatic classification was not tested."
+    };
+    let repeats = repeated_summary(&r.phases);
+    format!("{}\n{method} {classification}\n\n{}{}", header(&[r]), table(&cols), repeats)
+}
+
+fn repeated_summary(phases: &[PhaseResult]) -> String {
+    let off = phases.iter().filter(|p| p.phase == Phase::Off).count();
+    let on = phases.len() - off;
+    if off < 2 || on < 2 {
+        return "\nSingle observations cannot establish repeatability; run repeated, counterbalanced phases.\n".into();
+    }
+    let mut out = format!(
+        "\nAcross {off} off and {on} on runs: median of each run's metric [min, max]. These ranges are not confidence intervals.\n\n| Metric | Off | On | Change in median |\n|---|---:|---:|---:|\n"
+    );
+    for row in ROWS {
+        let mut values = [Vec::new(), Vec::new()];
+        for p in phases {
+            if let Some(v) = (row.get)(p).filter(|v| v.is_finite()) {
+                values[usize::from(p.phase == Phase::On)].push(v);
+            }
+        }
+        if values.iter().any(Vec::is_empty) {
+            continue;
+        }
+        let medians = values.each_mut().map(|v| {
+            v.sort_by(f64::total_cmp);
+            if v.len() % 2 == 0 { (v[v.len() / 2 - 1] + v[v.len() / 2]) / 2.0 } else { v[v.len() / 2] }
+        });
+        let _ = write!(out, "| {} |", row.label);
+        for (v, median) in values.iter().zip(medians) {
+            let _ = write!(
+                out,
+                " {} [{}, {}] |",
+                fmt(row.unit, median),
+                fmt(row.unit, v[0]),
+                fmt(row.unit, *v.last().unwrap())
+            );
+        }
+        let _ = writeln!(out, " {} |", delta(medians[0], medians[1], row.better));
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::results::tests::sample_results;
+
+    #[test]
+    fn repeated_report_separates_conditions_and_discloses_limits() {
+        let mut r = sample_results();
+        r.phases.extend(r.phases.clone().into_iter().rev());
+        let text = render_results(&r);
+        assert!(text.contains("Across 2 off and 2 on runs"));
+        assert!(text.contains("not confidence intervals"));
+        assert!(text.contains("does not validate desktop focus tracking"));
+        r.config.desktop_focus = true;
+        assert!(render_results(&r).contains("Real desktop focus was preserved"));
+    }
 
     #[test]
     fn micros_formatting() {

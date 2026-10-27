@@ -19,6 +19,9 @@ pub struct Entry {
     pub current: Setting,
     pub provenance: Provenance,
     pub since: TimestampMs,
+    /// Persisted before mutation; a restart must retry or restore this operation.
+    #[serde(default)]
+    pub pending: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -79,7 +82,7 @@ impl AppliedState {
         }
         for ((target, knob), d) in desired {
             match self.entries.get(&(target.clone(), knob.clone())) {
-                Some(e) if e.current == d.setting => {}
+                Some(e) if !e.pending && e.current == d.setting => {}
                 Some(_) => applies.push(Action::Apply {
                     target: target.clone(),
                     setting: d.setting.clone(),
@@ -122,6 +125,7 @@ impl AppliedState {
         match self.entries.get_mut(&key) {
             Some(e) => {
                 e.current = setting.clone();
+                e.pending = false;
                 e.provenance = provenance.clone();
             }
             None => {
@@ -134,10 +138,24 @@ impl AppliedState {
                         current: setting.clone(),
                         provenance: provenance.clone(),
                         since: now,
+                        pending: false,
                     },
                 );
             }
         }
+    }
+
+    /// Write-ahead entry. It must be saved successfully before calling the actuator.
+    pub fn record_pending(
+        &mut self,
+        target: &Target,
+        setting: &Setting,
+        original: Option<Setting>,
+        provenance: &Provenance,
+        now: TimestampMs,
+    ) {
+        self.record_apply(target, setting, original, provenance, now);
+        self.entries.get_mut(&(target.clone(), setting.knob())).unwrap().pending = true;
     }
 
     pub fn record_reset(&mut self, target: &Target, knob: &Knob) {
@@ -162,6 +180,28 @@ impl AppliedState {
         let v: Vec<Entry> = serde_json::from_str(s)?;
         Ok(AppliedState { entries: v.into_iter().map(|e| ((e.target.clone(), e.knob.clone()), e)).collect() })
     }
+}
+
+/// Atomically replace a recovery journal and sync it before the caller mutates the system.
+/// Journals normally live on tmpfs, where this does not incur disk flushes.
+pub fn write_journal(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let tmp = path.with_extension(format!("json.tmp-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        std::fs::File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]

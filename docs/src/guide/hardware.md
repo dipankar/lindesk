@@ -42,7 +42,7 @@ power      AC
 virtual    bare metal
 
 How lindesk adapts here
-  → hybrid P/E cores: foreground boosts (uclamp.min) land on P-cores, batch caps (uclamp.max) on E-cores (profile x86-hybrid)
+  → hybrid P/E cores: uclamp supplies performance hints; core placement is not guaranteed (profile x86-hybrid)
   → compressed swap: reclaim costs CPU, so memory pressure is treated as CPU work too
 
 Latency map  not calibrated yet: lindesk uses nominal values. Measure it (≈15 s): lindeskctl calibrate
@@ -50,9 +50,10 @@ Latency map  not calibrated yet: lindesk uses nominal values. Measure it (≈15 
 
 ## Architecture-specific behaviour
 
-* **Hybrid x86 (Intel P/E cores).** `uclamp.min` on the foreground makes the scheduler
-  prefer P-cores; `uclamp.max` on batch work keeps it on E-cores. The `x86-hybrid` profile
-  sets those values; ITMT core ranking is reported.
+* **Hybrid x86 (Intel P/E cores).** `uclamp.min` on the foreground requests a higher minimum performance level;
+  `uclamp.max` on batch work lowers its maximum performance hint. Neither sets CPU-time
+  quotas or core affinity. Effects depend on the scheduler and frequency driver. The
+  `x86-hybrid` profile sets those values; ITMT core ranking is reported.
 * **ARM big.LITTLE with EAS.** Energy Aware Scheduling places tasks by their utilisation
   clamp, so uclamp is the main steering knob (`arm-eas` profile). Without EAS, uclamp only
   shapes frequency and `cpu.weight` does most of the work.

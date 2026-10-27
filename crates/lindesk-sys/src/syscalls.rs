@@ -254,6 +254,32 @@ pub fn uclamp_reset(pid: i32) -> io::Result<()> {
     uclamp_set(pid, Some(UCLAMP_RESET), Some(UCLAMP_RESET))
 }
 
+/// Opt-in experiment for a newly spawned child only. Keeps SCHED_OTHER and nice;
+/// verifies the kernel accepted the requested EEVDF slice (Linux 6.12+).
+/// Uses only raw syscalls on the valid path, suitable for Command::pre_exec.
+pub fn set_child_slice_us(us: u32) -> io::Result<()> {
+    if !(100..=100_000).contains(&us) {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    let mut attr = sched_getattr(0)?;
+    if attr.sched_policy != libc::SCHED_OTHER as u32 {
+        return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+    }
+    attr.size = SCHED_ATTR_SIZE;
+    attr.sched_runtime = u64::from(us) * 1000;
+    attr.sched_flags &= !SCHED_FLAG_KEEP_PARAMS;
+    attr.sched_flags |= SCHED_FLAG_KEEP_POLICY;
+    // SAFETY: the caller is the only target; attr is initialized and policy stays fair.
+    let rc = unsafe { libc::syscall(libc::SYS_sched_setattr, 0, &attr as *const SchedAttr, 0 as libc::c_uint) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if sched_getattr(0)?.sched_runtime != attr.sched_runtime {
+        return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

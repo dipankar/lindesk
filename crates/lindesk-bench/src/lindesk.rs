@@ -56,6 +56,29 @@ impl Lindesk {
         }
     }
 
+    /// Read back pause state from every daemon. Refuse a running daemon that cannot
+    /// be reached, rather than silently treating a partial pause as a baseline.
+    pub fn checked_state(&self) -> Result<LindeskState> {
+        let mut state = self.detect();
+        check_reachable(&state)?;
+        self.rt.block_on(async {
+            if state.session_bus {
+                let p = QoSProxy::new(self.session.as_ref().unwrap()).await?;
+                if paused_from_json(&timed(p.get_paused()).await?)? {
+                    state.paused.push("lindesk-session".into());
+                }
+            }
+            if state.broker_bus {
+                let p = BrokerProxy::new(self.system.as_ref().unwrap()).await?;
+                if paused_from_json(&timed(p.get_paused()).await?)? {
+                    state.paused.push("lindeskd".into());
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        })?;
+        Ok(state)
+    }
+
     /// Marks `pid` as the foreground app: `SetForegroundProcess` on the session agent, or
     /// `ReportForeground` on the broker when no session agent is around.
     pub fn set_foreground(&self, pid: u32) -> Result<()> {
@@ -77,7 +100,8 @@ impl Lindesk {
 
     /// `SetPaused` on every lindesk daemon that is up: observe-only, every setting it
     /// applied reverted (`seconds > 0` auto-resumes). Returns which daemons paused; the
-    /// broker may refuse (polkit), which leaves system units managed.
+    /// Any failure is an error, including partial success. The caller must arm its
+    /// resume guard before calling, since a timed-out request may still take effect.
     pub fn set_paused(&self, paused: bool, seconds: u32) -> Result<Vec<&'static str>> {
         self.rt.block_on(async {
             let mut done = Vec::new();
@@ -100,11 +124,11 @@ impl Lindesk {
                     )),
                 }
             }
-            if done.is_empty() && !errors.is_empty() {
+            if !errors.is_empty() {
                 return Err(anyhow!("{}", errors.join("; ")));
             }
-            for e in errors {
-                eprintln!("lindesk-bench: warning: {e}");
+            if done.is_empty() {
+                return Err(anyhow!("no reachable lindesk daemon to pause or resume"));
             }
             Ok(done)
         })
@@ -140,6 +164,23 @@ impl Lindesk {
             level_from_status(&json)
         })
     }
+}
+
+fn paused_from_json(json: &str) -> Result<bool> {
+    serde_json::from_str::<serde_json::Value>(json)?["paused"]
+        .as_bool()
+        .ok_or_else(|| anyhow!("daemon returned no boolean pause state"))
+}
+
+fn check_reachable(s: &LindeskState) -> Result<()> {
+    for (name, bus, unit) in
+        [("lindesk-session", s.session_bus, s.session_unit_active), ("lindeskd", s.broker_bus, s.system_unit_active)]
+    {
+        if !bus && (unit || s.processes.iter().any(|p| p.starts_with(&format!("{name}[")))) {
+            return Err(anyhow!("{name} is running but its D-Bus service is unreachable; cannot verify pause"));
+        }
+    }
+    Ok(())
 }
 
 async fn name_owned(c: &Connection, name: &'static str) -> bool {
@@ -222,6 +263,27 @@ pub fn stop_instructions(s: &LindeskState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_state_must_be_explicit() {
+        assert!(paused_from_json(r#"{"paused":true}"#).unwrap());
+        assert!(!paused_from_json(r#"{"paused":false}"#).unwrap());
+        for invalid in ["{}", "null", r#"{"paused":"false"}"#, "bad json"] {
+            assert!(paused_from_json(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn unreachable_running_daemon_invalidates_pause_baseline() {
+        assert!(check_reachable(&LindeskState::default()).is_ok());
+        let mut s = LindeskState { session_bus: true, system_unit_active: true, ..Default::default() };
+        assert!(check_reachable(&s).is_err());
+        s.system_unit_active = false;
+        s.processes.push("lindeskd[123]".into());
+        assert!(check_reachable(&s).is_err());
+        s.broker_bus = true;
+        assert!(check_reachable(&s).is_ok());
+    }
 
     #[test]
     fn level_is_found_anywhere() {

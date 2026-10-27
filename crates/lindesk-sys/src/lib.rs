@@ -20,8 +20,10 @@ pub mod doctor;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
 pub mod foreign;
+pub mod gpu;
 pub mod hardware;
 pub mod iocost;
+pub mod memory;
 pub mod pagein;
 pub mod probe;
 pub mod procfs;

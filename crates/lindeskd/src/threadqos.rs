@@ -213,38 +213,50 @@ impl<N: Nice> Book<N> {
         Book { nice, proc_root: proc_root.to_path_buf(), file: state_dir.join(FILE), changed: BTreeMap::new() }
     }
 
-    fn save(&self) {
-        let r = if self.changed.is_empty() {
-            match std::fs::remove_file(&self.file) {
+    fn load(&mut self) -> std::io::Result<()> {
+        let raw = match std::fs::read(&self.file) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let saved: Vec<Changed> = serde_json::from_slice(&raw).map_err(std::io::Error::other)?;
+        self.changed = saved.into_iter().map(|c| (c.tid, c)).collect();
+        Ok(())
+    }
+
+    fn save(&self) -> std::io::Result<()> {
+        if self.changed.is_empty() {
+            return match std::fs::remove_file(&self.file) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
                 _ => Ok(()),
-            }
-        } else {
-            let all: Vec<&Changed> = self.changed.values().collect();
-            std::fs::write(&self.file, serde_json::to_vec(&all).unwrap_or_default())
-        };
-        if let Err(e) = r {
-            tracing::debug!("thread-qos: cannot update {}: {e}", self.file.display());
+            };
         }
+        let all: Vec<&Changed> = self.changed.values().collect();
+        lindesk_core::reconcile::write_journal(&self.file, &serde_json::to_vec(&all)?)
     }
 
     /// Puts one thread back, if it is still the thread that was changed and nobody else
     /// has touched its niceness since.
-    fn undo(&self, c: &Changed) {
-        if threads::belongs_to(&self.proc_root, c.pid, c.tid) && self.nice.get(c.tid).ok() == Some(c.set) {
-            let _ = self.nice.set(c.tid, c.original);
+    fn undo(&self, c: &Changed) -> bool {
+        if !threads::belongs_to(&self.proc_root, c.pid, c.tid) {
+            return true;
+        }
+        match self.nice.get(c.tid) {
+            Ok(n) if n == c.set => self.nice.set(c.tid, c.original).is_ok(),
+            Ok(_) => true, // Another actor changed it; leave that choice alone.
+            Err(_) => false,
         }
     }
 
     fn undo_all(&mut self) -> usize {
-        let n = self.changed.len();
-        for c in std::mem::take(&mut self.changed).values() {
-            self.undo(c);
+        let restored: Vec<_> = self.changed.iter().filter(|(_, c)| self.undo(c)).map(|(tid, _)| *tid).collect();
+        for tid in &restored {
+            self.changed.remove(tid);
         }
-        if n > 0 {
-            self.save();
+        if let Err(e) = self.save() {
+            tracing::warn!("thread-qos: saving recovery state: {e}");
         }
-        n
+        restored.len()
     }
 
     /// Makes the threads of `pids` match their roles. Returns (engine, UI threads, background
@@ -271,34 +283,39 @@ impl<N: Nice> Book<N> {
             .collect();
         let mut dirty = !stale.is_empty();
         for tid in stale {
-            if let Some(c) = self.changed.remove(&tid) {
-                self.undo(&c);
+            if self.changed.get(&tid).is_some_and(|c| self.undo(c)) {
+                self.changed.remove(&tid);
             }
         }
+        let mut pending = Vec::new();
         for (tid, (pid, nice)) in &wanted {
-            if self.changed.contains_key(tid) || *nice == 0 {
+            if self.changed.contains_key(tid) || *nice == 0 || self.nice.get(*tid).ok() != Some(0) {
                 continue;
             }
-            match self.nice.get(*tid) {
-                // Only threads at the default: any other value is the app's own choice.
-                Ok(0) => {}
-                _ => continue,
-            }
-            match self.nice.set(*tid, *nice) {
-                Ok(()) => {
-                    self.changed.insert(*tid, Changed { pid: *pid, tid: *tid, original: 0, set: *nice });
-                    dirty = true;
+            self.changed.insert(*tid, Changed { pid: *pid, tid: *tid, original: 0, set: *nice });
+            pending.push(*tid);
+        }
+        if !pending.is_empty() {
+            if let Err(e) = self.save() {
+                for tid in pending {
+                    self.changed.remove(&tid);
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(e);
+            }
+            dirty = true;
+        }
+        for tid in pending {
+            let nice = self.changed[&tid].set;
+            if let Err(e) = self.nice.set(tid, nice) {
+                self.changed.remove(&tid);
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
                     self.undo_all();
                     return Err(e);
                 }
-                // The thread exited in between.
-                Err(_) => {}
             }
         }
         if dirty {
-            self.save();
+            self.save()?;
         }
         let ui = self.changed.values().filter(|c| c.set == cfg.ui_nice).count();
         Ok((engine, ui, self.changed.len() - ui))
@@ -310,12 +327,16 @@ impl<N: Nice> Book<N> {
 pub fn restore(state_dir: &Path, roots: &Roots) -> usize {
     let file = state_dir.join(FILE);
     let Ok(raw) = std::fs::read(&file) else { return 0 };
-    let saved: Vec<Changed> = serde_json::from_slice(&raw).unwrap_or_default();
+    let saved: Vec<Changed> = match serde_json::from_slice(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("thread-qos: invalid recovery journal: {e}");
+            return 0;
+        }
+    };
     let mut book = Book::new(KernelNice, &roots.proc, state_dir);
     book.changed = saved.into_iter().map(|c| (c.tid, c)).collect();
-    let n = book.undo_all();
-    let _ = std::fs::remove_file(&file);
-    n
+    book.undo_all()
 }
 
 enum Job {
@@ -349,7 +370,8 @@ impl ThreadQos {
         let unavailable = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&unavailable);
         let refresh = cfg.refresh;
-        let book = Book::new(KernelNice, &roots.proc, state_dir);
+        let mut book = Book::new(KernelNice, &roots.proc, state_dir);
+        book.load()?;
         std::thread::Builder::new()
             .name("lindesk-threads".into())
             .spawn(move || work(rx, cfg, roots, book, flag, &host, &events))?;
@@ -606,6 +628,51 @@ mod tests {
         let e = book.apply(&cfg(), &[100]).unwrap_err();
         assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(book.changed.is_empty() && nice.values.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn journal_failure_prevents_priority_changes() {
+        let dir = crate::common::test_dir();
+        let proc = dir.path().join("proc");
+        process(&proc, 100, BROWSER);
+        let state = dir.path().join("not-a-directory");
+        std::fs::write(&state, "occupied").unwrap();
+        let nice = FakeNice::default();
+        let mut book = Book::new(nice.clone(), &proc, &state);
+        assert!(book.apply(&cfg(), &[100]).is_err());
+        assert!(book.changed.is_empty());
+        assert!(nice.values.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_restore_keeps_recovery_records_for_retry() {
+        let dir = crate::common::test_dir();
+        let proc = dir.path().join("proc");
+        process(&proc, 100, BROWSER);
+        let mut book = Book::new(FakeNice::default(), &proc, dir.path());
+        book.apply(&cfg(), &[100]).unwrap();
+        let count = book.changed.len();
+        book.nice.deny = true;
+        assert_eq!(book.undo_all(), 0);
+        let saved: Vec<Changed> = serde_json::from_slice(&std::fs::read(dir.path().join(FILE)).unwrap()).unwrap();
+        assert_eq!(saved.len(), count);
+        // A new worker must adopt these originals, even if ExecStopPost could not restore them.
+        let mut restarted = Book::new(book.nice.clone(), &proc, dir.path());
+        restarted.load().unwrap();
+        assert_eq!(restarted.changed, book.changed);
+        book.nice.deny = false;
+        assert_eq!(book.undo_all(), count);
+        assert!(!dir.path().join(FILE).exists());
+    }
+
+    #[test]
+    fn corrupt_thread_journal_is_not_overwritten() {
+        let dir = crate::common::test_dir();
+        std::fs::write(dir.path().join(FILE), "invalid").unwrap();
+        let mut book = Book::new(FakeNice::default(), dir.path(), dir.path());
+        assert!(book.load().is_err());
+        assert_eq!(restore(dir.path(), &Roots::under(dir.path())), 0);
+        assert_eq!(std::fs::read_to_string(dir.path().join(FILE)).unwrap(), "invalid");
     }
 
     #[test]

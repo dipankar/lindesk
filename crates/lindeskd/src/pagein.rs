@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
@@ -81,6 +81,7 @@ struct Job {
     /// The process that owns the window: its memory first.
     pid: Option<i32>,
     cgroups: Vec<String>,
+    generation: u64,
 }
 
 /// What a job did.
@@ -97,6 +98,7 @@ pub struct PageIn {
     /// Set by the worker when the kernel or our privileges don't allow it: stop asking.
     unavailable: Arc<AtomicBool>,
     last: Option<Target>,
+    generation: Arc<AtomicU64>,
     done: HashMap<Target, Instant>,
 }
 
@@ -107,10 +109,14 @@ impl PageIn {
         // no longer matters.
         let (tx, rx) = mpsc::sync_channel::<Job>(1);
         let unavailable = Arc::new(AtomicBool::new(false));
+        let generation = Arc::new(AtomicU64::new(0));
+        let worker_generation = Arc::clone(&generation);
         let (flag, worker_cfg) = (Arc::clone(&unavailable), cfg.clone());
         std::thread::Builder::new().name("lindesk-pagein".into()).spawn(move || {
             for job in rx {
-                match run(&worker_cfg, &roots, &job) {
+                match run_checked(&worker_cfg, &roots, &job, || {
+                    worker_generation.load(Ordering::Relaxed) == job.generation
+                }) {
                     Ok(o) if o.bytes >= worker_cfg.min => {
                         tracing::debug!(target = %job.target, bytes = o.bytes, processes = o.processes, "paging in");
                         events.event(crate::common::startup::notice(
@@ -134,16 +140,22 @@ impl PageIn {
                 }
             }
         })?;
-        Ok(PageIn { cfg, tx, unavailable, last: None, done: HashMap::new() })
+        Ok(PageIn { cfg, tx, unavailable, last: None, generation, done: HashMap::new() })
     }
 
     /// Call after every engine step. Queues the focused app when focus moved to it.
     pub fn observe(&mut self, engine: &Engine) {
         let fg = engine.foreground();
+        if engine.dry_run() {
+            self.generation.fetch_add(1, Ordering::Relaxed);
+            self.last = None;
+            return;
+        }
         if fg == self.last.as_ref() {
             return;
         }
         self.last = fg.cloned();
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let Some(target) = fg else { return };
         // Paused and dry-run mean "change nothing"; so does a kernel that can't do it.
         if engine.dry_run() || self.unavailable.load(Ordering::Relaxed) {
@@ -159,7 +171,7 @@ impl PageIn {
         if cgroups.is_empty() {
             return;
         }
-        match self.tx.try_send(Job { target: target.clone(), pid: engine.foreground_pid(), cgroups }) {
+        match self.tx.try_send(Job { target: target.clone(), pid: engine.foreground_pid(), cgroups, generation }) {
             Ok(()) => {
                 self.done.insert(target.clone(), now);
             }
@@ -192,8 +204,17 @@ fn affordable(cfg: &PageInConfig, total: u64, available: u64) -> u64 {
     cfg.budget.min(available.saturating_sub(reserve))
 }
 
+/// Missing PSI is unknown; retain the existing reserve guard on older kernels.
+fn reclaim_busy(roots: &Roots) -> bool {
+    lindesk_sys::psi::PsiReading::read(&roots.proc.join("pressure/memory"))
+        .is_ok_and(|p| p.some.avg10 >= 5.0 || p.full.is_some_and(|f| f.avg10 >= 1.0))
+}
+
 /// Brings one app back. `Err` only when paging in can't work at all on this host.
-fn run(cfg: &PageInConfig, roots: &Roots, job: &Job) -> std::io::Result<Outcome> {
+fn run_checked(cfg: &PageInConfig, roots: &Roots, job: &Job, current: impl Fn() -> bool) -> std::io::Result<Outcome> {
+    if !current() || reclaim_busy(roots) {
+        return Ok(Outcome::default());
+    }
     let Some((total, available)) = memory(roots) else { return Ok(Outcome::default()) };
     let mut left = affordable(cfg, total, available);
     if left < cfg.min {
@@ -217,6 +238,12 @@ fn run(cfg: &PageInConfig, roots: &Roots, job: &Job) -> std::io::Result<Outcome>
 
     let mut out = Outcome::default();
     for (pid, _) in procs {
+        if !current() || reclaim_busy(roots) {
+            break;
+        }
+        // Recheck available memory before each process: conditions may change mid-job.
+        let headroom = memory(roots).map(|(total, available)| affordable(cfg, total, available)).unwrap_or(0);
+        left = left.min(headroom);
         if left < 4096 {
             break;
         }
@@ -240,6 +267,18 @@ fn run(cfg: &PageInConfig, roots: &Roots, job: &Job) -> std::io::Result<Outcome>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pressure_and_stale_focus_skip_speculative_work() {
+        let dir = crate::common::test_dir();
+        let roots = Roots::under(dir.path());
+        std::fs::create_dir_all(roots.proc.join("pressure")).unwrap();
+        std::fs::write(roots.proc.join("pressure/memory"), "some avg10=6.0 avg60=0 avg300=0 total=10\n").unwrap();
+        assert!(reclaim_busy(&roots));
+        let job = Job { target: Target::system_unit("app.scope"), pid: None, cgroups: vec![], generation: 1 };
+        assert_eq!(run_checked(&PageInConfig::default(), &roots, &job, || false).unwrap(), Outcome::default());
+        assert_eq!(run_checked(&PageInConfig::default(), &roots, &job, || true).unwrap(), Outcome::default());
+    }
 
     #[test]
     fn config() {
@@ -278,11 +317,16 @@ mod tests {
         put(&format!("sys/fs/cgroup{cg}/cgroup.procs"), "100\n101\n");
         put("proc/100/status", "Name:\tx\nVmSwap:\t       0 kB\n");
         put("proc/101/status", "Name:\tx\n");
-        let job = Job { target: Target::user_unit(1000, "app-x-1.scope"), pid: Some(100), cgroups: vec![cg.into()] };
-        assert_eq!(run(&PageInConfig::default(), &roots, &job).unwrap(), Outcome::default());
+        let job = Job {
+            target: Target::user_unit(1000, "app-x-1.scope"),
+            pid: Some(100),
+            cgroups: vec![cg.into()],
+            generation: 0,
+        };
+        assert_eq!(run_checked(&PageInConfig::default(), &roots, &job, || true).unwrap(), Outcome::default());
         // No memory to spare: not even looked at.
         put("proc/meminfo", "MemTotal:       65536000 kB\nMemAvailable:   1000000 kB\n");
         put("proc/100/status", "Name:\tx\nVmSwap:\t  500000 kB\n");
-        assert_eq!(run(&PageInConfig::default(), &roots, &job).unwrap(), Outcome::default());
+        assert_eq!(run_checked(&PageInConfig::default(), &roots, &job, || true).unwrap(), Outcome::default());
     }
 }

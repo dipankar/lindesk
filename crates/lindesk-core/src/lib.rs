@@ -1,5 +1,6 @@
 //! Pure, I/O-free building blocks shared by every lindesk binary.
 
+pub mod attention;
 pub mod cgroup_path;
 pub mod clock;
 pub mod config;

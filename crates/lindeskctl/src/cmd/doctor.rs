@@ -299,6 +299,39 @@ pub fn control_plane_findings(system: bool) -> (Vec<Finding>, serde_json::Value)
         }
     };
     v.push(prof);
+    // Read the actual cgroup hierarchy, including ancestors the user agent cannot manage.
+    let broker = if !system { crate::cmd::status::fetch(true).ok() } else { None };
+    let raw = broker.as_ref().or(fetched.as_ref()).map(|f| &f.raw);
+    if let Some(cg) = raw.and_then(|r| r.pointer("/pressure/foreground/cgroup")).and_then(|v| v.as_str()) {
+        match lindesk_sys::memory::protection(&Roots::host().cgroup, cg) {
+            Ok(p) => v.push(finding(
+                if p.ancestor_ceiling < p.configured { Severity::Warn } else { Severity::Ok },
+                "Foreground memory",
+                format!(
+                    "configured {}; ancestor ceiling {} (best effort, shared with siblings)",
+                    bytes(p.configured),
+                    bytes(p.ancestor_ceiling)
+                ),
+                p.limiting_cgroup
+                    .map(|cg| format!("limited by {cg}; the broker must allocate ancestor memory.low budgets")),
+            )),
+            Err(e) => {
+                v.push(finding(Severity::Warn, "Foreground memory", format!("effective protection unknown: {e}"), None))
+            }
+        }
+    }
+    if raw
+        .and_then(|r| r.pointer("/status/foreground/target/name"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|n| n.contains("Terminal") || n.contains("terminal") || n.contains("konsole"))
+    {
+        v.push(finding(
+            Severity::Info,
+            "Terminal focus",
+            "window process only; the active tab's command is not identified",
+            Some("run commands you are waiting for with: lindeskctl run --interactive <command>".into()),
+        ));
+    }
     // Changes waiting for confirmation.
     let sources = fetched
         .as_ref()
@@ -489,7 +522,8 @@ pub fn run(ui: &Ui) -> Result<()> {
     // Persistent limits and scheduler rules from outside lindesk (it only makes runtime changes).
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let foreign = lindesk_sys::foreign::scan(&lindesk_sys::roots::Roots::host(), home.as_deref());
-    let needs_action = findings(&probe).iter().chain(services.iter()).any(|f| f.severity >= Severity::Warn);
+    let needs_action =
+        findings(&probe).iter().chain(services.iter()).chain(control.iter()).any(|f| f.severity >= Severity::Warn);
     if ui.json {
         let mut v: serde_json::Value = serde_json::from_str(&render_json(&probe))?;
         v["services"] = serde_json::to_value(&services)?;
@@ -517,7 +551,11 @@ pub fn run(ui: &Ui) -> Result<()> {
             s.push_str(&render(ui, &lindesk_sys::foreign::findings(&foreign)));
             s.push('\n');
         }
-        s.push_str(&verdict(ui, &probe, &reports, &services));
+        if let Some(f) = control.iter().find(|f| f.severity >= Severity::Warn) {
+            s.push_str(&ui.yellow(format!("→ protection needs attention: {} — {}", f.check, f.status)));
+        } else {
+            s.push_str(&verdict(ui, &probe, &reports, &services));
+        }
         crate::ui::out(&s);
     }
     if needs_action { Err(Exit(1).into()) } else { Ok(()) }
@@ -540,7 +578,7 @@ fn profile_of(raw: &serde_json::Value) -> Option<String> {
     })
 }
 
-/// The last line of `doctor`: either "it works" or the single most important next step.
+/// The last line of `doctor`: either the runtime/capability status or the single most important next step.
 pub fn verdict(ui: &Ui, probe: &Probe, reports: &[RequirementsReport], services: &[Finding]) -> String {
     if let Some(f) = reports.iter().flat_map(|r| r.failures()).next() {
         let fix = f.remedy.clone().map(|r| format!(" → {r}")).unwrap_or_default();
@@ -562,7 +600,7 @@ pub fn verdict(ui: &Ui, probe: &Probe, reports: &[RequirementsReport], services:
     }
     let (level, why) = probe.support();
     let profile = status_profile().map(|p| format!(", profile {p}")).unwrap_or_default();
-    let mut s = ui.green(format!("✓ lindesk is protecting your desktop ({level}{profile})"));
+    let mut s = ui.green(format!("✓ lindesk is running (kernel support: {level}{profile})"));
     if let Some(w) = why.first() {
         s.push_str(&ui.dim(format!("  to do better: {w}")));
     }

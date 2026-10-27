@@ -151,6 +151,7 @@ fn restore(cli: &Cli) -> ExitCode {
     if threads > 0 {
         tracing::info!("put {threads} thread priorities back");
     }
+    ok &= !cli.state_dir.join(threadqos::FILE).exists();
     if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
@@ -381,7 +382,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     match engine.load_state(&state_path) {
         Ok(0) => {}
         Ok(n) => tracing::info!("recovered {n} applied settings from {}", state_path.display()),
-        Err(e) => tracing::warn!("ignoring applied state: {e}"),
+        Err(e) => anyhow::bail!("cannot load recovery journal; refusing to overwrite it: {e}"),
     }
     requirement_notices(&mut engine, &requirements);
     for (name, e) in engine.start() {

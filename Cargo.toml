@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*", "examples/plugins/rust/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -15,18 +15,18 @@ description = "macOS-style QoS for the Linux desktop: a plugin-based userspace r
 # The allocator of every lindesk binary (their `mimalloc` feature, on by default).
 mimalloc = { version = "0.1", default-features = false }
 # internal
-lindesk-plugin-api = { path = "crates/lindesk-plugin-api", version = "0.1.0" }
-lindesk-plugin = { path = "crates/lindesk-plugin", version = "0.1.0" }
-lindesk-core = { path = "crates/lindesk-core", version = "0.1.0" }
-lindesk-host = { path = "crates/lindesk-host", version = "0.1.0" }
-lindesk-builtins = { path = "crates/lindesk-builtins", version = "0.1.0" }
-lindesk-sys = { path = "crates/lindesk-sys", version = "0.1.0" }
-lindesk-store = { path = "crates/lindesk-store", version = "0.1.0" }
-lindesk-query = { path = "crates/lindesk-query", version = "0.1.0" }
-lindesk-ipc = { path = "crates/lindesk-ipc", version = "0.1.0" }
-lindesk-changes = { path = "crates/lindesk-changes", version = "0.1.0" }
-lindesk-mcp = { path = "crates/lindesk-mcp", version = "0.1.0" }
-lindesk-version = { path = "crates/lindesk-version", version = "0.1.0" }
+lindesk-plugin-api = { path = "crates/lindesk-plugin-api", version = "0.3.0" }
+lindesk-plugin = { path = "crates/lindesk-plugin", version = "0.3.0" }
+lindesk-core = { path = "crates/lindesk-core", version = "0.3.0" }
+lindesk-host = { path = "crates/lindesk-host", version = "0.3.0" }
+lindesk-builtins = { path = "crates/lindesk-builtins", version = "0.3.0" }
+lindesk-sys = { path = "crates/lindesk-sys", version = "0.3.0" }
+lindesk-store = { path = "crates/lindesk-store", version = "0.3.0" }
+lindesk-query = { path = "crates/lindesk-query", version = "0.3.0" }
+lindesk-ipc = { path = "crates/lindesk-ipc", version = "0.3.0" }
+lindesk-changes = { path = "crates/lindesk-changes", version = "0.3.0" }
+lindesk-mcp = { path = "crates/lindesk-mcp", version = "0.3.0" }
+lindesk-version = { path = "crates/lindesk-version", version = "0.3.0" }
 
 # external
 anyhow = "1"

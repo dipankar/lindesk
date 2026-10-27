@@ -176,6 +176,62 @@ fn desktop(now: i64, fg_stall: f64) -> Snap {
 }
 
 #[test]
+fn media_visible_and_interactive_work_stay_protected_during_red_pressure() {
+    let mut p = ThresholdPolicy::new(crisp());
+    let mk = |now| {
+        desktop(now, 0.5)
+            .unit("call.scope", QosClass::Background)
+            .seen("call.scope", Some(false), Some(true))
+            .unit("split.scope", QosClass::Normal)
+            .seen("split.scope", Some(true), Some(false))
+            .unit("waited-command.scope", QosClass::Interactive)
+            .seen("waited-command.scope", None, None)
+            .seen("build.scope", Some(true), Some(false))
+            .usage("split.scope", 300 << 20, 300 << 20, 1 << 30)
+            .usage("waited-command.scope", 300 << 20, 300 << 20, 1 << 30)
+            .mem(0.8, 0.6)
+            .build()
+    };
+    let trace = run(&mut p, 0, 10_000, mk);
+    let (_, level, out) = trace.last().unwrap();
+    assert_eq!(*level, Level::Red);
+    for (name, weight) in [("call.scope", 200), ("split.scope", 150), ("waited-command.scope", 200)] {
+        assert_eq!(get(out, name, Knob::CpuWeight), Some(Setting::CpuWeight { value: weight }));
+        assert_eq!(get(out, name, Knob::MemoryLow), Some(Setting::MemoryLow { bytes: 256 << 20 }));
+        assert!(out.intents.iter().filter(|i| i.target == unit(name)).all(|i| !is_throttle(&i.setting)));
+        assert!(get(out, name, Knob::UclampMin).is_none(), "no permanent frequency floor");
+    }
+    assert!(io_max(out, "build.scope").is_some(), "visible build still yields");
+    assert_eq!(get(out, "build.scope", Knob::CpuIdle), Some(Setting::CpuIdle { value: true }));
+
+    let mut quiet = mk(10_000);
+    for u in &mut quiet.units {
+        u.visible = Some(false);
+        u.audible = Some(false);
+    }
+    let out = p.evaluate(&quiet).unwrap();
+    assert_eq!(get(&out, "call.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 20 }));
+    assert!(get(&out, "split.scope", Knob::CpuWeight).is_none());
+    assert_eq!(get(&out, "waited-command.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 200 }));
+}
+
+#[test]
+fn missing_presence_does_not_promote_apps_and_attention_config_is_bounded() {
+    let mut p = ThresholdPolicy::default();
+    let out = p.evaluate(&Snap::at(0).unit("unknown.scope", QosClass::Normal).build()).unwrap();
+    assert!(knobs(&out, "unknown.scope").is_empty());
+    for key in ["media_weight", "interactive_weight", "visible_weight"] {
+        for value in [0, 99, 1001] {
+            assert!(ThresholdConfig::from_json(&serde_json::json!({key: value})).is_err());
+        }
+    }
+    let c = ThresholdConfig::from_json(&serde_json::json!({"attention_memory_low_max": "64MiB"})).unwrap();
+    let mut p = ThresholdPolicy::new(c);
+    let out = p.evaluate(&Snap::at(0).unit("small.scope", QosClass::Interactive).build()).unwrap();
+    assert_eq!(get(&out, "small.scope", Knob::MemoryLow), Some(Setting::MemoryLow { bytes: 64 << 20 }));
+}
+
+#[test]
 fn green_has_only_static_intents_and_mild_foreground_boost() {
     let mut p = ThresholdPolicy::default();
     let out = p.evaluate(&desktop(0, 0.0).build()).unwrap();
@@ -269,9 +325,9 @@ fn focus_change_starts_a_new_epoch_for_the_new_target() {
         .build();
     let out = p.evaluate(&snap).unwrap();
     assert_eq!(get(&out, "editor.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 500 }));
-    // The app you just left stays warm: a little above the default share, no epoch boost.
-    assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 150 }));
-    assert_eq!(get(&out, "app.scope", Knob::IoWeight), Some(Setting::IoWeight { value: 150 }));
+    // Explicit interactive work keeps its share after focus moves, but loses the epoch boost.
+    assert_eq!(get(&out, "app.scope", Knob::CpuWeight), Some(Setting::CpuWeight { value: 200 }));
+    assert_eq!(get(&out, "app.scope", Knob::IoWeight), Some(Setting::IoWeight { value: 200 }));
     assert_eq!(get(&out, "app.scope", Knob::UclampMin), None, "the old foreground loses its boost");
     // Interactions for a target that is not the foreground are ignored.
     // (After the editor's 3s switch epoch has run out.)
@@ -1018,7 +1074,7 @@ mod hardware {
         assert_eq!(r.enter, ResourceThresholds { cpu: 0.30, io: 0.20, memory: 0.15 }, "zram");
         assert_eq!((r.critical_memory_low, r.fg_memory_low_max), (512 * MIB_U, 2048 * MIB_U));
         assert!(r.hybrid && !r.on_battery);
-        assert!(why(&r, "hybrid").why.contains("P-cores"));
+        assert!(why(&r, "hybrid").why.contains("core placement depends on scheduler support"));
         assert_eq!(r.virtualization, None);
     }
 

@@ -177,11 +177,46 @@ impl QoS {
 
     /// Record a free-form metric (lands in the `metrics` table).
     async fn report_metric(&self, name: String, value: f64, labels: HashMap<String, String>) -> fdo::Result<()> {
-        if name.trim().is_empty() {
-            return Err(fdo::Error::InvalidArgs("empty metric name".into()));
+        if name.trim().is_empty()
+            || name.len() > 128
+            || !value.is_finite()
+            || labels.len() > 16
+            || labels.iter().any(|(k, v)| k.len() > 128 || v.len() > 256)
+        {
+            return Err(fdo::Error::InvalidArgs(
+                "metric needs a finite value, name <=128 bytes, at most 16 labels (keys <=128, values <=256)".into(),
+            ));
         }
         let m = Metric { ts: now_ms(), name, value, labels: labels.into_iter().collect(), plugin: "dbus".into() };
         self.engine.send(crate::common::engine_thread::Command::Metric(m)).map_err(gone)
+    }
+
+    /// Same-user, expiring, one-hop dependency. A zero TTL cancels the pair.
+    async fn report_dependency(
+        &self,
+        client_pid: i32,
+        server_pid: i32,
+        ttl_ms: u32,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> fdo::Result<()> {
+        let who = control::caller(conn, &hdr).await.map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        if who.uid != self.uid {
+            return Err(fdo::Error::AccessDenied("wrong session uid".into()));
+        }
+        let lease = crate::common::responsiveness::Lease::capture(client_pid, server_pid, who.uid, ttl_ms)
+            .map_err(fdo::Error::InvalidArgs)?;
+        self.engine
+            .call(|reply| crate::common::engine_thread::Command::Dependency { lease, ttl_ms, reply })
+            .await
+            .map_err(gone)?
+            .map_err(fdo::Error::LimitsExceeded)?;
+        let _ = self.forward.send(Forward::Dependency { client_pid, server_pid, ttl_ms, sent: Instant::now() });
+        Ok(())
+    }
+
+    async fn latency_report(&self) -> fdo::Result<String> {
+        self.engine.call(|reply| crate::common::engine_thread::Command::Latency { reply }).await.map_err(gone)
     }
 
     /// Status JSON (see ARCHITECTURE.md).

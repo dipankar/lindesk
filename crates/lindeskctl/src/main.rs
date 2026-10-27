@@ -37,6 +37,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::Watch { interval, count, plain } => cmd::watch::watch(&ui, *interval, *count, *plain),
         Cmd::Events { follow, kinds, lines } => cmd::events::run(&ui, *follow, kinds, *lines),
         Cmd::Explain { what } => cmd::control::explain(&ui, what),
+        Cmd::Gpu { pid, interval } => cmd::responsiveness::gpu(&ui, *pid, *interval),
+        Cmd::Latency(args) => cmd::responsiveness::latency(&ui, args),
+        Cmd::Depend { client, server, ttl, cancel } => {
+            cmd::responsiveness::depend(&ui, *client, *server, *ttl, *cancel)
+        }
+        Cmd::Batch { file, jobs } => cmd::batch::run(&ui, file, *jobs as usize),
         Cmd::Run(args) => cmd::control::run(&ui, args),
         Cmd::Set { what, class } => cmd::control::set(&ui, what, (*class).into()),
         Cmd::Restore { stop } => cmd::control::restore(&ui, *stop),

@@ -27,7 +27,7 @@ with lindesk:     the same build, the same copy →  they slow down a little;
 The goal is a Linux desktop that stays as responsive under load as a Mac does. No kernel
 patch. No reboot. Any distro. Everything it changes, it undoes.
 
-> **Status: 0.1.0, early.** It runs daily on the author's GNOME/Wayland workstation; KDE,
+> **Status: 0.2.0, early.** It runs daily on the author's GNOME/Wayland workstation; KDE,
 > COSMIC, Hyprland and X11 adapters exist and are tested in isolation. It has not yet earned the
 > trust that years of deployment give tools like system76-scheduler. Don't take our word for
 > the difference it makes: [`lindesk-bench`](#measure-it-yourself) runs the same load with
@@ -100,7 +100,7 @@ memory control, uclamp, systemd's per-app units. What it lacks is something that
    cost nothing when nobody is waiting.
 3. **It steps in gradually when the app in front of you is actually stalling.** Measured
    pressure moves a GREEN → YELLOW → RED controller with hysteresis. Background work yields
-   in steps: lower weights, then CPU caps, then an adaptive I/O limit that tightens only
+   in steps: lower weights, then CPU performance hints, then an adaptive I/O limit that tightens only
    while your foreground is still held up, and loosens as soon as it isn't.
 4. **A short boost when you act.** For about half a second after you click or type, the app
    you're using gets a bounded boost. Not a permanent priority: your battery will notice.
@@ -108,14 +108,18 @@ memory control, uclamp, systemd's per-app units. What it lacks is something that
    memory stays protected and it keeps a raised share, so switching back to your browser
    doesn't mean waiting for it to be paged in again. If it was swapped out anyway, it is
    read back in one go the moment you switch to it.
-6. **It is not allowed to hurt.** No realtime classes. Every throttle has a floor, so
+6. **Work continues beyond focus.** Music and calls remain protected when hidden. Visible
+   normal apps get a useful share for split-screen work, and commands marked interactive
+   stay protected while you read another window. `status` tells you why.
+7. **It is not allowed to hurt.** No realtime classes. Every throttle has a floor, so
    nothing is starved. Critical processes can be boosted, never throttled. Every change is
    runtime-only, recorded with the value it replaced, and reverted on exit, on a crash and
    on uninstall.
 
 It also notices builds: a terminal tab full of `rustc` and `cc1` is background work while it
-compiles, even though you started it by hand. The window you're looking at is never
-throttled, whatever is running in it. And it guarantees its own small share of the machine,
+compiles, even though you started it by hand. The window process is protected. Terminal tabs have separate workloads: lindesk cannot
+infer the active tab from the terminal window PID. Use `lindeskctl run --interactive <command>`
+for a command you are waiting for, and `--batch` for work that should yield. And it guarantees its own small share of the machine,
 so it can't stall along with the load it is managing.
 
 Every mechanism, its defaults and how to watch it work:
@@ -217,11 +221,15 @@ lindesk-bench run
 ```
 
 It runs a CPU, disk and memory load in the background and a latency probe in the
-foreground, once with lindesk paused and once with it active, and prints the comparison:
+foreground, in counterbalanced off/on/on/off phases, and prints the comparison:
 wakeup latency, disk latency, how much your foreground stalled, and how much work the
 background still got done. Bounded, cleaned up after, and safe to stop with Ctrl-C.
 
-If lindesk doesn't make your machine better, that table will say so. We'd like to know.
+The report shows medians and ranges across runs, including background throughput.
+The default batch slice and synthetic foreground probe test resource control. To exercise
+classification, use `--slice app --build-cmd "cargo build"`; to preserve actual desktop
+focus, add `--desktop-focus`. Probe timings do not measure GUI input or frame latency.
+See [the benchmark guide](docs/src/guide/bench.md) for a real-workload evaluation procedure.
 
 ## Optional: history you can query
 
@@ -280,3 +288,15 @@ One note on binaries: the built-in COSMIC adapter links `cosmic-protocols`, whic
 GPL-3.0-only, so a `lindesk-session` binary built with it (the default, and what the
 packages ship) is distributed under GPL-3.0. Everything else is unaffected. See
 [THIRD-PARTY.md](THIRD-PARTY.md).
+
+## Responsiveness tools (0.3)
+
+Use `lindeskctl latency probe` and `latency show --json` for bounded timing history,
+`lindeskctl batch --jobs 4 jobs.json` for pressure-adaptive command admission, and
+`lindeskctl depend CLIENT_PID SERVER_PID --ttl 5s` for explicit dependency protection.
+`lindeskctl gpu PID` inspects driver-provided GPU counters;
+`lindeskctl run --slice-us 500 -- COMMAND` enables an opt-in EEVDF experiment.
+Page-in cancels further requests after focus changes or increased memory pressure.
+
+See [Latency tools and experiments](docs/src/guide/latency.md) for complete examples,
+D-Bus integration, limits, and the distinction between implemented features and research.

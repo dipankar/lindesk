@@ -161,6 +161,9 @@ pub struct TargetSummary {
     pub class: Option<QosClass>,
     #[serde(default)]
     pub foreground: bool,
+    /// Why the engine protects this workload, including attention outside keyboard focus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<lindesk_core::attention::Attention>,
     /// Settings lindesk currently holds on it.
     #[serde(default)]
     pub settings: Vec<Setting>,
@@ -214,7 +217,7 @@ pub struct Status {
     pub dry_run: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground: Option<TargetSummary>,
-    /// Critical and interactive targets (and the foreground).
+    /// Foreground, critical, media, explicitly interactive and visible normal targets.
     pub protected: Vec<TargetSummary>,
     /// Targets currently throttled.
     pub yielding: Vec<YieldingTarget>,

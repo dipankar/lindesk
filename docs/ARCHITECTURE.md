@@ -531,3 +531,55 @@ Newline-delimited JSON-RPC 2.0 over stdio; the host sends `initialize` first.
 * No realtime CPU or I/O classes. Nothing below the configured floors (`io.max`, `memory.high`, `uclamp.max`).
 * Critical workloads, lindesk's own units and the focused app can be boosted but never throttled.
 * All changes are runtime-only and recorded with their original value, then restored on exit, on crash recovery, or with `lindeskctl restore`.
+
+## Effective controls and recovery
+
+Sensors declare whether their wake descriptors need ordinary readability or priority
+notifications. PSI uses only POLLPRI; eventfd/pipe sources use POLLIN.
+
+After resolving policy intents, the host budgets memory.low across the cgroup tree,
+including intermediate slices and system-owned ancestors. The total generated budget is
+bounded by the memory safety ratio. User hosts only write their own manager's units;
+standalone operation may therefore have an ancestor protection ceiling of zero.
+
+Before actuation the engine atomically saves the original and a pending operation. Pending
+entries are retried, never treated as successfully applied. Recovery restores pending and
+completed entries. The thread worker and iocost manager share the atomic journal writer.
+
+The serving detector reads `/proc/<application-pid>/net/tcp{,6}` with one scan per application
+network namespace. The broker keeps PrivateNetwork=yes; its own `/proc/net` is irrelevant.
+
+### Attention beyond keyboard focus
+
+`lindesk-core::attention::Attention` defines the common policy/safety contract. In precedence
+order: foreground (including its app family), critical class, active playback/capture,
+explicit interactive class, visible normal app. Visibility does not promote background or
+batch workloads. Unknown presence is not evidence of activity. The engine rejects
+throttles on these targets and their ancestors; threshold supplies bounded CPU/I/O shares
+and memory protection. Presence expiry follows the existing adapter heartbeat contract.
+
+Each target summary in status may include `attention` (`foreground`, `critical`, `media`,
+`interactive`, `visible`). This is additive; older status without the field still parses.
+The `protected` list includes all these roles. Config adds `media_weight`,
+`interactive_weight`, `visible_weight` (100–1000) and `attention_memory_low_max` under
+`plugins.threshold.config`. No new D-Bus methods or privileges are needed.
+
+## Responsiveness observations and dependency leases (0.3)
+
+The shared engine loop owns two bounded volatile observation rings and a dependency lease
+table. `LatencyReport` is a read-only snapshot: at most 240 engine contexts and 1024
+recognized observations. The recorder does not drive policy and requires no telemetry sink.
+`ReportMetric` remains the application ingestion interface; labels are excluded from the ring.
+
+`ReportDependency` authenticates caller uid and captures both PIDs' uid/start-time identity.
+The loop expires and revalidates leases with monotonic time before resolving their targets.
+The engine evaluates one-hop client attention and marks servers `serving` in policy snapshots
+and `dependency` in status. Existing safety reconciliation protects servers and ancestors
+from throttles without rewriting classes. No transitive inheritance occurs.
+
+The batch CLI owns a bounded argv queue and changes admission using PSI deltas. Already-running
+commands complete normally. GPU diagnostics are read-only; the EEVDF launch experiment acts
+only on the child before exec. Neither introduces a daemon-wide automatic policy. Page-in
+workers check current focus generation, pressure and available-memory headroom between requests.
+
+Operational examples and research limits: [Latency tools](src/guide/latency.md).

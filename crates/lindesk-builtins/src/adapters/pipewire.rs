@@ -7,8 +7,10 @@
 //! emits `Event::Audible { pids }` whenever that set changes.
 //!
 //! The process of a stream is taken from its client's `pipewire.sec.pid` (what the kernel
-//! says is on the other end of the socket; correct for sandboxed apps too), falling back to
-//! the `application.process.id` the app declares.
+//! says is on the other end of the socket; correct for native sandboxed apps too), falling
+//! back to the `application.process.id` the app declares. For PulseAudio clients the socket
+//! belongs to pipewire-pulse, so use the local client's application PID instead. These are
+//! scheduling hints, not authorization identities; the host still limits the user's targets.
 //!
 //! Without `pw-dump` (no PipeWire, or its tools aren't installed) [`PipeWireAdapter::start`]
 //! returns [`PluginError::Unsupported`]: nothing is known to be audible, and the engine
@@ -50,8 +52,15 @@ const MAX_PENDING: usize = 64 << 20;
 pub struct Graph {
     /// Node id → (the node is a running audio stream, its client's id, the pid it declares).
     streams: BTreeMap<u64, Stream>,
-    /// Client id → the pid on the other end of its socket.
-    clients: BTreeMap<u64, i32>,
+    clients: BTreeMap<u64, Client>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Client {
+    socket_pid: Option<i32>,
+    application_pid: Option<i32>,
+    pulse: bool,
+    remote: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -70,6 +79,10 @@ fn number(v: Option<&Value>) -> Option<i64> {
     }
 }
 
+fn pid(v: Option<&Value>) -> Option<i32> {
+    number(v).and_then(|p| i32::try_from(p).ok()).filter(|p| *p > 0)
+}
+
 impl Graph {
     /// Applies one object from a dump (the initial list and every later change have the same
     /// shape; a removed object comes with `"info": null`).
@@ -85,10 +98,17 @@ impl Graph {
         let props = info.get("props");
         let prop = |name: &str| props.and_then(|p| p.get(name));
         if kind.ends_with(":Client") {
-            match number(prop("pipewire.sec.pid")).and_then(|p| i32::try_from(p).ok()).filter(|p| *p > 0) {
-                Some(pid) => self.clients.insert(id, pid),
-                None => self.clients.remove(&id),
-            };
+            if props.is_some() {
+                self.clients.insert(
+                    id,
+                    Client {
+                        socket_pid: pid(prop("pipewire.sec.pid")),
+                        application_pid: pid(prop("application.process.id")),
+                        pulse: prop("client.api").and_then(Value::as_str) == Some("pipewire-pulse"),
+                        remote: prop("pulse.server.type").and_then(Value::as_str) == Some("tcp"),
+                    },
+                );
+            }
         } else if kind.ends_with(":Node") {
             // A change may carry only what changed: without properties, a node is whatever
             // it was already known to be.
@@ -108,8 +128,7 @@ impl Graph {
             }
             if props.is_some() {
                 known.client = number(prop("client.id")).and_then(|c| u64::try_from(c).ok());
-                known.declared_pid =
-                    number(prop("application.process.id")).and_then(|p| i32::try_from(p).ok()).filter(|p| *p > 0);
+                known.declared_pid = pid(prop("application.process.id"));
             }
         }
     }
@@ -120,7 +139,11 @@ impl Graph {
             .streams
             .values()
             .filter(|s| s.running)
-            .filter_map(|s| s.client.and_then(|c| self.clients.get(&c).copied()).or(s.declared_pid))
+            .filter_map(|s| match s.client.and_then(|c| self.clients.get(&c)) {
+                Some(c) if c.pulse => (!c.remote).then(|| c.application_pid.or(s.declared_pid)).flatten(),
+                Some(c) => c.socket_pid.or(s.declared_pid).or(c.application_pid),
+                None => s.declared_pid,
+            })
             .collect();
         pids.sort_unstable();
         pids.dedup();
@@ -335,6 +358,30 @@ mod tests {
 
     fn client(id: u64, pid: i32) -> Value {
         json!({"id": id, "type": "PipeWire:Interface:Client", "info": {"props": {"pipewire.sec.pid": pid}}})
+    }
+
+    #[test]
+    fn pulse_streams_identify_local_apps_instead_of_the_bridge() {
+        let mut g = Graph::default();
+        let pulse = |kind: &str| {
+            json!({"id": 40, "type": "PipeWire:Interface:Client", "info": {"props": {
+                "client.api": "pipewire-pulse", "pulse.server.type": kind,
+                "pipewire.sec.pid": 500, "application.process.id": "4242"
+            }}})
+        };
+        g.apply(&pulse("unix"));
+        g.apply(&node(60, "Stream/Output/Audio", "running", 40, json!(4242)));
+        assert_eq!(g.audible(), [4242], "protect the player, not pipewire-pulse");
+        // A change without properties keeps the application's attribution.
+        g.apply(&json!({"id": 40, "type": "PipeWire:Interface:Client", "info": {}}));
+        assert_eq!(g.audible(), [4242]);
+        g.apply(&pulse("tcp"));
+        assert!(g.audible().is_empty(), "a remote PID is not a local workload");
+        g.apply(&pulse("unix"));
+        g.apply(&node(60, "Stream/Output/Audio", "idle", 40, json!(4242)));
+        assert!(g.audible().is_empty(), "paused playback releases protection");
+        g.apply(&node(60, "Stream/Input/Audio", "running", 40, json!(4242)));
+        assert_eq!(g.audible(), [4242], "microphone capture is protected too");
     }
 
     #[test]

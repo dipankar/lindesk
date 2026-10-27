@@ -18,8 +18,10 @@ notice it, with the defaults and where to see each one working.
 | You click or type | The focused app gets a strong, bounded boost for 500 ms | `lindeskctl watch` (⚡) |
 | You switch apps | The app you switched to gets that boost for 3 s, and whatever of it is in swap is read back in | `lindeskctl events -f` |
 | You leave an app | It stays *warm* for 30 minutes: memory protected, raised share | `lindeskctl explain <app>` → `warm:` |
-| You put an app away | Off screen and silent for 2 minutes, it *naps*: timers coalesced, efficient cores | `lindeskctl explain <app>` → `nap:` |
-| The machine gets busy | Background and batch work yield: lower weights, CPU caps | level **YELLOW** |
+| A call or music continues elsewhere | The playing/recording app keeps CPU, I/O and bounded memory protection | `lindeskctl status` |
+| Two apps are visible | Visible normal apps keep a mild share, even without focus | `lindeskctl status` |
+| You put an app away | Off screen and silent for 2 minutes, it *naps*: timers coalesced, lower performance hints | `lindeskctl explain <app>` → `nap:` |
+| The machine gets busy | Background and batch work yield: lower weights, CPU performance hints | level **YELLOW** |
 | Your app actually stalls | Background I/O is limited, tightening until the stall stops | level **RED** |
 | Pressure passes | Everything is released, one step at a time | level back to **GREEN** |
 | lindesk exits, crashes or is removed | Every setting goes back to what it was | `lindeskctl off`, `lindesk-uninstall` |
@@ -56,7 +58,7 @@ then any classifier plugin you add; `lindeskctl set` and `[[override]]` win over
 | Class | What it is | Standing treatment (work-conserving, costs nothing when idle) |
 |---|---|---|
 | `critical` | compositor, Xwayland, PipeWire, portals, input methods, `session.slice` | `cpu.weight` and `io.weight` 200; `memory.low` 512 MiB; **can never be throttled** |
-| `interactive` | set explicitly, or by a plugin | like normal; the *focused* app is handled by focus, not class |
+| `interactive` | set explicitly, or by a plugin | CPU/I/O weight 200 and up to 256 MiB memory protection, even without focus |
 | `normal` | your apps | defaults |
 | `background` | indexers, sync, software updaters, containers, **running builds** | `cpu.weight` and `io.weight` 50 |
 | `batch` | package managers, backups, `lindeskctl run --batch` | `cpu.idle` (SCHED_IDLE for the group), `io.weight` 10 |
@@ -94,9 +96,10 @@ pauses instead of dropping between words and coming back with the next key
 (`epoch_linger`, not on battery). The
 switch boost is longer because an app you return to has to repaint and fault pages back in.
 
-On hybrid CPUs (Intel P/E cores, ARM big.LITTLE with EAS) `uclamp.min` also steers the
-foreground toward the fast cores, and `uclamp.max` on background work keeps it on the
-efficient ones.
+On hybrid CPUs, utilization clamps request performance bounds. Placement effects require
+scheduler support; frequency effects depend on the cpufreq driver and governor. A low
+`uclamp.max` does not pin work to E-cores or impose a CPU-time quota. CPU weights still
+apply when these hints have no placement effect.
 
 **Inside the app: the threads you are waiting on go first.** A browser is not one thing.
 It has a compositor and an I/O thread that decide whether scrolling is smooth, and a pool
@@ -124,9 +127,51 @@ ui = ["MyRenderThread", "MyIO*"]
 background = ["MyIndexer*"]
 ```
 
+## Working in several apps at once
+
+Keyboard focus is only one indication of work you care about. Lindesk also protects:
+
+* **Playing or recording audio:** a music player, call, or recording app remains protected
+  when hidden or on another workspace. Active audio takes precedence over a background
+  class until playback/capture stops.
+* **Explicitly interactive work:** `lindeskctl run --interactive <command>` keeps its share
+  even while you read documentation in another window.
+* **Visible normal apps:** both sides of a split-screen workspace get a useful share.
+  Merely showing a build's window does not promote background or batch work.
+
+Media and interactive work get CPU/I/O weight 200; visible normal apps get 150. Each gets
+memory protection up to its observed usage rounded to 64 MiB, capped at 256 MiB. The
+combined memory hierarchy remains bounded by the host's safety budget. These are
+work-conserving shares: they compete when resources are scarce, and do not reserve CPU
+cores or force a permanent frequency floor.
+
+The safety layer rejects throttles on these workloads **and their parent cgroups**, even
+when a different policy proposes them. Protection follows fresh presence reports and
+is released when an app becomes hidden and silent, except for explicit interactive work
+and the separate warm-app policy. `lindeskctl status` identifies the reason beside
+protected apps; `explain` shows the settings and their provenance.
+
+```toml
+[plugins.threshold.config]
+media_weight = 200
+interactive_weight = 200
+visible_weight = 150
+attention_memory_low_max = "256MiB"
+```
+
+Audio presence uses the existing [PipeWire state monitor](https://docs.pipewire.org/page_man_pw-dump_1.html).
+Local PulseAudio-compatible streams use the application's reported PID because
+[their socket PID identifies the bridge](https://docs.pipewire.org/page_man_pipewire-props_7.html).
+Remote PulseAudio PIDs are not mapped to local apps. These reports remain scheduling hints
+within the user's existing permission boundary.
+Visibility currently requires GNOME or Hyprland's visibility reporting. Unknown presence
+never invents a visible or media role. Protection is at the application cgroup level:
+if a browser groups many tabs together, the audio tab's protection covers that group.
+This policy cannot guarantee glitch-free playback caused by GPU, network or device problems.
+
 ## 4. Apps you just left stay warm
 
-This is what makes switching back to a browser instant. Without it, an app is only
+This can reduce latency when switching back to a browser. Without it, an app is only
 protected while it has focus: the moment you look away under memory or I/O pressure, the
 kernel pages it out, and coming back means waiting for it to be read in again.
 
@@ -177,7 +222,7 @@ is silent, is put in an efficiency mode after two minutes:
 
 * its **timers are coalesced**: the kernel may delay them by up to 50 ms so they expire
   together instead of each waking a CPU;
-* it is **steered to the efficient cores and lower frequencies** (`cpu.uclamp.max` 50 %).
+* it **requests lower performance where the scheduler/governor supports it** (`cpu.uclamp.max` 50 %).
 
 Nothing is frozen and nothing is capped. A napping app still gets all the CPU time it asks
 for, its network connections stay up and its notifications arrive; it just stops costing
@@ -338,7 +383,7 @@ that isn't there.
 | The focused app and the window server are favoured | focus tracking, interaction and switch boosts, critical compositor | on GNOME Wayland it needs the Shell extension |
 | Background QoS throttles CPU and I/O | weights enforced by latency targets, `cpu.idle`, uclamp, adaptive `io.max` | the limits are driven by measured stalls, so they react within about a second rather than pre-emptively |
 | Memory compression and keeping recent apps ready | warm apps (`memory.low`), and an app that did get swapped out is paged back in when you switch to it; works with zram and zswap | macOS also compresses and decompresses per app ahead of time; here it starts at the moment of the switch |
-| App Nap, timer coalescing | apps that are off screen and silent nap: timers coalesced, efficient cores | gentler than macOS (nothing is throttled or frozen), it doesn't look at power assertions, and it needs the desktop to say what is on screen (GNOME and Hyprland so far) |
+| App Nap, timer coalescing | apps that are off screen and silent nap: timers coalesced, lower performance hints | gentler than macOS (nothing is throttled or frozen), it doesn't look at power assertions, and it needs the desktop to say what is on screen (GNOME and Hyprland so far) |
 | Priority inheritance across IPC | critical services (compositor, audio, portals, D-Bus, the journal) are always protected, and a unit the app in use has an open local TCP connection to is not throttled | not inheritance: nothing is boosted, lindesk only stops holding back what you are waiting on, and only where it can see the connection. Unix sockets, D-Bus and containers are not seen. Closer would need tracing wake-ups in the kernel (eBPF) or a sched_ext scheduler that follows wake-up chains |
 | One vendor tuned the whole stack for known hardware | hardware detection, profiles, calibration | every machine is different; that's why the bench is there |
 
@@ -352,3 +397,24 @@ lindeskctl watch        # levels, pressure, who is protected, who yields, every 
 lindeskctl explain firefox
 lindesk-bench run       # the same load with lindesk paused and active, side by side
 ```
+
+## Effective protection and terminal commands
+
+`memory.low` is best-effort protection, bounded by every ancestor and shared with siblings.
+The host allocates a shared budget through the cgroup hierarchy (up to
+`[safety] memory_low_max_ratio` of RAM in total), proportionally reducing child requests
+when necessary. The broker supplies system ancestors; a standalone user agent cannot
+raise them. `lindeskctl doctor` checks the foreground's configured value against its
+ancestor ceiling. A zero ceiling means no protection against global reclaim, even when
+a leaf's configured value is nonzero. Existing administrator protection on generated
+ancestors is preserved and restored on exit.
+
+Desktop focus identifies a window process, not the active command inside a terminal tab.
+Use `lindeskctl run --interactive <command>` to keep a command out of automatic build
+classification. This is explicit workload intent, not automatic active-tab detection.
+
+## Latency tools and cooperation
+
+See [Latency tools and experiments](latency.md) for in-memory observations, adaptive
+background admission, expiring dependency hints, GPU diagnostics, EEVDF experiments,
+and pressure-aware page-in cancellation introduced in 0.3.

@@ -36,7 +36,7 @@ Every workload (a systemd scope or service) gets one of five classes:
 | `critical` | compositor, PipeWire, the shell | protected, never throttled |
 | `interactive` | the app you are using | boosted briefly after each interaction |
 | `normal` | other open apps | left alone |
-| `background` | sync, indexers | lower weights, then CPU caps |
+| `background` | sync, indexers | lower weights, then lower CPU performance hints |
 | `batch` | builds, package upgrades, backups | idle CPU, then I/O admission control |
 
 A pipeline of plugins does the rest:

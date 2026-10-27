@@ -120,6 +120,27 @@ pub fn tcp_sockets(proc_root: &Path) -> Vec<TcpSocket> {
         .collect()
 }
 
+/// Read the application's network namespaces, not the broker's private namespace.
+/// No setns or network access is needed. Unreadable/exited processes are skipped.
+pub fn tcp_sockets_for_pids(proc_root: &Path, pids: &[i32]) -> Vec<TcpSocket> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for pid in pids {
+        let root = proc_root.join(pid.to_string());
+        let namespace = std::fs::read_link(root.join("ns/net")).unwrap_or_else(|_| root.clone());
+        if seen.contains(&namespace) {
+            continue;
+        }
+        let tables: Vec<_> = ["net/tcp", "net/tcp6"].iter().filter_map(|p| read_file(&root.join(p)).ok()).collect();
+        if tables.is_empty() {
+            continue;
+        }
+        seen.insert(namespace);
+        out.extend(tables.iter().flat_map(|t| parse_tcp(t)));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +159,17 @@ mod tests {
    1: 00000000000000000000000001000000:8AE0 00000000000000000000000001000000:1F91 01 00000000:00000000 00:00000000 00000000  1000        0 605 1 0000000000000000 20 4 30 10 -1
    2: 00000000000000000000000001000000:1F91 00000000000000000000000001000000:8AE0 01 00000000:00000000 00:00000000 00000000  1000        0 606 1 0000000000000000 20 4 30 10 -1
 ";
+
+    #[test]
+    fn reads_application_table_when_broker_namespace_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("42/net")).unwrap();
+        std::fs::create_dir_all(dir.path().join("net")).unwrap();
+        std::fs::write(dir.path().join("net/tcp"), "").unwrap();
+        std::fs::write(dir.path().join("42/net/tcp"), TCP).unwrap();
+        assert!(tcp_sockets(dir.path()).is_empty());
+        assert_eq!(tcp_sockets_for_pids(dir.path(), &[999, 42]).len(), parse_tcp(TCP).len());
+    }
 
     #[test]
     fn tables_are_read_as_the_kernel_prints_them() {

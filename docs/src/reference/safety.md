@@ -19,7 +19,7 @@ never by plugins, so no plugin can break them.
    a `critical` target is rejected.
 5. **`memory.low` is bounded** to `memory_low_max_ratio` (25%) of RAM.
 6. **Runtime-only, always reversible.** Every change is made with runtime semantics
-   (systemd `SetUnitProperties(runtime=true)` or direct cgroup writes) and recorded with its
+   (systemd `SetUnitProperties(runtime=true)` or direct cgroup writes) and journaled **before mutation** with its
    original value in the applied-state file (`/run/lindesk/state.json`,
    `$XDG_RUNTIME_DIR/lindesk/state.json`). It is restored on exit, after a crash
    (`ExecStopPost=… --restore`), and with `lindeskctl restore`.
@@ -54,3 +54,9 @@ Check edits with `lindeskctl config check`.
   (`sudo lindeskctl restore --system --stop` for the broker).
 * `[general] dry_run = true` computes, records and explains intents without applying any.
 * `lindeskctl plugin disable <name>` turns a plugin off without uninstalling it.
+
+Recovery records include a pending marker. An interrupted operation is retried or restored,
+including when a kernel write succeeded but the actuator reply was lost. Failure to read
+an original or persist its recovery record prevents mutation. The engine, thread-priority
+worker and I/O-cost manager use atomic journal replacement. A failed restoration keeps
+its record for a later attempt; recovery cannot promise success if the kernel rejects it.

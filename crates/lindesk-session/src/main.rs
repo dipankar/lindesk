@@ -294,7 +294,7 @@ fn run(cli: Cli, uid: u32) -> anyhow::Result<()> {
     match engine.load_state(&state_path) {
         Ok(0) => {}
         Ok(n) => tracing::info!("recovered {n} applied settings from {}", state_path.display()),
-        Err(e) => tracing::warn!("ignoring applied state: {e}"),
+        Err(e) => anyhow::bail!("cannot load recovery journal; refusing to overwrite it: {e}"),
     }
 
     requirement_notices(&mut engine, &requirements);

@@ -189,6 +189,15 @@ pub fn run(ui: &Ui, args: &RunArgs) -> Result<()> {
             }
         }
     }
+    if let Some(us) = args.slice_us {
+        if std::fs::read_to_string("/sys/kernel/sched_ext/state").is_ok_and(|s| s.trim() == "enabled") {
+            bail!("--slice-us requires the fair scheduler; sched_ext is active");
+        }
+        // SAFETY: this changes only the child's own scheduler attributes using syscalls.
+        unsafe {
+            cmd.pre_exec(move || lindesk_sys::syscalls::set_child_slice_us(us));
+        }
+    }
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             anyhow::anyhow!(

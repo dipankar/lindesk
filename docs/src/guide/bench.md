@@ -2,8 +2,8 @@
 
 `lindesk-bench` measures what lindesk is for: the app you are using stays responsive while
 heavy background work runs, and that background work still gets done. It runs the same load
-twice, once with lindesk stopped and once with it running, and prints a table comparing the
-two.
+with lindesk paused and active, and prints a table comparing the phases. By default it
+runs `off,on,on,off`, reversing the second pair to reduce ordering effects.
 
 No stress-ng or fio is needed. The probe and the load generators are built in.
 `lindeskctl bench …` runs `lindesk-bench` with the same arguments (git-style), so
@@ -12,7 +12,7 @@ No stress-ng or fio is needed. The probe and the load generators are built in.
 ## Running it
 
 ```bash
-# A first try: 10 s, 512 MiB of writes, baseline only (lindesk stopped)
+# A first try: 10 s, 512 MiB scratch write cap, baseline only (temporarily paused)
 lindesk-bench run --quick --phases off
 
 # The full A/B run ("torture"): about 2.5 minutes
@@ -21,23 +21,19 @@ bench/torture.sh --manage-services
 
 `run` executes each phase in `--phases` (default `off,on`) in turn:
 
-1. **Checks lindesk's state.** The off phase needs lindesk stopped and the on phase needs
-   it running. If the state is wrong, the harness tells you what to run:
+1. **Checks lindesk's state.** The default `--off-mode pause` temporarily pauses every
+   running daemon for the off phase and resumes them for the on phase. It reads back
+   both daemons' pause state before and after each phase. A partial pause, unreachable
+   running daemon, or changed daemon presence invalidates the run. Start with Lindesk
+   active: an existing pause is rejected so the benchmark does not replace it.
 
-   ```bash
-   systemctl --user stop lindesk-session
-   sudo systemctl stop lindeskd
-   ```
+   The harness resumes after errors or interruption; the pause also has an expiry in
+   case the benchmark dies. Broker permission failures abort the run. Run from your
+   desktop session so the user agent sees your own UID.
 
-   lindesk counts as running if any of these is true: `org.lindesk.QoS1` is owned on the
-   session bus, `org.lindesk.Broker1` is owned on the system bus, `lindesk-session.service`
-   (user) or `lindeskd.service` is active, or a `lindesk-session` or `lindeskd` process
-   exists.
-
-   With `--manage-services`, the harness runs `systemctl --user stop|start
-   lindesk-session` itself and puts it back the way it was at the end. It never touches
-   `lindeskd` and never uses sudo. With a system-wide install, stop `lindeskd` yourself for
-   the off phase.
+   With `--off-mode stop`, every daemon must instead be stopped for off and running for
+   on. `--manage-services` can stop/start the user session agent and restore it afterward;
+   it never stops the system broker or uses sudo.
 2. **Starts the probe** as the "foreground app" in a transient scope in `app.slice`
    (`systemd-run --user --scope`). The probe first creates its 256 MiB read file.
 3. **Starts the load** in a transient scope in `lindesk-batch.slice` (`--slice background`
@@ -92,6 +88,9 @@ The probe models an interactive app with three light threads:
 | **4K read latency** | one random 4 KiB `O_DIRECT` read every 10 ms from a 256 MiB file (buffered reads plus `POSIX_FADV_DONTNEED` where O_DIRECT is unsupported) | opening a file, a thumbnail, paging code back in |
 | **Page fault latency** | every 10 ms, maps 64 fresh pages and times the first touch of each | allocation stalls from direct reclaim under memory pressure |
 | **Foreground stall** | PSI of the probe's own cgroup (`cpu`, `io`, `memory.pressure`) over the window | the share of time the foreground app was waiting for a resource |
+
+These are synthetic scheduling, storage and allocation measurements, not direct input-to-display
+or compositor frame timings.
 
 Latencies go into log-bucketed histograms with about 3% precision, and the bench reports
 p50, p90, p95, p99, p99.9 and max.
@@ -198,3 +197,66 @@ lindesk-bench compare run.json                        # one file: its phases sid
 ```
 
 The `.md` file pastes straight into an issue or pull request.
+
+## Repeatability and real desktop use
+
+A default run now measures `off,on,on,off`: two repetitions with reversed order to reduce
+order bias. `--repeats 1` is a quick diagnostic; `--repeats 3` yields six phases. Explicit
+single-condition runs remain one phase unless repeats are requested. The report retains
+every phase and adds medians and observed ranges; these are not confidence intervals.
+
+The default puts the load in `lindesk-batch.slice` and injects probe focus. It measures
+control effectiveness for known workloads, not end-to-end GUI responsiveness.
+
+For automatic workload classification, use an ordinary app slice and a real build:
+
+```bash
+lindesk-bench run --slice app --build-cmd 'cargo build' --repeats 3
+```
+
+Use comparable clean build trees per trial so compiler caches do not decide the result.
+To leave the compositor's real foreground untouched while applying background load:
+
+```bash
+lindesk-bench run --slice app --desktop-focus --repeats 3
+```
+
+During each phase repeat the same browser scrolling, terminal input, application switching
+and audio playback. Record application/compositor frame or input timings and audio underruns
+using the same external instrumentation in every phase. The synthetic probe remains a
+reference only. Inspect `lindeskctl explain` for the actual app and build scopes, and check
+`lindeskctl doctor` for effective memory protection. Compare background completion/work
+rates alongside latency. Record daemon CPU time and memory (systemctl's CPUUsageNSec and
+MemoryCurrent for lindeskd and the user session) over equal measurement windows. Report
+workload, phase order, hardware, power mode and the installed version; do not generalize a
+single machine's result into guaranteed smoothness.
+
+## Persistent history and a bounded storage comparison
+
+Install the matching `lindesk-telemetry` package to retain pressure, usage, policy events,
+and benchmark records locally. The package reloads running daemons and installs hourly
+maintenance timers. Confirm `daemon.telemetry.installed` and `enabled` with
+`lindeskctl --json status` and `lindeskctl --system --json status`. Wait at least the
+configured flush interval (normally 60 seconds), then check `lindesk-data stats`.
+Use `--backend native` for queries that do not need the optional DuckDB extension.
+
+```bash
+lindesk-bench run --quick --repeats 2 --cpu 4 --no-mem \
+  --write-cap 256M --dir /tmp/lindesk-analysis-bench \
+  --out ./bench-results --label storage-investigation
+lindesk-data --backend native query \
+  "select resource, avg(some_avg10) from pressure group by 1"
+```
+
+The write cap limits scratch space, not cumulative bytes written: the load rewrites its
+files throughout each phase. Wait for builds and other deliberate stress tests to finish.
+The default synthetic foreground probe briefly takes Lindesk's foreground designation;
+`--desktop-focus` preserves real desktop focus but tests a different workload.
+After a synthetic run, check `lindeskctl status` and refocus your application if the
+foreground designation has not recovered. Pause recovery does not itself restore focus.
+
+Compare each phase's tail latency, foreground PSI and background throughput together.
+Keep the individual p99 values; their average is not a pooled p99. A short pair is a
+smoke test, and repeated pairs can still be affected by temperature, cache state and
+unrelated activity. Historical runs with a different disk scheduler or no verified off/on
+pair cannot establish a benefit from the current policy.

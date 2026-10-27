@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use globset::{Glob, GlobMatcher};
+use lindesk_core::attention::Attention;
 use lindesk_core::cgroup_path;
 use lindesk_core::config::Config;
 use lindesk_core::reconcile::{Action, AppliedState};
@@ -280,6 +281,7 @@ pub struct Engine {
     audible: BTreeSet<Target>,
     /// Units the app in use has an open local connection to (set by the host daemon).
     serving: BTreeSet<Target>,
+    dependencies: Vec<(Target, Target)>,
     pending: Vec<Event>,
     carry: Vec<Event>,
     unsent: Vec<Event>,
@@ -342,6 +344,7 @@ impl Engine {
             audible_pids: BTreeMap::new(),
             audible: BTreeSet::new(),
             serving: BTreeSet::new(),
+            dependencies: Vec::new(),
             pending: Vec::new(),
             carry: Vec::new(),
             unsent: Vec::new(),
@@ -513,6 +516,33 @@ impl Engine {
         }
     }
 
+    /// Replace validated, live one-hop dependency hints. No transitive propagation.
+    pub fn set_dependencies(&mut self, pids: &[(i32, i32)]) {
+        self.dependencies = pids
+            .iter()
+            .filter_map(|(client, server)| {
+                let c = self.env.target_for_pid(*client)?;
+                let s = self.env.target_for_pid(*server)?;
+                (c != s && self.target_allowed(&c) && self.target_allowed(&s)).then_some((c, s))
+            })
+            .collect();
+    }
+
+    fn is_dependency(&self, target: &Target) -> bool {
+        self.dependencies.iter().any(|(client, server)| {
+            server == target
+                && self.targets.get(client).is_some_and(|st| {
+                    Attention::classify(
+                        st.class(),
+                        self.is_foreground(client),
+                        self.is_visible(client),
+                        Some(self.audible.contains(client)),
+                    )
+                    .is_some()
+                })
+        })
+    }
+
     /// The units that are throttled now, or would be if they weren't serving the app in
     /// use, with their cgroups: the only ones worth checking for a connection to it.
     pub fn serving_candidates(&self) -> Vec<(Target, String)> {
@@ -574,6 +604,16 @@ impl Engine {
         if let Some(p) = &self.progress {
             p(doing);
         }
+    }
+
+    /// Descriptors and whether they require priority notifications rather than readability.
+    pub fn wake_sources(&self) -> Vec<(RawFd, bool)> {
+        self.registry
+            .sensors
+            .iter()
+            .filter(|s| s.meta.is_builtin())
+            .flat_map(|s| s.plugin.wake_fds().into_iter().map(|fd| (fd, s.plugin.priority_wake_only())))
+            .collect()
     }
 
     pub fn wake_fds(&self) -> Vec<RawFd> {
@@ -883,6 +923,12 @@ impl Engine {
         self.foreground.as_ref() == Some(t) || self.foreground_family.contains(t)
     }
 
+    fn attention(&self, t: &Target) -> Option<Attention> {
+        let class = self.targets.get(t)?.class();
+        Attention::classify(class, self.is_foreground(t), self.is_visible(t), Some(self.audible.contains(t)))
+            .or_else(|| self.is_dependency(t).then_some(Attention::Dependency))
+    }
+
     fn classify(&mut self, cx: &mut Ctx) {
         let now = cx.now;
         // A browser spawns renderers into other scopes as you open tabs.
@@ -965,11 +1011,11 @@ impl Engine {
                     .map(|m| m.values().cloned().collect())
                     .unwrap_or_default(),
                 usage: st.usage.clone(),
-                applied: self.applied.for_target(t).map(|e| e.current.clone()).collect(),
+                applied: self.applied.for_target(t).filter(|e| !e.pending).map(|e| e.current.clone()).collect(),
                 top_comm: st.proc.as_ref().map(|p| p.comm.clone()).filter(|c| !c.is_empty()),
                 visible: self.is_visible(t),
                 audible: (!self.audible_pids.is_empty()).then(|| self.audible.contains(t)),
-                serving: self.serving.contains(t),
+                serving: self.serving.contains(t) || self.is_dependency(t),
             })
             .collect();
         Snapshot {
@@ -1065,26 +1111,20 @@ impl Engine {
     fn resolve(&mut self, proposals: Vec<Proposal>, cx: &mut Ctx) -> resolve::Resolution {
         let mem_total = self.env.mem_total();
         let targets = &self.targets;
-        // The cgroups of the app in use. A slice above one of them contains it: throttling
-        // the slice throttles the app, whatever a policy meant.
-        let fg_cgroups: Vec<&str> = self
-            .foreground
-            .iter()
-            .chain(&self.foreground_family)
-            .filter_map(|t| targets.get(t)?.cgroup.as_deref())
-            .collect();
-        let contains_foreground = |t: &Target| {
+        // Throttling an ancestor also throttles the active app, audio, or interactive
+        // command below it. Enforce the same attention contract across every policy.
+        let protected: BTreeSet<&Target> = targets.keys().filter(|t| self.attention(t).is_some()).collect();
+        let protected_cgroups: Vec<&str> = protected.iter().filter_map(|t| targets.get(t)?.cgroup.as_deref()).collect();
+        let contains_protected = |t: &Target| {
             targets.get(t).and_then(|s| s.cgroup.as_deref()).is_some_and(|cg| {
                 let prefix = format!("{}/", cg.trim_end_matches('/'));
-                fg_cgroups.iter().any(|f| f.starts_with(&prefix))
+                protected_cgroups.iter().any(|f| f.starts_with(&prefix))
             })
         };
-        let resolution = resolve::resolve(proposals, &self.config.safety, |t| ClampContext {
-            // lindesk's own units, and anything the app in use runs inside, are judged like
-            // critical ones: boosts allowed, throttles rejected, whoever asks. (They aren't
-            // *classed* critical: their unit files already give them more than the class
-            // would, or they hold far more than the app.)
-            class: if is_own_unit(t) || contains_foreground(t) {
+        let mut resolution = resolve::resolve(proposals, &self.config.safety, |t| ClampContext {
+            // Attention and its ancestors have critical safety guarantees without
+            // changing their workload class. This also protects lindesk's own units.
+            class: if is_own_unit(t) || protected.contains(t) || contains_protected(t) {
                 Some(QosClass::Critical)
             } else {
                 targets.get(t).map(TargetState::class)
@@ -1092,6 +1132,19 @@ impl Engine {
             mem_current: targets.get(t).and_then(|s| s.usage.as_ref()).map(|u| u.mem_current),
             mem_total,
         });
+        let paths = self.targets.iter().filter_map(|(t, s)| Some((t.clone(), s.cgroup.clone()?))).collect();
+        let cap = mem_total.map_or(u64::MAX, |n| (n as f64 * self.config.safety.memory_low_max_ratio) as u64);
+        crate::memory::protect(&mut resolution, &paths, cap, |t| self.target_allowed(t));
+        // Preserve protection an administrator had already assigned to a generated ancestor.
+        for ((target, knob), d) in &mut resolution.desired {
+            if crate::memory::generated(&d.provenance)
+                && let Setting::MemoryLow { bytes } = &mut d.setting
+                && let Some(Setting::MemoryLow { bytes: original }) =
+                    self.applied.get(target, knob).and_then(|e| e.original.as_ref())
+            {
+                *bytes = (*bytes).max(*original);
+            }
+        }
         for n in &resolution.notes {
             let (kind, event) = match n.kind {
                 NoteKind::Clamped => ("clamped", true),
@@ -1130,7 +1183,7 @@ impl Engine {
         let now = cx.now;
         let dry = self.dry_run();
         match action {
-            Action::Apply { target, setting, mut provenance, first } => {
+            Action::Apply { target, mut setting, mut provenance, first } => {
                 let knob = setting.knob();
                 let mut report = ActionReport {
                     target: target.clone(),
@@ -1156,29 +1209,64 @@ impl Engine {
                 let mut unsupported = Vec::new();
                 let mut handled = None;
                 for idx in self.actuator_candidates(&target, &knob) {
-                    let slot = &mut self.registry.actuators[idx];
-                    let name = slot.meta.name.clone();
-                    let mut original = None;
-                    let mut read_error = None;
-                    if first {
+                    let name = self.registry.actuators[idx].meta.name.clone();
+                    let original = if first {
+                        let slot = &mut self.registry.actuators[idx];
                         match slot.meta.guard(|| slot.plugin.read(&target, &knob)) {
-                            Ok(v) => original = v,
+                            Ok(v) => v,
                             Err(PluginError::Unsupported(why)) => {
                                 unsupported.push(format!("{name}: {why}"));
                                 continue;
                             }
-                            Err(e) => read_error = Some(format!("reading original {knob}: {e}")),
+                            Err(e) => {
+                                handled = Some((
+                                    name,
+                                    None,
+                                    Err(PluginError::Failed(format!(
+                                        "cannot read original {knob}; refusing mutation: {e}"
+                                    ))),
+                                ));
+                                break;
+                            }
                         }
+                    } else {
+                        self.applied.get(&target, &knob).and_then(|e| e.original.clone())
+                    };
+                    if crate::memory::generated(&provenance)
+                        && let (Setting::MemoryLow { bytes }, Some(Setting::MemoryLow { bytes: baseline })) =
+                            (&mut setting, &original)
+                    {
+                        *bytes = (*bytes).max(*baseline);
+                        report.setting = Some(setting.clone());
                     }
+                    let before = self.applied.clone();
+                    self.applied.record_pending(&target, &setting, original.clone(), &provenance, now);
+                    if let Some(path) = &self.opts.state_path
+                        && let Err(e) = self.save_state(path)
+                    {
+                        self.applied = before;
+                        handled = Some((
+                            name,
+                            original,
+                            Err(PluginError::Failed(format!("cannot save recovery journal; refusing mutation: {e}"))),
+                        ));
+                        break;
+                    }
+                    let slot = &mut self.registry.actuators[idx];
                     match slot.meta.guard(|| slot.plugin.apply(&target, &setting)) {
-                        Err(PluginError::Unsupported(why)) => unsupported.push(format!("{name}: {why}")),
+                        Err(PluginError::Unsupported(why)) => {
+                            self.applied = before;
+                            self.state_dirty = true;
+                            unsupported.push(format!("{name}: {why}"));
+                        }
                         result => {
-                            handled = Some((name, original, read_error, result));
+                            self.state_dirty = true;
+                            handled = Some((name, original, result));
                             break;
                         }
                     }
                 }
-                let Some((actuator, original, read_error, result)) = handled else {
+                let Some((actuator, original, result)) = handled else {
                     report.outcome = ActionOutcome::NoActuator;
                     let msg = Self::no_actuator_message(
                         format!("no available actuator supports {knob} on {target}"),
@@ -1189,9 +1277,6 @@ impl Engine {
                     return;
                 };
                 report.actuator = Some(actuator.clone());
-                if let Some(msg) = read_error {
-                    self.note(Some(&target), "actuator_error", &actuator, Some(&knob), msg, true, cx);
-                }
                 match result {
                     Ok(()) => {
                         report.original = original
@@ -1319,7 +1404,12 @@ impl Engine {
                     class: u.class,
                     foreground: u.foreground,
                     usage: u.usage.clone().unwrap_or_default(),
-                    applied: self.applied.for_target(&u.target).map(|e| e.current.clone()).collect(),
+                    applied: self
+                        .applied
+                        .for_target(&u.target)
+                        .filter(|e| !e.pending)
+                        .map(|e| e.current.clone())
+                        .collect(),
                 });
             }
         }
@@ -1482,7 +1572,11 @@ impl Engine {
         } else {
             for e in loaded.entries() {
                 if self.applied.get(&e.target, &e.knob).is_none() {
-                    self.applied.record_apply(&e.target, &e.current, e.original.clone(), &e.provenance, e.since);
+                    if e.pending {
+                        self.applied.record_pending(&e.target, &e.current, e.original.clone(), &e.provenance, e.since);
+                    } else {
+                        self.applied.record_apply(&e.target, &e.current, e.original.clone(), &e.provenance, e.since);
+                    }
                 }
             }
             self.state_dirty = true;
@@ -1494,13 +1588,8 @@ impl Engine {
     /// nothing real is applied, so an empty state is written.
     pub fn save_state(&self, path: &Path) -> Result<(), StateError> {
         let json = if self.dry_run() { "[]".to_string() } else { self.applied.to_json() };
-        let io = |source| StateError::Io { path: path.into(), source };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(io)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(io)?;
-        std::fs::rename(&tmp, path).map_err(io)
+        lindesk_core::reconcile::write_journal(path, json.as_bytes())
+            .map_err(|source| StateError::Io { path: path.into(), source })
     }
 
     fn autosave(&mut self) {
@@ -1526,22 +1615,17 @@ impl Engine {
             comm: st.and_then(|s| s.proc.as_ref()).map(|p| p.comm.clone()).filter(|c| !c.is_empty()),
             class: st.and_then(|s| s.decision.as_ref()).map(|d| d.class),
             foreground: self.is_foreground(t),
-            settings: self.applied.for_target(t).map(|e| e.current.clone()).collect(),
+            attention: self.attention(t),
+            settings: self.applied.for_target(t).filter(|e| !e.pending).map(|e| e.current.clone()).collect(),
         }
     }
 
     /// Level, foreground, protected and yielding targets, plugin health.
     pub fn status(&self) -> Status {
-        let protected = self
-            .targets
-            .iter()
-            .filter(|(t, st)| {
-                self.foreground.as_ref() == Some(*t) || matches!(st.class(), QosClass::Critical | QosClass::Interactive)
-            })
-            .map(|(t, _)| self.summary(t))
-            .collect();
+        let protected =
+            self.targets.iter().filter(|(t, _)| self.attention(t).is_some()).map(|(t, _)| self.summary(t)).collect();
         let mut throttled: BTreeMap<&Target, TimestampMs> = BTreeMap::new();
-        for e in self.applied.entries().filter(|e| safety::is_throttle(&e.current)) {
+        for e in self.applied.entries().filter(|e| !e.pending && safety::is_throttle(&e.current)) {
             let since = throttled.entry(&e.target).or_insert(e.since);
             *since = (*since).min(e.since);
         }
@@ -1590,6 +1674,7 @@ impl Engine {
             settings: self
                 .applied
                 .for_target(target)
+                .filter(|e| !e.pending)
                 .map(|e| ExplainedSetting {
                     knob: e.knob.clone(),
                     value: e.current.clone(),

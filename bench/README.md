@@ -22,29 +22,21 @@ No stress-ng or fio needed: the load generators are built in.
 ## Quick start
 
 ```bash
-# Baseline only, 10 s, small (a good first try; lindesk must be stopped)
-lindesk-bench run --quick --phases off
-
-# The demo: lindesk off, then on
-systemctl --user stop lindesk-session && sudo systemctl stop lindeskd
-bench/torture.sh --phases off
-systemctl --user start lindesk-session && sudo systemctl start lindeskd
-bench/torture.sh --phases on
-lindesk-bench compare bench-results-<off>.json bench-results-<on>.json
-
-# Or let the harness switch the user agent itself (needs lindeskd stopped, or user-only
-# mode)
-bench/torture.sh --manage-services
+lindesk-bench run --quick                 # off,on,on,off; pause/resume running daemons
+lindesk-bench run --quick --repeats 1     # a shorter diagnostic, not proof of repeatability
+lindesk-bench run --slice app --build-cmd 'cargo build' --repeats 3
+lindesk-bench run --slice app --desktop-focus --repeats 3
 ```
 
-## Prerequisites
+The default off mode pauses running daemons and restores their settings; the on phase
+resumes them. Stop/start mode is optional (`--off-mode stop`, with `--manage-services`
+for the user service). It does not manage the root service. Results include each phase,
+plus medians and ranges across repeated off/on conditions.
 
-* cgroup v2 with PSI and a systemd user session (`lindeskctl doctor`).
-* About 10 GiB free in `$XDG_CACHE_HOME` (or `--dir`) for the full profile.
-* Off phase: lindesk stopped. On phase: lindesk running. The harness checks both, and only
-  ever runs `systemctl --user stop/start lindesk-session` itself, and only with
-  `--manage-services`.
-* An idle desktop: your own activity during the run shows up in the numbers.
+The default explicitly labels the load as batch and injects synthetic probe focus.
+`--slice app` exercises classification and `--desktop-focus` preserves compositor focus.
+GUI latency and audio quality require separate instrumentation; the probe does not measure
+them. See the benchmark guide for a repeatable real-workload procedure.
 
 ## Safety caps
 

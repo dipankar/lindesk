@@ -306,8 +306,8 @@ pub fn hardware_findings(p: &Probe) -> Vec<Finding> {
         push(Info, "CPU", cpu, Some("could not read /sys/devices/system/cpu".into()));
     } else if hw.is_hybrid() {
         let note = if p.uclamp {
-            "foreground boosts favour P-cores via uclamp.min (EAS/ITMT); batch is capped with uclamp.max \
-             under pressure, which keeps it on E-cores"
+            "uclamp supplies performance hints; P-cores/E-cores placement depends on scheduler support, \
+             and is not guaranteed (no CPU-time quota or core pinning)"
         } else {
             "no cgroup uclamp: lindesk cannot steer the foreground towards P-cores"
         };
@@ -458,7 +458,10 @@ fn cpu_feature_findings(
             Info,
             "ITMT",
             "off on a hybrid Intel CPU".into(),
-            Some("the scheduler does not rank P-cores first; foreground boosts rely on uclamp alone".into()),
+            Some(
+                "P-core preference is not verified; CPU weights still work, but uclamp cannot guarantee placement"
+                    .into(),
+            ),
         );
     }
     if f.cpufreq_driver.as_deref() == Some("intel_cpufreq") && f.governor.as_deref() == Some("powersave") {

@@ -88,12 +88,7 @@ impl IoCostManager {
                 _ => Ok(()),
             };
         }
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(saved).unwrap_or_default())?;
-        std::fs::rename(&tmp, &self.path)
+        lindesk_core::reconcile::write_journal(&self.path, &serde_json::to_vec(saved)?)
     }
 
     /// Enable iocost on `devices` according to `toggle`, with latency targets unless
@@ -110,8 +105,8 @@ impl IoCostManager {
         let mut saved = match self.load() {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!("iocost: ignoring unreadable {}: {e}", self.path.display());
-                Saved::default()
+                tracing::warn!("iocost: refusing changes with unreadable journal {}: {e}", self.path.display());
+                return enabled;
             }
         };
         for dev in devices {

@@ -96,26 +96,60 @@ pub enum Command<X> {
     PushEvent(Event),
     /// Record a free-form metric (D-Bus `ReportMetric`).
     Metric(Metric),
+    Dependency {
+        lease: super::responsiveness::Lease,
+        ttl_ms: u32,
+        reply: Reply<Result<(), String>>,
+    },
+    Latency {
+        reply: Reply<String>,
+    },
     /// Pin a class on the unit owning `pid`. Replies with that unit, or why not.
-    SetClass { pid: i32, class: QosClass, source: String, reply: Reply<Result<Target, String>> },
+    SetClass {
+        pid: i32,
+        class: QosClass,
+        source: String,
+        reply: Reply<Result<Target, String>>,
+    },
     /// Explain a pid or target string (see [`what::parse`]). Replies with JSON.
-    Explain { what: String, reply: Reply<Result<String, String>> },
+    Explain {
+        what: String,
+        reply: Reply<Result<String, String>>,
+    },
     /// Fresh status JSON.
-    Status { reply: Reply<String> },
+    Status {
+        reply: Reply<String>,
+    },
     /// Re-read the config (and the profiles), apply it and rediscover plugins. Replies with
     /// a summary.
-    Reload { reply: Reply<Result<String, String>> },
+    Reload {
+        reply: Reply<Result<String, String>>,
+    },
     /// The host's hardware profile (`HostCaps.hardware`, with the latency map).
-    Hardware { reply: Reply<Hardware> },
+    Hardware {
+        reply: Reply<Hardware>,
+    },
     /// Known profiles and the `ListProfiles` rows.
-    Profiles { reply: Reply<ProfilesView> },
+    Profiles {
+        reply: Reply<ProfilesView>,
+    },
     /// A calibration finished and was saved to `path`: put it into the caps and announce it.
-    Calibrated { map: Box<LatencyMap>, path: PathBuf },
+    Calibrated {
+        map: Box<LatencyMap>,
+        path: PathBuf,
+    },
     /// Pause (observe-only, every applied setting reverted) or resume. `seconds > 0`
     /// auto-resumes after that long. Replies with the pause JSON.
-    SetPaused { paused: bool, seconds: u32, by: String, reply: Reply<String> },
+    SetPaused {
+        paused: bool,
+        seconds: u32,
+        by: String,
+        reply: Reply<String>,
+    },
     /// The pause JSON: `{"paused": bool, "until_ms": ms|null, "since_ms": ms|null, "by": …}`.
-    GetPaused { reply: Reply<String> },
+    GetPaused {
+        reply: Reply<String>,
+    },
     /// Restore everything, stop plugins and end the thread.
     Shutdown,
     /// Daemon-specific.
@@ -506,6 +540,8 @@ pub fn spawn<H: Hooks>(engine: Engine, hooks: H, inbox: Inbox<H::Ext>) -> std::i
             recent: inbox.recent,
             notify: ntx,
             pause: Pause::default(),
+            responsiveness: Default::default(),
+            dependencies: Default::default(),
             last_level: None,
             tally: Tally::default(),
             steps: 0,
@@ -531,6 +567,8 @@ struct Loop<H: Hooks> {
     recent: Arc<Mutex<VecDeque<(Audience, String)>>>,
     notify: tmpsc::UnboundedSender<Notification>,
     pause: Pause,
+    responsiveness: super::responsiveness::Recorder,
+    dependencies: super::responsiveness::Dependencies,
     last_level: Option<Level>,
     tally: Tally,
     steps: u64,
@@ -564,7 +602,7 @@ impl<H: Hooks> Loop<H> {
         loop {
             self.alive.store(now_ms(), Ordering::Relaxed);
             let since = last_step.elapsed();
-            let fds = self.engine.wake_fds();
+            let fds = self.engine.wake_sources();
             // Calm, and the kernel will wake us when stall builds up: there is nothing to
             // see four times a second.
             let tick = if !fds.is_empty() && last_activity.elapsed() >= IDLE_AFTER { idle_tick } else { busy_tick };
@@ -638,14 +676,14 @@ impl<H: Hooks> Loop<H> {
     }
 
     /// `poll(2)` on the command eventfd and the wake fds. Returns (command ready, wake fd fired).
-    fn wait(&self, fds: &[RawFd], timeout: Duration) -> (bool, bool) {
+    fn wait(&self, fds: &[(RawFd, bool)], timeout: Duration) -> (bool, bool) {
         let mut pfds = Vec::with_capacity(fds.len() + 1);
         pfds.push(PollFd::new(&*self.waker, PollFlags::IN));
-        for fd in fds {
+        for (fd, priority_only) in fds {
             // SAFETY: the fds belong to sensors owned by the engine, which outlives this call
             // (nothing else runs on this thread while we poll).
             let b = unsafe { BorrowedFd::borrow_raw(*fd) };
-            pfds.push(PollFd::from_borrowed_fd(b, PollFlags::PRI | PollFlags::IN));
+            pfds.push(PollFd::from_borrowed_fd(b, sensor_poll_flags(*priority_only)));
         }
         let ts = Timespec::try_from(timeout).unwrap_or(Timespec { tv_sec: 1, tv_nsec: 0 });
         match rustix::event::poll(&mut pfds, Some(&ts)) {
@@ -672,7 +710,16 @@ impl<H: Hooks> Loop<H> {
                 true
             }
             Command::Metric(m) => {
+                self.responsiveness.metric(&m);
                 self.engine.host_sender().metric(m);
+                false
+            }
+            Command::Dependency { lease, ttl_ms, reply } => {
+                let _ = reply.send(self.dependencies.update(lease, ttl_ms, Instant::now()));
+                true
+            }
+            Command::Latency { reply } => {
+                let _ = reply.send(self.responsiveness.report().to_string());
                 false
             }
             Command::SetClass { pid, class, source, reply } => {
@@ -734,7 +781,9 @@ impl<H: Hooks> Loop<H> {
     /// event came in, or the level isn't GREEN.
     fn step(&mut self) -> bool {
         let t0 = Instant::now();
+        self.engine.set_dependencies(&self.dependencies.live(Instant::now()));
         let report = self.engine.step(now_ms());
+        self.responsiveness.step(&report, &self.engine.system_pressure());
         self.steps += 1;
         if report.timings.total_us > SLOW_STEP_US {
             tracing::warn!("slow engine step: {:?}", report.timings);
@@ -1104,5 +1153,22 @@ mod tests {
         assert!(!o.contains_key("cpu"));
         assert_eq!(pressure_text(&[s]), "io 25%");
         assert_eq!(pressure_text(&[]), "no samples");
+    }
+}
+
+fn sensor_poll_flags(priority_only: bool) -> PollFlags {
+    if priority_only { PollFlags::PRI } else { PollFlags::IN }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::*;
+    #[test]
+    fn readable_pressure_file_is_not_a_pressure_notification() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let mut pressure = [PollFd::new(&file, sensor_poll_flags(true))];
+        assert_eq!(rustix::event::poll(&mut pressure, Some(&Timespec::default())).unwrap(), 0);
+        let mut stream = [PollFd::new(&file, sensor_poll_flags(false))];
+        assert_eq!(rustix::event::poll(&mut stream, Some(&Timespec::default())).unwrap(), 1);
     }
 }

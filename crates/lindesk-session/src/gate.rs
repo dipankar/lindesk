@@ -127,6 +127,10 @@ impl<S: Sensor> Sensor for GatedSensor<S> {
         self.inner.poll(input)
     }
 
+    fn priority_wake_only(&self) -> bool {
+        self.inner.priority_wake_only()
+    }
+
     fn wake_fds(&self) -> Vec<RawFd> {
         if self.gate.is_open() && self.active { self.inner.wake_fds() } else { Vec::new() }
     }

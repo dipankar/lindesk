@@ -69,3 +69,5 @@ pub use report::{
 };
 pub use scaffold::{Lang, scaffold};
 pub use supervisor::{Health, PluginStats, SupervisorConfig};
+
+mod memory;

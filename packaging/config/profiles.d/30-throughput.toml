@@ -33,6 +33,6 @@ background_weight = 80
 batch_io_weight = 50
 yellow_background_weight = 50
 yellow_batch_io_weight = 10
-# Gentler CPU caps at YELLOW (defaults 60% / 40%).
+# Gentler maximum performance hints at YELLOW (defaults 60% / 40%).
 yellow_background_uclamp_max = 80.0
 yellow_batch_uclamp_max = 70.0

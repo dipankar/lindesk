@@ -52,6 +52,8 @@ pub enum SliceKind {
     Batch,
     /// background.slice.
     Background,
+    /// app.slice, without an explicit batch/background classification.
+    App,
 }
 
 impl SliceKind {
@@ -59,6 +61,7 @@ impl SliceKind {
         match self {
             SliceKind::Batch => "lindesk-batch.slice",
             SliceKind::Background => "background.slice",
+            SliceKind::App => "app.slice",
         }
     }
 }
@@ -74,6 +77,12 @@ pub struct RunArgs {
     /// Phases to run, in order.
     #[arg(long, value_delimiter = ',', default_value = "off,on")]
     pub phases: Vec<String>,
+    /// Repeat the phase sequence, reversing alternate repetitions (default: 2 for off,on).
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=10))]
+    pub repeats: Option<u8>,
+    /// Keep real desktop focus instead of assigning it to the synthetic probe.
+    #[arg(long, conflicts_with = "interact")]
+    pub desktop_focus: bool,
     /// Measured time per phase.
     #[arg(long, value_parser = humantime::parse_duration)]
     pub duration: Option<Duration>,
@@ -174,6 +183,15 @@ fn plan(a: &RunArgs) -> Result<Plan> {
     if phases.is_empty() {
         bail!("no phases");
     }
+    let repeats = a.repeats.unwrap_or(if phases.len() == 2 { 2 } else { 1 });
+    let sequence = phases.clone();
+    for repeat in 1..repeats {
+        if repeat % 2 == 1 {
+            phases.extend(sequence.iter().rev().copied());
+        } else {
+            phases.extend(sequence.iter().copied());
+        }
+    }
     let mem = if a.no_mem { None } else { Some(a.mem.unwrap_or(MemSpec::Percent(mem))) };
     let duration = a.duration.unwrap_or(Duration::from_secs(duration));
     if duration > Duration::from_secs(600) {
@@ -238,6 +256,12 @@ pub fn run(args: RunArgs) -> Result<i32> {
 
     let ld = Lindesk::connect()?;
     let initial = ld.detect();
+    if args.off_mode == OffMode::Pause && initial.running() {
+        let state = ld.checked_state()?;
+        if !state.paused.is_empty() {
+            bail!("lindesk is already paused; resume it before benchmarking to preserve your existing pause");
+        }
+    }
     // Pausing needs a running lindesk; otherwise the usual stopped/running checks apply.
     if args.off_mode == OffMode::Stop || !initial.running() {
         check_feasible(&plan.phases, &initial, args.manage_services)?;
@@ -261,7 +285,8 @@ pub fn run(args: RunArgs) -> Result<i32> {
         slice: args.slice.unit(),
         short: short.clone(),
         plan: &plan,
-        reassert: !args.no_reassert,
+        reassert: !args.no_reassert && !args.desktop_focus,
+        desktop_focus: args.desktop_focus,
         interact: args.interact,
     };
     let mut phases = Vec::new();
@@ -274,16 +299,16 @@ pub fn run(args: RunArgs) -> Result<i32> {
             let paused = phase == Phase::Off;
             let secs = (plan.ramp + plan.duration + plan.cooldown).as_secs() as u32 + 120;
             if paused != pause.paused {
+                // Arm before the call: partial failures and timeouts can still pause a daemon.
+                pause.paused = true;
                 let who = ld.set_paused(paused, if paused { secs } else { 0 })?;
                 pause.paused = paused;
                 if paused {
                     eprintln!("lindesk-bench: paused {} for the off phase", who.join(" and "));
                 }
             }
-            let mut st = ld.detect();
-            if paused {
-                st.paused = vec!["lindesk".into()];
-            }
+            let st = ld.checked_state()?;
+            verify_pause_phase(&initial, &st, paused)?;
             st
         } else {
             ensure_phase_state(&ld, phase, args.manage_services, &mut services)?
@@ -299,8 +324,14 @@ pub fn run(args: RunArgs) -> Result<i32> {
                 "stopped"
             }
         );
-        match run_phase(&ctx, phase, &ld, state, run_dir.path()) {
-            Ok(p) => phases.push(p),
+        let phase_dir = ScratchDir::create(run_dir.path(), &format!("phase-{i}"))?;
+        match run_phase(&ctx, phase, &ld, state, phase_dir.path()) {
+            Ok(p) => {
+                if args.off_mode == OffMode::Pause && initial.running() {
+                    verify_pause_phase(&initial, &ld.checked_state()?, phase == Phase::Off)?;
+                }
+                phases.push(p);
+            }
             Err(e) if sys::stop_requested() => {
                 eprintln!("lindesk-bench: interrupted ({e:#})");
                 break;
@@ -334,7 +365,8 @@ pub fn run(args: RunArgs) -> Result<i32> {
             slice: args.slice.unit().into(),
             scopes: !args.no_scope,
             manage_services: args.manage_services,
-            reassert_foreground: !args.no_reassert,
+            reassert_foreground: !args.no_reassert && !args.desktop_focus,
+            desktop_focus: args.desktop_focus,
             interact: args.interact,
             load: plan.load.clone(),
             scratch_dir: base.display().to_string(),
@@ -376,6 +408,18 @@ pub enum OffMode {
 struct PauseGuard<'a> {
     ld: &'a Lindesk,
     paused: bool,
+}
+
+fn verify_pause_phase(initial: &LindeskState, current: &LindeskState, paused: bool) -> Result<()> {
+    let expected = usize::from(current.session_bus) + usize::from(current.broker_bus);
+    if current.session_bus != initial.session_bus
+        || current.broker_bus != initial.broker_bus
+        || expected == 0
+        || current.paused.len() != if paused { expected } else { 0 }
+    {
+        bail!("daemon presence or pause state changed; refusing an invalid benchmark phase");
+    }
+    Ok(())
 }
 
 impl Drop for PauseGuard<'_> {
@@ -535,6 +579,7 @@ struct Ctx<'a> {
     short: String,
     plan: &'a Plan,
     reassert: bool,
+    desktop_focus: bool,
     interact: bool,
 }
 
@@ -731,7 +776,7 @@ fn run_phase(ctx: &Ctx<'_>, phase: Phase, ld: &Lindesk, state: LindeskState, run
 
     let on = phase == Phase::On;
     let mut foreground_marked = false;
-    if on {
+    if on && !ctx.desktop_focus {
         match ld.set_foreground(probe.pid()) {
             Ok(()) => foreground_marked = true,
             Err(e) => eprintln!("lindesk-bench: could not mark the probe as foreground: {e:#}"),
@@ -848,6 +893,22 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    #[test]
+    fn both_daemons_must_match_the_phase() {
+        let initial = LindeskState { session_bus: true, broker_bus: true, ..Default::default() };
+        let mut current = initial.clone();
+        assert!(verify_pause_phase(&initial, &current, false).is_ok());
+        assert!(verify_pause_phase(&initial, &current, true).is_err());
+        current.paused.push("lindesk-session".into());
+        assert!(verify_pause_phase(&initial, &current, true).is_err());
+        assert!(verify_pause_phase(&initial, &current, false).is_err());
+        current.paused.push("lindeskd".into());
+        assert!(verify_pause_phase(&initial, &current, true).is_ok());
+        current.broker_bus = false;
+        assert!(verify_pause_phase(&initial, &current, true).is_err());
+        assert!(verify_pause_phase(&LindeskState::default(), &LindeskState::default(), false).is_err());
+    }
+
     #[derive(Parser)]
     struct T {
         #[command(flatten)]
@@ -869,7 +930,7 @@ mod tests {
         assert_eq!(p.mem, Some(MemSpec::Percent(10.0)));
 
         let p = plan(&parse(&["--profile", "full", "--no-mem", "--cpu", "3", "--max-mem-frac", "0.9"])).unwrap();
-        assert_eq!(p.phases, vec![Phase::Off, Phase::On]);
+        assert_eq!(p.phases, vec![Phase::Off, Phase::On, Phase::On, Phase::Off]);
         assert_eq!(p.duration, Duration::from_secs(60));
         assert_eq!(p.load.write_cap, 4 * GIB);
         assert!(p.load.direct && p.load.write && p.load.read);
@@ -879,6 +940,14 @@ mod tests {
 
         assert!(plan(&parse(&["--phases", "off,maybe"])).is_err());
         assert!(plan(&parse(&["--duration", "1h"])).is_err());
+    }
+
+    #[test]
+    fn repeated_sequences_are_counterbalanced() {
+        let p = plan(&parse(&["--repeats", "3"])).unwrap();
+        assert_eq!(p.phases, vec![Phase::Off, Phase::On, Phase::On, Phase::Off, Phase::Off, Phase::On]);
+        assert_eq!(plan(&parse(&["--repeats", "1"])).unwrap().phases.len(), 2);
+        assert!(parse(&["--desktop-focus", "--slice", "app"]).desktop_focus);
     }
 
     #[test]

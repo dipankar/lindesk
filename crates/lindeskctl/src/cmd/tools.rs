@@ -129,7 +129,20 @@ mod tests {
             let s = String::from_utf8(buf).unwrap();
             assert!(s.contains("lindeskctl"), "{shell:?}");
             assert!(s.contains("simulate") && s.contains("plugin"), "{shell:?}");
-            for sub in ["profile", "changes", "calibrate", "hardware", "swap", "mcp", "revert-to", "sysctl"] {
+            for sub in [
+                "profile",
+                "changes",
+                "calibrate",
+                "hardware",
+                "swap",
+                "mcp",
+                "revert-to",
+                "sysctl",
+                "latency",
+                "depend",
+                "batch",
+                "gpu",
+            ] {
                 assert!(s.contains(sub), "{shell:?} completion lacks {sub}");
             }
         }
@@ -143,6 +156,10 @@ mod tests {
         assert!(!names.iter().any(|n| n == "lindesk-data.1"), "lindesk-data ships its own page");
         for n in [
             "lindeskctl.1",
+            "lindeskctl-latency-show.1",
+            "lindeskctl-depend.1",
+            "lindeskctl-batch.1",
+            "lindeskctl-gpu.1",
             "lindeskctl-doctor.1",
             "lindeskctl-plugin.1",
             "lindeskctl-plugin-new.1",

@@ -56,6 +56,7 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use lindesk_core::attention::Attention;
 use lindesk_plugin_api::{
     Event, Hardware, HostCaps, InitContext, Intent, IoLimit, Knob, Level, Metric, Plugin, PluginError, PluginInfo,
     PluginKind, PluginResult, Policy, PolicyOutput, QosClass, Resource, Sample, Setting, Snapshot, Target, TimestampMs,
@@ -604,6 +605,7 @@ impl Policy for ThresholdPolicy {
         let fg_target: Option<Target> =
             snap.foreground.clone().or_else(|| snap.foreground_unit().map(|u| u.target.clone()));
         let is_fg = |u: &UnitState| u.foreground || Some(&u.target) == fg_target.as_ref();
+        let attention = |u: &UnitState| Attention::classify(u.class, is_fg(u), u.visible, u.audible);
         // Every unit of the focused application: the window's own and those of its children.
         let fg_units: Vec<&UnitState> = snap.units.iter().filter(|u| is_fg(u)).collect();
         let fg_set: BTreeSet<&Target> = fg_units.iter().map(|u| &u.target).chain(fg_target.as_ref()).collect();
@@ -643,7 +645,7 @@ impl Policy for ThresholdPolicy {
         let limited: BTreeSet<&Target> = if level == Level::Red && snap.caps.io_max {
             snap.units
                 .iter()
-                .filter(|u| !is_fg(u) && u.class != QosClass::Critical && !u.serving)
+                .filter(|u| attention(u).is_none() && !u.serving)
                 .filter(|u| {
                     u.class.yields()
                         // A slice's I/O is everything below it, the app in use included:
@@ -670,6 +672,26 @@ impl Policy for ThresholdPolicy {
                     plan.set(t, Setting::CpuWeight { value: w }, "critical: protected (static)");
                     plan.set(t, Setting::IoWeight { value: w }, "critical: protected (static)");
                     plan.set(t, Setting::MemoryLow { bytes: critical_memory_low }, "critical: protected (static)");
+                }
+                continue;
+            }
+            if let Some(role @ (Attention::Media | Attention::Interactive | Attention::Visible)) = attention(u) {
+                // Explicit interactive work, audio, and visible ordinary windows continue
+                // to serve the user after focus moves. No permanent frequency boost.
+                self.hidden_since(now, u);
+                let weight = match role {
+                    Attention::Media => cfg.media_weight,
+                    Attention::Interactive => cfg.interactive_weight,
+                    _ => cfg.visible_weight,
+                };
+                let reason = format!("attention: {}; protected across focus changes", role.label());
+                plan.set(t, Setting::CpuWeight { value: weight }, &reason);
+                plan.set(t, Setting::IoWeight { value: weight }, &reason);
+                if let Some(used) = u.usage.as_ref().map(|u| u.mem_current).filter(|n| *n > 0) {
+                    let bytes = round_up(used, cfg.memory_low_step).min(cfg.attention_memory_low_max);
+                    if bytes > 0 {
+                        plan.set(t, Setting::MemoryLow { bytes }, &reason);
+                    }
                 }
                 continue;
             }
@@ -705,7 +727,11 @@ impl Policy for ThresholdPolicy {
                     if level >= Level::Yellow {
                         let r = format!("{}: {cause}; batch yields", level.as_str().to_uppercase());
                         plan.set(t, Setting::IoWeight { value: v.yellow_batch_io_weight }, &r);
-                        let r = if hybrid { format!("{r}; uclamp.max keeps it on E-cores") } else { r };
+                        let r = if hybrid {
+                            format!("{r}; uclamp.max requests lower performance; core placement is scheduler-dependent")
+                        } else {
+                            r
+                        };
                         plan.set(t, Setting::UclampMax { percent: v.yellow_batch_uclamp_max }, r);
                     }
                     if mem_sustained && let Some(cur) = u.usage.as_ref().map(|u| u.mem_current).filter(|c| *c > 0) {
@@ -730,7 +756,7 @@ impl Policy for ThresholdPolicy {
                         && now - since >= ms(cfg.nap_after)
                     {
                         let r = format!(
-                            "nap: no window on screen for over {}, silent (timers coalesced, efficient cores)",
+                            "nap: no window on screen for over {}, silent (timers coalesced, lower performance hint)",
                             humantime_short(cfg.nap_after)
                         );
                         plan.set(t, Setting::UclampMax { percent: cfg.nap_uclamp_max }, &r);
@@ -788,7 +814,11 @@ impl Policy for ThresholdPolicy {
             plan.set(t, Setting::CpuWeight { value: cw }, r);
             plan.set(t, Setting::IoWeight { value: iw }, r);
             if epoch {
-                let r = if hybrid { format!("{r} (uclamp.min favours P-cores)") } else { r.to_string() };
+                let r = if hybrid {
+                    format!("{r} (uclamp.min requests higher performance; placement is not guaranteed)")
+                } else {
+                    r.to_string()
+                };
                 plan.set(t, Setting::UclampMin { percent: fg_epoch_uclamp_min }, r);
             }
             if let Some(b) = mem_low {
@@ -801,7 +831,7 @@ impl Policy for ThresholdPolicy {
         }
 
         // Warm apps: used recently, not in front right now. Keep their memory resident and
-        // give them a little more than the default share, so coming back to them is instant.
+        // give them a little more than the default share, to reduce reclaim and switch-back latency.
         for &t in &fg_set {
             self.st.last_focus.insert(t.clone(), now);
         }
@@ -819,7 +849,7 @@ impl Policy for ThresholdPolicy {
                 let Some(u) = snap.units.iter().find(|u| &u.target == t) else { continue };
                 // Only ordinary apps: critical ones are protected already, and background or
                 // batch work that once had focus (a build's terminal tab) still yields.
-                if !matches!(u.class, QosClass::Normal | QosClass::Interactive) {
+                if !matches!(u.class, QosClass::Normal | QosClass::Interactive) || attention(u).is_some() {
                     continue;
                 }
                 let r = format!("warm: in front {}s ago; kept ready to switch back to", (now - at) / 1000);

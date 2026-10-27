@@ -776,6 +776,7 @@ install_core() {
 	# docs and licenses
 	put 0644 "$ROOT/README.md" "$docdir/README.md"
 	put 0644 "$ROOT/docs/ARCHITECTURE.md" "$docdir/ARCHITECTURE.md"
+	put 0644 "$ROOT/docs/src/guide/latency.md" "$docdir/latency.md"
 	put 0644 "$ROOT/adapters/README.md" "$docdir/adapters.md"
 	put 0644 "$ROOT/LICENSE-MIT" "$licensedir/LICENSE-MIT"
 	put 0644 "$ROOT/LICENSE-APACHE" "$licensedir/LICENSE-APACHE"

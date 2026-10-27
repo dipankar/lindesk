@@ -19,6 +19,8 @@ Owned by `lindesk-session`. Object `/org/lindesk/QoS1`, interface `org.lindesk.Q
 | `EndInteraction(pid)` | `i` → | End it early. |
 | `SetClass(pid, class)` | `is` → | `critical`, `interactive`, `normal`, `background` or `batch`. Own processes only. |
 | `ReportMetric(name, value, labels)` | `sda{ss}` → | A free-form metric for the `metrics` table. |
+| `ReportDependency(client_pid, server_pid, ttl_ms)` | `iiu` → | Same-user one-hop lease, maximum 30s; zero cancels. |
+| `LatencyReport()` | → `s` | Bounded in-memory latency observations and engine context. |
 | `Status()` | → `s` | JSON [`Status`](#status-json). |
 | `Explain(what)` | `s` → `s` | `what` is a pid or a target string; JSON [`Explanation`](#explain-json). |
 | `RecentEvents(n)` | `u` → `s` | JSON array of the last `n` [events](#events), oldest first. |
@@ -37,6 +39,8 @@ Callers are identified by their bus credentials; polkit decides.
 | `Interaction(pid, end)` | `ib` → | same |
 | `ReportPresence(kind, pids, app_ids)` | `saias` → | none (only the caller's own processes are kept) |
 | `SetClass(pid, class)` | `is` → | own pid: `org.lindesk.set-class-own`; others: `org.lindesk.set-class-any` |
+| `ReportDependency(client_pid, server_pid, ttl_ms)` | `iiu` → | none; both processes must belong to caller uid, maximum 30s |
+| `LatencyReport()` | → `s` | none; system pressure and engine timing only |
 | `GetStatus()` | → `s` | none |
 | `Explain(what)` | `s` → `s` | none |
 | `RecentEvents(n)` | `u` → `s` | none |
@@ -147,3 +151,5 @@ $ busctl --user call org.lindesk.QoS1 /org/lindesk/QoS1 org.lindesk.QoS1 Status 
 $ gdbus call --session -d org.lindesk.QoS1 -o /org/lindesk/QoS1 -m org.lindesk.QoS1.SetClass 4242 batch
 $ busctl --user monitor org.lindesk.QoS1          # watch Events signals go by
 ```
+
+See [Latency tools](../guide/latency.md) for metric names, lease expiry, process identity validation, and recorder limits.

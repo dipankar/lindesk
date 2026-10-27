@@ -269,10 +269,14 @@ mod tests {
         let _workers: Vec<_> = (0..2)
             .map(|_| {
                 let tx = tx.clone();
-                std::thread::spawn(move || {
+                let (release, wait) = std::sync::mpsc::channel::<()>();
+                let worker = std::thread::spawn(move || {
                     tx.send(rustix::thread::gettid().as_raw_nonzero().get()).unwrap();
-                    std::thread::sleep(std::time::Duration::from_millis(300))
-                })
+                    // Keep our TIDs alive through every assertion, even on a loaded host.
+                    // Dropping the sender also releases the worker during panic unwinding.
+                    let _ = wait.recv();
+                });
+                (release, worker)
             })
             .collect();
         let mut ours: Vec<i32> = rx.iter().take(2).collect();

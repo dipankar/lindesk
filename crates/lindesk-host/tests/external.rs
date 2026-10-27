@@ -427,8 +427,11 @@ def watch(emit):
     assert_eq!(row("off").state, "disabled");
     assert_eq!(row("recorder").state, "running");
 
+    // A plugin's broad throttle cannot override the host's foreground protection.
+    assert!(e.explain(&ff_t).settings.is_empty());
+    assert!(e.explain(&ff_t).notes.iter().any(|n| n.kind == "rejected"));
     let restored = e.shutdown();
-    assert_eq!(restored.len(), 2);
+    assert_eq!(restored.len(), 1);
     assert!(rules.pid().is_none());
 }
 

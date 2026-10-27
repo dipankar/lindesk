@@ -151,6 +151,14 @@ critical_memory_low = "auto"
 # auto [2GiB]: min(2GiB, 10% of RAM).
 fg_memory_low_max = "auto"
 
+# Apps that matter beyond keyboard focus. These work-conserving shares do not
+# impose a permanent frequency floor. Visible background/batch builds still yield.
+media_weight = 200
+interactive_weight = 200
+visible_weight = 150
+# Per app; combined protection is also bounded by the global safety RAM budget.
+attention_memory_low_max = "256MiB"
+
 # Switching apps. The boost after you *switch* to another app lasts longer than `epoch`
 # (which is for a click or keypress): the app has to page itself back in and repaint.
 # Capped at 1s on battery.
@@ -201,7 +209,8 @@ memory = "auto"
 #
 # Hybrid CPUs (Intel P/E cores, ARM big.LITTLE): the epoch uclamp.min boost makes the
 # scheduler (EAS, ITMT) favour performance cores for the foreground, and the YELLOW
-# uclamp.max on batch keeps batch work on efficiency cores. No cpuset pinning is done.
+# uclamp.max on batch lowers its performance hint; placement depends on the scheduler.
+# It is neither a CPU-time quota nor core affinity. No cpuset pinning is done.
 [plugins.threshold.config.values]
 critical_weight = 200
 fg_epoch_weight = 500

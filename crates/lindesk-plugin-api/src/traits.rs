@@ -188,9 +188,14 @@ pub trait Sensor: Plugin {
     /// Called on every host tick and whenever one of [`Sensor::wake_fds`] becomes readable.
     fn poll(&mut self, input: &SensorInput) -> PluginResult<SensorOutput>;
 
-    /// File descriptors (e.g. PSI triggers) whose `POLLPRI`/`POLLIN` should wake the host early.
+    /// File descriptors whose readiness should wake the host early.
     fn wake_fds(&self) -> Vec<RawFd> {
         Vec::new()
+    }
+
+    /// PSI notifications use POLLPRI only; ordinary readability is not a pressure event.
+    fn priority_wake_only(&self) -> bool {
+        false
     }
 }
 

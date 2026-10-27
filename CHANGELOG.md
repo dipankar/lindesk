@@ -5,6 +5,53 @@ API version (`lindesk_plugin_api::API_VERSION`) changes only on breaking protoco
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-09
+
+### Added
+- Bounded in-memory latency observations and engine/PSI context, D-Bus `LatencyReport`,
+  CLI summaries/JSON export, application metric reporting, and a timer-wakeup probe.
+- Pressure-adaptive admission of explicitly queued background commands with bounded
+  concurrency, slow recovery, direct argv execution and signal cleanup.
+- Same-user one-hop dependency leases with monotonic expiry, start-time validation,
+  limits, ordered broker forwarding and protection through ancestor cgroups.
+- Read-only per-process DRM GPU diagnostics and opt-in verified EEVDF slices for launched commands.
+- Feature guide covering CLI/API usage, safety bounds, benchmark criteria and remaining
+  frame/audio, refault, jobserver, GPU-control and sched_ext research.
+
+### Fixed
+- Cancel further page-in work after focus changes/pause; check reclaim pressure and
+  available-memory headroom before issuing additional requests.
+- Bound application metric names/labels and reject non-finite D-Bus values.
+
+## [0.2.0] - 2026-10-09
+
+### Added
+- Balanced desktop attention: protect active playback/capture, visible normal apps, and
+  explicitly interactive work across focus changes with bounded CPU/I/O shares and memory.
+- Reject indirect throttles through their ancestor cgroups and identify each protected
+  app's attention role in status. Visible builds still yield; unknown presence is not guessed.
+- Tunable media, interactive and visible shares, with regression coverage for pressure,
+  presence changes, competing policies and memory bounds.
+- Attribute local PulseAudio-compatible streams to their application rather than the
+  pipewire-pulse bridge; do not mistake remote PulseAudio PIDs for local processes.
+
+## [0.1.1] - 2026-10-09
+
+### Fixed
+- Allocate bounded memory protection through parent cgroups; diagnose ancestor ceilings
+  instead of implying that a configured leaf value guarantees protection.
+- Persist recovery records before changing settings, retain uncertain writes for recovery,
+  and refuse mutations when the original value or journal is unavailable.
+- Stop treating ordinary PSI file readability as pressure, eliminating needless idle wakeups.
+- Detect local dependencies through the focused application's network namespace while
+  retaining the broker's private network isolation.
+- Describe utilization clamps as conditional performance hints, and explain terminal focus
+  granularity with an explicit interactive-command workflow.
+- Run benchmark phases in counterbalanced repetitions, report medians/ranges, and support
+  preserving desktop focus with clear measurement limits.
+
+## [0.1.0]
+
 The first release.
 
 ### Added

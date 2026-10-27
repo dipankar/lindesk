@@ -9,6 +9,7 @@ pub mod journal;
 pub mod logging;
 pub mod observe;
 pub mod profiles;
+pub mod responsiveness;
 pub mod restore;
 pub mod setup;
 pub mod startup;

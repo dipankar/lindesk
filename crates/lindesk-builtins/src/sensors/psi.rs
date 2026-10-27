@@ -401,6 +401,10 @@ impl Sensor for PsiSensor {
         Ok(out)
     }
 
+    fn priority_wake_only(&self) -> bool {
+        true
+    }
+
     fn wake_fds(&self) -> Vec<RawFd> {
         self.system_triggers.iter().chain(&self.fg_triggers).map(|a| a.trigger.as_raw_fd()).collect()
     }

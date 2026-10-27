@@ -13,7 +13,7 @@
 //! ends. Those are marked as serving the app in use, and the policy leaves them alone for
 //! as long as the connection is there.
 //!
-//! Only TCP on loopback in the host's network namespace. Unix sockets, D-Bus and
+//! Only TCP on loopback in the focused application's network namespaces. Unix sockets, D-Bus and
 //! containers with their own network are not seen; see the module docs of
 //! [`lindesk_sys::sockets`].
 //!
@@ -81,16 +81,12 @@ struct Job {
 /// The candidates that hold the other end of one of the app's loopback connections.
 pub fn find(roots: &Roots, app: &[String], candidates: &[(Target, String)]) -> BTreeSet<Target> {
     let pids = |cg: &String| procfs::pids_in_cgroup_tree(&roots.cgroup, cg).unwrap_or_default();
-    let mine: BTreeSet<u64> = app
-        .iter()
-        .flat_map(pids)
-        .take(MAX_PROCESSES)
-        .flat_map(|pid| sockets::socket_inodes(&roots.proc, pid))
-        .collect();
+    let app_pids: Vec<i32> = app.iter().flat_map(pids).take(MAX_PROCESSES).collect();
+    let mine: BTreeSet<u64> = app_pids.iter().flat_map(|pid| sockets::socket_inodes(&roots.proc, *pid)).collect();
     if mine.is_empty() {
         return BTreeSet::new();
     }
-    let peers = sockets::loopback_peers(&sockets::tcp_sockets(&roots.proc), &mine);
+    let peers = sockets::loopback_peers(&sockets::tcp_sockets_for_pids(&roots.proc, &app_pids), &mine);
     if peers.is_empty() {
         return BTreeSet::new();
     }

@@ -455,3 +455,34 @@ fn offline_apply_and_revert_all_on_a_fixture_root() {
     assert!(o.status.success());
     assert!(stdout(&o).contains("nothing to revert"), "{}", stdout(&o));
 }
+
+#[test]
+fn batch_preserves_argv_and_reports_failures_without_a_desktop() {
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("jobs.json");
+    std::fs::write(&file, r#"[["printf","%s\\n","$HOME; $(false)"],["sh","-c","exit 7"],["printf","finished\\n"]]"#)
+        .unwrap();
+    let no_bus = d.path().join("absent-bus");
+    let o = ctl(
+        &["batch", "--jobs", "2", file.to_str().unwrap()],
+        &[("XDG_RUNTIME_DIR", d.path()), ("DBUS_SESSION_BUS_ADDRESS", &no_bus), ("DBUS_SYSTEM_BUS_ADDRESS", &no_bus)],
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(stdout(&o).contains("$HOME; $(false)"), "{}", stdout(&o));
+    assert!(stdout(&o).contains("finished"), "queue continues after a failed job");
+    assert!(stderr(&o).contains("1 failed"), "{}", stderr(&o));
+}
+
+#[test]
+fn responsiveness_cli_rejects_unbounded_arguments() {
+    for args in [
+        vec!["batch", "--jobs", "0", "jobs.json"],
+        vec!["run", "--slice-us", "99", "true"],
+        vec!["run", "--slice-us", "100001", "true"],
+    ] {
+        assert_eq!(ctl(&args, &[]).status.code(), Some(2));
+    }
+    for args in [["latency", "--help"], ["gpu", "--help"], ["depend", "--help"], ["batch", "--help"]] {
+        assert!(ctl(&args, &[]).status.success());
+    }
+}

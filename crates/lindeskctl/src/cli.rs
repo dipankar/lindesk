@@ -213,6 +213,40 @@ pub enum Cmd {
     )]
     Status,
 
+    /// Inspect bounded latency history or submit an application timing observation.
+    #[command(subcommand)]
+    Latency(LatencyCmd),
+
+    /// Inspect a process's DRM GPU activity and resident memory (driver dependent).
+    Gpu {
+        pid: i32,
+        #[arg(long, default_value = "500ms", value_parser = parse_duration)]
+        interval: Duration,
+    },
+
+    /// Protect a same-user dependency while its client is interactive (one hop).
+    Depend {
+        /// Client process that is waiting.
+        client: i32,
+        /// Service process it is waiting for.
+        server: i32,
+        /// Lease length, at most 30s. Renew explicitly for longer requests.
+        #[arg(long, default_value = "5s", value_parser = parse_duration, conflicts_with = "cancel")]
+        ttl: Duration,
+        /// Cancel this client/server pair immediately.
+        #[arg(long)]
+        cancel: bool,
+    },
+
+    /// Run a JSON array of command argv arrays with pressure-adaptive admission.
+    Batch {
+        /// JSON file: [["make", "-C", "project-a", "-j2"], ["make", "-C", "project-b", "-j2"]].
+        file: PathBuf,
+        /// Maximum concurrent commands; recovery adds one slot after 2s of low pressure.
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=256))]
+        jobs: u16,
+    },
+
     /// Live full-screen view: level, PSI, protected/yielding workloads and events.
     #[command(
         long_about = "A real-time dashboard, refreshed every 250ms: the level and what lindesk is \
@@ -495,6 +529,23 @@ pub enum Cmd {
     External(Vec<OsString>),
 }
 
+#[derive(Subcommand, Debug)]
+pub enum LatencyCmd {
+    /// Show recent metrics with p95/p99; --json also exports pressure and engine context.
+    Show,
+    /// Record an application measurement; audio-xruns is a delta count, all others ms.
+    Report {
+        #[arg(value_parser = ["frame", "input", "runqueue", "audio-xruns", "timer"])]
+        kind: String,
+        value: f64,
+    },
+    /// Measure timer wakeup lateness (not input-to-display latency) and save observations.
+    Probe {
+        #[arg(long, default_value = "5s", value_parser = parse_duration)]
+        duration: Duration,
+    },
+}
+
 #[derive(Args, Debug)]
 #[command(group = clap::ArgGroup::new("qos").multiple(false))]
 pub struct RunArgs {
@@ -510,6 +561,9 @@ pub struct RunArgs {
     /// Run with an explicit class.
     #[arg(long, value_enum, group = "qos")]
     pub class: Option<ClassArg>,
+    /// Experimental EEVDF slice for the launched command (100..100000 us, fair scheduler only).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(100..=100_000))]
+    pub slice_us: Option<u32>,
     /// Name for the transient unit (lindesk-run-NAME-<id>.scope). Default: the command's name.
     #[arg(long)]
     pub name: Option<String>,

@@ -112,7 +112,7 @@ DIFF  candidate vs baseline (nothing is applied)
   05:00:30.000  lindesk-run-make-1.scope  uclamp.max 30%  was nothing  [batch-saver: io pressure 60%]
   05:00:30.000  lindesk-run-make-1.scope  cpu.weight 5  was nothing  [batch-saver: io pressure 60%]
   05:00:31.000  lindesk-run-make-1.scope  (no cpu.uclamp.max change)  was uclamp.max 40%
-  05:01:30.000  lindesk-run-make-1.scope  uclamp.max 40%  was nothing  [threshold: YELLOW: system io pressure 43% > 20%; batch yields; uclamp.max keeps it on E-cores]
+  05:01:30.000  lindesk-run-make-1.scope  uclamp.max 40%  was nothing  [threshold: YELLOW: system io pressure 43% > 20%; batch yields; uclamp.max lowers its performance hint]
   05:01:30.000  lindesk-run-make-1.scope  revert cpu.weight  was nothing
 
 SUMMARY

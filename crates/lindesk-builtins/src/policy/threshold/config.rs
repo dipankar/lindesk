@@ -40,7 +40,7 @@
 //! Hybrid CPUs (Intel P/E cores, ARM big.LITTLE) need no extra knob: the epoch
 //! `uclamp.min` boost makes the scheduler (EAS on ARM, ITMT/capacity-aware placement on
 //! Intel) favour performance cores for the foreground, and the YELLOW/RED `uclamp.max` on
-//! batch keeps it on efficiency cores. Pinning with cpusets is deliberately not done here.
+//! batch requests lower performance; neither clamp guarantees core placement. Pinning with cpusets is deliberately not done here.
 //! Virtualized hosts get no special scaling (PSI and I/O reflect the guest only); the
 //! policy reports it in its metrics (`threshold.virtualized`) and in the resolution notes.
 
@@ -216,12 +216,23 @@ pub struct ThresholdConfig {
     #[serde(with = "auto_size")]
     pub fg_memory_low_max: Auto<u64>,
 
+    /// Work-conserving CPU and I/O shares for playing/recording applications.
+    pub media_weight: u64,
+    /// Shares for explicitly interactive work even when another app has focus.
+    pub interactive_weight: u64,
+    /// Shares for visible normal apps (does not promote visible builds or batch work).
+    pub visible_weight: u64,
+    /// Per-app memory protection for media, interactive and visible workloads.
+    /// The host also bounds the combined hierarchy budget with the safety RAM cap.
+    #[serde(with = "size")]
+    pub attention_memory_low_max: u64,
+
     /// How long the boost lasts after you *switch* to another app (longer than `epoch`, which
     /// is for a click or keypress): the app has to fault its pages back in and repaint.
     #[serde(with = "dur")]
     pub switch_epoch: Duration,
     /// An app you used within this long stays *warm* while you are in another window: a
-    /// slightly raised share and its memory protected, so switching back to it is instant
+    /// slightly raised share and its memory protected, to reduce switch-back latency
     /// instead of waiting for it to be paged back in. `"0s"` turns this off.
     #[serde(with = "dur")]
     pub warm_for: Duration,
@@ -239,7 +250,7 @@ pub struct ThresholdConfig {
 
     /// App Nap: an app whose windows are all off screen (another workspace, minimized) and
     /// that is silent is put in an efficiency mode after `nap_after`: its timers are
-    /// coalesced and it is steered to the efficient cores and lower frequencies. Nothing
+    /// coalesced and lower performance is requested where supported. Nothing
     /// is capped or frozen; it still gets all the CPU time it asks for. Only apps that had
     /// a window, and only where an adapter reports which windows are visible.
     pub nap: bool,
@@ -305,6 +316,10 @@ impl Default for ThresholdConfig {
             red_min_dwell: Duration::from_secs(2),
             critical_memory_low: Auto::Auto,
             fg_memory_low_max: Auto::Auto,
+            media_weight: 200,
+            interactive_weight: 200,
+            visible_weight: 150,
+            attention_memory_low_max: 256 * 1024 * 1024,
             aimd_floor: Auto::Auto,
             aimd_step: Auto::Auto,
             aimd_decrease: 0.5,
@@ -389,7 +404,7 @@ pub struct ThresholdValues {
     /// Foreground during an interaction epoch.
     pub fg_epoch_weight: u64,
     /// Foreground `cpu.uclamp.min` during an interaction epoch. *auto*: 15% on battery,
-    /// else 30%. On hybrid CPUs this is also what steers the foreground onto P-cores.
+    /// else 30%. On hybrid CPUs this can influence placement where the scheduler supports it.
     pub fg_epoch_uclamp_min: Auto<f32>,
     /// Foreground outside an epoch.
     pub fg_weight: u64,
@@ -483,6 +498,15 @@ impl ThresholdConfig {
         }
         if self.memory_low_step == 0 {
             return Err("memory_low_step must be > 0".into());
+        }
+        for (key, value) in [
+            ("media_weight", self.media_weight),
+            ("interactive_weight", self.interactive_weight),
+            ("visible_weight", self.visible_weight),
+        ] {
+            if !(100..=1000).contains(&value) {
+                return Err(format!("{key} must be within 100..=1000"));
+            }
         }
         if !(self.nap_uclamp_max > 0.0 && self.nap_uclamp_max <= 100.0) {
             return Err(format!("nap_uclamp_max = {} must be in (0, 100]", self.nap_uclamp_max));
@@ -606,7 +630,7 @@ pub struct ResolvedThreshold {
     pub aimd: Vec<DeviceAimd>,
     /// Floor and step for a device missing from [`Self::aimd`] (bytes/s).
     pub aimd_default: (u64, u64),
-    /// A hybrid CPU was detected: the epoch boost favours P-cores, batch caps keep E-cores busy.
+    /// A hybrid CPU was detected: performance hints may influence placement, depending on the scheduler.
     pub hybrid: bool,
     pub on_battery: bool,
     /// Hypervisor/container name; no scaling is applied for it.
@@ -848,8 +872,8 @@ impl ThresholdConfig {
                 key: "hybrid".into(),
                 value: format!("{} P + {} E logical CPUs", hw.performance_cpus.len(), hw.efficiency_cpus.len()),
                 source: Source::Auto,
-                why: "epoch uclamp.min steers the foreground to P-cores (EAS/ITMT); YELLOW/RED uclamp.max on batch \
-                      keeps it on E-cores"
+                why: "uclamp requests performance bounds; core placement depends on scheduler support, \
+                      not a CPU-time quota or affinity restriction"
                     .into(),
             });
         }

@@ -84,6 +84,81 @@ fn rustc_is_batch() -> FnClassifier {
 }
 
 #[test]
+fn active_audio_and_its_ancestors_reject_throttles_until_playback_stops() {
+    use lindesk_core::attention::Attention;
+    let w = world();
+    let parent = Target::user_unit(1000, "app.slice");
+    w.env.watch_cgroup("/user.slice/user-1000.slice/user@1000.service/app.slice");
+    let mut e = engine(&w);
+    let pt = parent.clone();
+    let (policy, _) = FnPolicy::new("throttle-all", move |_| {
+        Ok(PolicyOutput {
+            intents: [firefox(), cargo(), pt.clone()]
+                .iter()
+                .map(|t| intent(t, Setting::CpuWeight { value: 20 }, "competing policy"))
+                .collect(),
+            ..Default::default()
+        })
+    });
+    e.registry_mut().register_policy(Box::new(policy), 0).unwrap();
+    e.push_event(Event::Audible { ts: 1000, pids: vec![12], source: "pipewire".into() });
+    let out = e.step(1000);
+    assert!(out.actions.iter().all(|a| a.target == cargo()));
+    assert_eq!(e.status().protected.iter().find(|t| t.target == firefox()).unwrap().attention, Some(Attention::Media));
+    assert!(e.explain(&parent).notes.iter().any(|n| n.kind == "rejected"));
+
+    e.push_event(Event::Audible { ts: 2000, pids: vec![], source: "pipewire".into() });
+    let out = e.step(2000);
+    assert!(out.actions.iter().any(|a| a.target == firefox() && a.outcome == ActionOutcome::Applied));
+    assert!(e.status().protected.iter().all(|t| t.target != firefox()));
+    assert!(out.actions.iter().any(|a| a.target == parent));
+
+    e.push_event(Event::Audible { ts: 3000, pids: vec![12], source: "pipewire".into() });
+    let out = e.step(3000);
+    assert_eq!(out.actions.iter().filter(|a| a.outcome == ActionOutcome::Reverted).count(), 2);
+    // A dead adapter must not leave a permanent media exception behind.
+    let out = e.step(3000 + lindesk_host::PRESENCE_TTL_MS + 1);
+    assert!(out.actions.iter().any(|a| a.target == firefox() && a.outcome == ActionOutcome::Applied));
+    assert!(e.status().protected.iter().all(|t| t.target != firefox()));
+}
+
+#[test]
+fn memory_protection_reaches_ancestors_and_restores_admin_baselines() {
+    let w = world();
+    let ancestor = Target::system_unit("user.slice");
+    lock(&w.act.log).values.insert((ancestor.clone(), Knob::MemoryLow), Setting::MemoryLow { bytes: 256 << 20 });
+    let mut e = engine(&w);
+    let (policy, _) = FnPolicy::new("memory", |_| {
+        Ok(PolicyOutput {
+            intents: vec![intent(&firefox(), Setting::MemoryLow { bytes: 64 << 20 }, "foreground")],
+            ..Default::default()
+        })
+    });
+    e.registry_mut().register_policy(Box::new(policy), 0).unwrap();
+    let r = e.step(1000);
+    assert_eq!(r.actions.len(), 5);
+    assert!(r.actions.iter().all(|a| a.outcome == ActionOutcome::Applied));
+    for t in [
+        Target::system_unit("user-1000.slice"),
+        Target::system_unit("user@1000.service"),
+        Target::user_unit(1000, "app.slice"),
+        firefox(),
+    ] {
+        assert_eq!(lock(&w.act.log).values[&(t, Knob::MemoryLow)], Setting::MemoryLow { bytes: 64 << 20 });
+    }
+    assert_eq!(lock(&w.act.log).values[&(ancestor.clone(), Knob::MemoryLow)], Setting::MemoryLow { bytes: 256 << 20 });
+    assert!(e.step(2000).actions.is_empty(), "unchanged budgets must not churn");
+    let restored = e.set_paused(true);
+    assert_eq!(restored.len(), 5);
+    assert!(restored.iter().all(|a| a.outcome == ActionOutcome::Reverted));
+    assert!(e.applied().is_empty());
+    for ((target, knob), setting) in &lock(&w.act.log).values {
+        assert_eq!(*knob, Knob::MemoryLow);
+        assert_eq!(*setting, Setting::MemoryLow { bytes: if *target == ancestor { 256 << 20 } else { 0 } });
+    }
+}
+
+#[test]
 fn apply_change_revert() {
     let w = world();
     let mut e = engine(&w);
@@ -565,7 +640,7 @@ fn failing_policy_is_skipped_and_reported() {
 }
 
 #[test]
-fn actuator_errors_do_not_poison_state() {
+fn actuator_errors_remain_recoverable_and_retry() {
     let w = world();
     let mut e = engine(&w);
     e.registry_mut().register_classifier(Box::new(rustc_is_batch()), 0).unwrap();
@@ -574,7 +649,8 @@ fn actuator_errors_do_not_poison_state() {
     lock(&w.act.log).fail_apply = Some("unit is gone".into());
     let r = e.step(1000);
     assert!(matches!(&r.actions[0].outcome, ActionOutcome::Failed { error } if error.contains("unit is gone")));
-    assert!(e.applied().is_empty());
+    assert!(e.applied().get(&cargo(), &Knob::CpuWeight).unwrap().pending);
+    assert!(e.explain(&cargo()).settings.is_empty());
     assert!(e.explain(&cargo()).notes.iter().any(|n| n.kind == "actuator_error"));
     // Healed: retried and applied.
     lock(&w.act.log).fail_apply = None;
@@ -796,4 +872,133 @@ fn every_actuator_unsupported_is_no_actuator() {
     assert_eq!(a.outcome, ActionOutcome::NoActuator);
     let note = e.explain(&cargo()).notes.into_iter().find(|n| n.kind == "no_actuator").unwrap();
     assert!(note.message.contains("is not a system unit"), "{}", note.message);
+}
+
+/// Simulates death after the kernel write by inspecting the journal inside apply itself.
+struct JournalActuator {
+    path: std::path::PathBuf,
+    read_fails: bool,
+    recorder: RecordingActuator,
+}
+impl Plugin for JournalActuator {
+    fn info(&self) -> PluginInfo {
+        info("journal-test", PluginKind::Actuator)
+    }
+}
+impl Actuator for JournalActuator {
+    fn caps(&self) -> ActuatorCaps {
+        self.recorder.caps()
+    }
+    fn read(&mut self, t: &Target, k: &Knob) -> PluginResult<Option<Setting>> {
+        if self.read_fails { Err(PluginError::Failed("cannot read original".into())) } else { self.recorder.read(t, k) }
+    }
+    fn apply(&mut self, t: &Target, s: &Setting) -> PluginResult<()> {
+        let saved =
+            lindesk_core::reconcile::AppliedState::from_json(&std::fs::read_to_string(&self.path).unwrap()).unwrap();
+        let entry = saved.get(t, &s.knob()).expect("original must be on disk before mutation");
+        assert!(entry.pending);
+        assert_eq!(entry.original, Some(Setting::CpuWeight { value: 100 }));
+        self.recorder.apply(t, s)?;
+        Err(PluginError::Failed("simulated loss of reply after kernel write".into()))
+    }
+    fn reset(&mut self, t: &Target, k: &Knob, o: Option<&Setting>) -> PluginResult<()> {
+        self.recorder.reset(t, k, o)
+    }
+}
+
+#[test]
+fn write_ahead_journal_recovers_a_write_without_a_successful_reply() {
+    let w = world();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let mut opts = EngineOptions::new("test", Privilege::System);
+    opts.state_path = Some(path.clone());
+    let mut e = Engine::new(Config::default(), Box::new(w.env.clone()), opts.clone()).unwrap();
+    e.registry_mut()
+        .register_actuator(
+            Box::new(JournalActuator { path: path.clone(), read_fails: false, recorder: w.act.clone() }),
+            0,
+        )
+        .unwrap();
+    let (policy, _) = FnPolicy::new("test-policy", |_| {
+        Ok(PolicyOutput {
+            intents: vec![intent(&cargo(), Setting::CpuWeight { value: 20 }, "test")],
+            ..Default::default()
+        })
+    });
+    e.registry_mut().register_policy(Box::new(policy), 0).unwrap();
+    e.step(1000);
+    assert_eq!(lock(&w.act.log).values[&(cargo(), Knob::CpuWeight)], Setting::CpuWeight { value: 20 });
+    drop(e);
+    let mut recovered = Engine::new(Config::default(), Box::new(w.env.clone()), opts).unwrap();
+    recovered.registry_mut().register_actuator(Box::new(w.act.clone()), 0).unwrap();
+    assert_eq!(recovered.load_state(&path).unwrap(), 1);
+    recovered.restore_all();
+    assert_eq!(lock(&w.act.log).values[&(cargo(), Knob::CpuWeight)], Setting::CpuWeight { value: 100 });
+}
+
+#[test]
+fn unreadable_original_or_unwritable_journal_prevents_mutation() {
+    for read_fails in [false, true] {
+        let w = world();
+        let dir = tempfile::tempdir().unwrap();
+        let block = dir.path().join("file-not-directory");
+        std::fs::write(&block, "blocked").unwrap();
+        let path = if read_fails { dir.path().join("state.json") } else { block.join("state.json") };
+        let mut opts = EngineOptions::new("test", Privilege::System);
+        opts.state_path = Some(path.clone());
+        let mut e = Engine::new(Config::default(), Box::new(w.env), opts).unwrap();
+        e.registry_mut()
+            .register_actuator(Box::new(JournalActuator { path, read_fails, recorder: w.act.clone() }), 0)
+            .unwrap();
+        let (policy, _) = FnPolicy::new("test-policy", |_| {
+            Ok(PolicyOutput {
+                intents: vec![intent(&cargo(), Setting::CpuWeight { value: 20 }, "test")],
+                ..Default::default()
+            })
+        });
+        e.registry_mut().register_policy(Box::new(policy), 0).unwrap();
+        let r = e.step(1000);
+        assert!(matches!(r.actions[0].outcome, ActionOutcome::Failed { .. }));
+        assert!(lock(&w.act.log).values.is_empty());
+        assert!(e.applied().is_empty());
+    }
+}
+
+#[test]
+fn dependencies_protect_only_one_hop_while_the_client_is_interactive() {
+    use lindesk_core::attention::Attention;
+    let w = world();
+    w.env.spawn(5, "steam", STEAM);
+    w.env.watch_cgroup(STEAM);
+    let steam = Target::user_unit(1000, "app-steam-5.scope");
+    let mut e = engine(&w);
+    let st = steam.clone();
+    let (policy, _) = FnPolicy::new("throttle-all", move |_| {
+        Ok(PolicyOutput {
+            intents: [cargo(), st.clone()]
+                .iter()
+                .map(|t| intent(t, Setting::CpuWeight { value: 20 }, "test"))
+                .collect(),
+            ..Default::default()
+        })
+    });
+    e.registry_mut().register_policy(Box::new(policy), 0).unwrap();
+    e.set_dependencies(&[(12, 77), (77, 5)]);
+    e.push_event(Event::Focus { ts: 100, pid: Some(12), app_id: None, target: None, source: "test".into() });
+    let report = e.step(100);
+    assert!(!report.actions.iter().any(|a| a.target == cargo() && a.outcome == ActionOutcome::Applied));
+    assert!(report.actions.iter().any(|a| a.target == steam && a.outcome == ActionOutcome::Applied));
+    assert_eq!(
+        e.status().protected.iter().find(|t| t.target == cargo()).unwrap().attention,
+        Some(Attention::Dependency)
+    );
+    e.set_dependencies(&[]);
+    let report = e.step(200);
+    assert!(report.actions.iter().any(|a| a.target == cargo() && a.outcome == ActionOutcome::Applied));
+    e.set_dependencies(&[(12, 77)]);
+    e.push_event(Event::Focus { ts: 300, pid: Some(5), app_id: None, target: None, source: "test".into() });
+    e.step(300);
+    assert!(e.status().protected.iter().all(|t| t.target != cargo()));
+    assert!(e.applied().for_target(&cargo()).any(|s| s.current == Setting::CpuWeight { value: 20 }));
 }

@@ -12,7 +12,13 @@ reload_sessions() {
 	command -v loginctl >/dev/null 2>&1 || return 0
 	for _u in $(loginctl list-users --no-legend 2>/dev/null | awk '{ print $2 }' | sort -u); do
 		[ -n "$_u" ] || continue
+		tmo systemctl --user -M "$_u@" daemon-reload >/dev/null 2>&1 || true
 		tmo systemctl --user -M "$_u@" reload lindesk-session.service >/dev/null 2>&1 || true
+		# Global enable takes effect on the next login. Start the timer for existing
+		# sessions too, but respect a user who disabled it on an earlier install.
+		if tmo systemctl --user -M "$_u@" is-enabled --quiet lindesk-compact.timer 2>/dev/null; then
+			tmo systemctl --user -M "$_u@" start lindesk-compact.timer >/dev/null 2>&1 || true
+		fi
 	done
 	return 0
 }

@@ -23,7 +23,7 @@ lindesk-sys.workspace = true
 lindesk-ipc.workspace = true
 lindesk-changes.workspace = true
 # Only the threshold policy is needed (simulate's baseline); skip the desktop adapters.
-lindesk-builtins = { path = "../lindesk-builtins", version = "0.1.0", default-features = false }
+lindesk-builtins = { path = "../lindesk-builtins", version = "0.3.0", default-features = false }
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true

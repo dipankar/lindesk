@@ -155,6 +155,7 @@ pub fn default_for(knob: &Knob) -> Option<Setting> {
         Knob::IoWeight => Some(Setting::IoWeight { value: 100 }),
         Knob::UclampMin => Some(Setting::UclampMin { percent: 0.0 }),
         Knob::MemoryHigh => Some(Setting::MemoryHigh { bytes: None }),
+        Knob::MemoryLow => Some(Setting::MemoryLow { bytes: 0 }),
         _ => None,
     }
 }
@@ -168,7 +169,14 @@ impl Plugin for RecordingActuator {
 impl Actuator for RecordingActuator {
     fn caps(&self) -> ActuatorCaps {
         ActuatorCaps {
-            knobs: vec![Knob::CpuWeight, Knob::IoWeight, Knob::UclampMin, Knob::CpuIdle, Knob::MemoryHigh],
+            knobs: vec![
+                Knob::CpuWeight,
+                Knob::IoWeight,
+                Knob::UclampMin,
+                Knob::CpuIdle,
+                Knob::MemoryHigh,
+                Knob::MemoryLow,
+            ],
             targets: vec!["unit".into()],
         }
     }

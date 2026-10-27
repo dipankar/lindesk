@@ -30,6 +30,7 @@
 644 /usr/share/doc/lindesk/ARCHITECTURE.md
 644 /usr/share/doc/lindesk/README.md
 644 /usr/share/doc/lindesk/adapters.md
+644 /usr/share/doc/lindesk/latency.md
 644 /usr/share/fish/vendor_completions.d/lindeskctl.fish
 644 /usr/share/gnome-shell/extensions/lindesk@lindesk.org/extension.js
 644 /usr/share/gnome-shell/extensions/lindesk@lindesk.org/metadata.json

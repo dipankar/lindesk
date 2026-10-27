@@ -48,6 +48,10 @@ pub trait QoS {
     fn set_class(&self, pid: i32, class: &str) -> zbus::Result<()>;
     /// Record a free-form metric.
     fn report_metric(&self, name: &str, value: f64, labels: HashMap<String, String>) -> zbus::Result<()>;
+    /// One-hop dependency lease, 1..30000ms; 0 cancels this pair. Same uid only.
+    fn report_dependency(&self, client_pid: i32, server_pid: i32, ttl_ms: u32) -> zbus::Result<()>;
+    /// Bounded in-memory responsiveness history, available without telemetry storage.
+    fn latency_report(&self) -> zbus::Result<String>;
     /// JSON status.
     fn status(&self) -> zbus::Result<String>;
     /// JSON explanation for a pid or target string.
@@ -114,6 +118,8 @@ pub mod broker {
         /// screen; `"audible"`: play or record sound). The complete list each time.
         fn report_presence(&self, kind: &str, pids: Vec<i32>, app_ids: Vec<String>) -> zbus::Result<()>;
         fn set_class(&self, pid: i32, class: &str) -> zbus::Result<()>;
+        fn report_dependency(&self, client_pid: i32, server_pid: i32, ttl_ms: u32) -> zbus::Result<()>;
+        fn latency_report(&self) -> zbus::Result<String>;
         fn get_status(&self) -> zbus::Result<String>;
         fn explain(&self, what: &str) -> zbus::Result<String>;
         fn reload(&self) -> zbus::Result<()>;
