@@ -49,7 +49,7 @@ humantime = "2"
 bytesize = "2"
 ulid = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-arrow-array = "60"
+arrow-array = "59"
 arrow-schema = "60"
 parquet = { version = "60", default-features = false, features = ["arrow", "zstd"] }
 duckdb = { version = "1.10506", features = ["bundled"] }
