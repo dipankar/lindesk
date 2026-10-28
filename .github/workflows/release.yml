@@ -1,7 +1,7 @@
 name: Release
 
 # Tag `vX.Y.Z` (created by scripts/release.sh) → binaries and packages for x86_64 and
-# aarch64, SHA256SUMS and a GitHub Release with that version's CHANGELOG section.
+# aarch64, SHA256SUMS and a draft GitHub Release for final verification.
 # `workflow_dispatch` with dry_run=true builds everything and creates a *draft* release.
 
 on:
@@ -16,6 +16,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -53,7 +57,9 @@ jobs:
           export LINDESK_GIT_HASH="${GITHUB_SHA::7}"
           cargo build --release --locked -p lindeskd -p lindesk-session -p lindeskctl -p lindesk-bench -p lindesk-mcp
           cargo build --release --locked -p lindesk-data -p lindesk-telemetry-sink
-          ./target/release/lindeskctl --version
+          for binary in lindeskd lindesk-session lindeskctl lindesk-bench lindesk-mcp lindesk-data lindesk-telemetry-sink; do
+            ./target/release/"$binary" --version
+          done
       - name: .deb (core and telemetry)
         run: LINDESK_BIN_DIR=target/release ./packaging/build-packages.sh deb
       - name: RPM (Fedora)
@@ -70,8 +76,12 @@ jobs:
           mkdir -p "stage/$core" "stage/$tele"
           cp target/release/{lindeskd,lindesk-session,lindeskctl,lindesk-bench,lindesk-mcp} "stage/$core/"
           cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "stage/$core/"
+          cp THIRD-PARTY.md "stage/$core/"
+          cp packaging/debian/copyright "stage/$core/COPYRIGHT"
           cp target/release/{lindesk-data,lindesk-telemetry-sink} "stage/$tele/"
           cp LICENSE-MIT LICENSE-APACHE "stage/$tele/"
+          cp THIRD-PARTY.md "stage/$tele/"
+          cp packaging/debian/copyright "stage/$tele/COPYRIGHT"
           tar -C stage --zstd -cf "dist/$core.tar.zst" "$core"
           tar -C stage --zstd -cf "dist/$tele.tar.zst" "$tele"
           sudo chown -R "$(id -u)" dist
@@ -99,9 +109,12 @@ jobs:
           merge-multiple: true
       - name: Checksums and release notes
         run: |
+          v=$(awk -F'"' '/^\[workspace.package\]/ {p=1} p && /^version/ {print $2; exit}' Cargo.toml)
+          python3 scripts/check-release-assets.py dist "$v"
           cd dist
           rm -f ./*.src.rpm
           sha256sum -- * > SHA256SUMS
+          sha256sum -c SHA256SUMS
           cat SHA256SUMS
           cd ..
           v=$(awk -F'"' '/^\[workspace.package\]/ {p=1} p && /^version/ {print $2; exit}' Cargo.toml)
@@ -123,6 +136,6 @@ jobs:
           else
             pre=""
             case "$GITHUB_REF_NAME" in *-rc*|*-beta*|*-alpha*) pre="--prerelease" ;; esac
-            gh release create "$GITHUB_REF_NAME" dist/* $pre --verify-tag \
+            gh release create "$GITHUB_REF_NAME" dist/* $pre --verify-tag --draft \
               --title "lindesk $VERSION" --notes-file notes.md
           fi

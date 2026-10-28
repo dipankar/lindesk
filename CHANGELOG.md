@@ -5,7 +5,14 @@ API version (`lindesk_plugin_api::API_VERSION`) changes only on breaking protoco
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-10-09
+## [0.3.0] - 2026-10-28
+
+First public GitHub release, including the locally tested 0.1.x and 0.2.0 features.
+
+Packages: core and optional telemetry as Debian `.deb` and Fedora `.rpm` for x86_64
+and ARM64; Arch `.pkg.tar.zst` for x86_64; binary `.tar.zst` archives for both
+architectures. `SHA256SUMS` covers every attached package and archive. Debian packages
+are built on Ubuntu 24.04; use the package for your distribution and architecture.
 
 ### Added
 - Bounded in-memory latency observations and engine/PSI context, D-Bus `LatencyReport`,
@@ -19,9 +26,19 @@ API version (`lindesk_plugin_api::API_VERSION`) changes only on breaking protoco
   frame/audio, refault, jobserver, GPU-control and sched_ext research.
 
 ### Fixed
+- Reject partial benchmark pauses and verify both daemons' state at phase boundaries.
+- Start the telemetry maintenance timer in existing desktop sessions after installation.
+- Update locked TLS, Tokio and compression dependencies for current advisories; document
+  narrowly scoped exceptions for unused transitive APIs in `docs/RELEASING.md`.
 - Cancel further page-in work after focus changes/pause; check reclaim pressure and
   available-memory headroom before issuing additional requests.
 - Bound application metric names/labels and reject non-finite D-Bus values.
+
+### Measurement limits
+- The short local off/on storage comparison was inconclusive. Synthetic wakeup and read
+  timings do not establish input-to-display improvements; no universal speedup is claimed.
+- Refocus your application after a synthetic foreground benchmark if needed.
+- Packaged `lindesk-session` includes the GPL-3.0 COSMIC adapter; see `THIRD-PARTY.md`.
 
 ## [0.2.0] - 2026-10-09
 

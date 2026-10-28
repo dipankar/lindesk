@@ -15,7 +15,15 @@ yanked = "deny"
 unmaintained = "workspace"
 # An advisory we have looked at and accepted goes here with the reason, e.g.
 #   { id = "RUSTSEC-0000-0000", reason = "only reachable through X, which we don't use" },
-ignore = []
+ignore = [
+    # Reviewed for the locked v0.3.0 release; evidence and scope in docs/RELEASING.md.
+    { id = "RUSTSEC-2026-0367", reason = "zip 6 is a libduckdb-sys build dependency; its extraction module is cfg(not(bundled)), excluded by our mandatory bundled feature" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 6 extraction is excluded from our bundled DuckDB build, not used by the shipped binaries" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 6 extraction is excluded from our bundled DuckDB build, not used by the shipped binaries" },
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.13 is used only by pinned vortex-zstd 0.87 via bulk APIs, not the affected stream with_context constructors" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7 is used only via Vortex bulk APIs; seekable is not enabled or called" },
+    { id = "RUSTSEC-2026-0403", reason = "Vortex uses zstd bulk decompression, explicitly unaffected by the streaming legacy-frame advisory" },
+]
 
 [licenses]
 version = 2
