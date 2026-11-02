@@ -30,7 +30,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # rust-toolchain.toml pins the toolchain; local builds and CI use the same one.
       - run: rustup toolchain install && rustup show
       - uses: Swatinem/rust-cache@v2
@@ -48,7 +48,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: rustup toolchain install && rustup show
       - uses: Swatinem/rust-cache@v2
         with:
@@ -76,7 +76,7 @@ jobs:
     name: core links no DuckDB/Vortex
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: rustup toolchain install
       # docs/ARCHITECTURE.md, "Cargo feature hygiene": only lindesk-data and
       # lindesk-telemetry-sink may link the telemetry stack.
@@ -93,7 +93,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install the MSRV toolchain from Cargo.toml
         run: |
           msrv=$(awk -F'"' '/^rust-version/ {print $2; exit}' Cargo.toml)
@@ -111,7 +111,7 @@ jobs:
     # Shows what the next toolchain bump will flag; never blocks a merge.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: rustup toolchain install stable --profile minimal --component clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -122,7 +122,7 @@ jobs:
     name: licences + advisories
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
@@ -138,7 +138,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: rustup toolchain install && rustup show
       - uses: Swatinem/rust-cache@v2
         with:
@@ -215,7 +215,7 @@ jobs:
             test -f /usr/lib/lindesk/plugins/telemetry/plugin.toml
             dnf remove -y -q lindesk-telemetry lindesk
             test ! -e /usr/bin/lindeskd'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: packages
           path: |
